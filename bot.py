@@ -1,11 +1,17 @@
 import asyncio
+import os
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-TOKEN = "8816083749:AAE70CmQAbBXvmSTzWl60Fod2Jk5w3nKWkQ"
+TOKEN = os.getenv("BOT_TOKEN")
+
+if not TOKEN:
+    raise ValueError("BOT_TOKEN is not set")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
@@ -21,19 +27,29 @@ async def start(message: types.Message):
         )
     )
 
+
 @dp.message(lambda m: m.text == "Прайс")
 async def price(message: types.Message):
-    await message.answer("Наш прайс:\n\nТовар 1 - 10 евро\nТовар 2 - 20 евро")
+    await message.answer(
+        "Наш прайс:\n\n"
+        "Товар 1 — 10 евро\n"
+        "Товар 2 — 20 евро"
+    )
+
 
 @dp.message(lambda m: m.text == "Сделать заказ")
 async def order(message: types.Message):
-    await message.answer("Напиши что хочешь заказать!")
+    await message.answer("Напиши, что хочешь заказать!")
+
 
 @dp.message(lambda m: m.text == "Контакты")
 async def contacts(message: types.Message):
     await message.answer("Контакты: @твой_ник")
 
+
 async def main():
     await dp.start_polling(bot)
 
-asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())
