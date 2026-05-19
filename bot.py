@@ -211,7 +211,7 @@ async def choose_weight(callback: types.CallbackQuery):
     )
 
     await callback.answer()
-    @dp.callback_query(F.data == "support")
+@dp.callback_query(F.data == "support")
 async def support(callback: types.CallbackQuery):
 
     config = load_json("config.json")
