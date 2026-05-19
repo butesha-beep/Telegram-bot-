@@ -202,15 +202,38 @@ async def choose_weight(callback: types.CallbackQuery):
 
     price = product["price_per_kg"] * weight / 1000
 
-    await callback.message.answer(
-        f"✅ Вы выбрали:\n\n"
-        f"Товар: {product['name']}\n"
-        f"Вес: {weight} г\n"
-        f"Сумма: {price:.2f} €\n\n"
-        f"Следующий шаг: оформление заказа."
-    )
+    config = load_json("config.json")
+order_id = callback.from_user.id + int(asyncio.get_event_loop().time())
 
-    await callback.answer()
+username = callback.from_user.username
+if username:
+    user_text = f"@{username}"
+else:
+    user_text = f"ID: {callback.from_user.id}"
+
+order_text = (
+    f"🧾 Заказ #{order_id}\n\n"
+    f"Товар: {product['name']}\n"
+    f"Вес: {weight} г\n"
+    f"Сумма: {price:.2f} €\n\n"
+    f"Покупатель: {user_text}"
+)
+
+await callback.message.answer(
+    f"✅ Заказ создан!\n\n"
+    f"Номер заказа: #{order_id}\n"
+    f"Товар: {product['name']}\n"
+    f"Вес: {weight} г\n"
+    f"Сумма: {price:.2f} €\n\n"
+    f"Отправьте номер заказа продавцу."
+)
+
+await bot.send_message(
+    chat_id=config["admin_id"],
+    text=f"📦 Новый заказ!\n\n{order_text}"
+)
+
+await callback.answer()
 @dp.callback_query(F.data == "support")
 async def support(callback: types.CallbackQuery):
 
