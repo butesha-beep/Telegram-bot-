@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "category_id": 1,
+    "name": "Янтарная с перцем",
+    "price_per_kg": 35,
+    "photo": "https://ibb.co/S4HdV0J7",
+    "description": "Рыбная закуска с перцем",
+    "available": true
+  }
+]
