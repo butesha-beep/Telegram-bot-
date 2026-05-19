@@ -104,7 +104,7 @@ async def show_category(callback: types.CallbackQuery):
     )
 
     await callback.answer()
-    @dp.callback_query(F.data.startswith("product_"))
+@dp.callback_query(F.data.startswith("product_"))
 async def show_product(callback: types.CallbackQuery):
 
     product_id = int(callback.data.split("_")[1])
