@@ -96,7 +96,7 @@ async def show_category(callback: types.CallbackQuery):
         )
     ])
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         "Выберите товар:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=keyboard
@@ -226,7 +226,7 @@ async def support(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         "Выберите категорию товара ниже:",
         reply_markup=main_menu()
     )
