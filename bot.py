@@ -595,7 +595,6 @@ async def handle_order_data(message: types.Message):
             text=f"📦 Новый заказ!\n\n{order_text}"
         )
 
-del pending_orders[user_id]
 
 
 @dp.callback_query(F.data == "checkout")
