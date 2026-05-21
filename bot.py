@@ -547,8 +547,9 @@ async def checkout(callback: types.CallbackQuery):
 
     await callback.answer()
 
-    async def main():
-     init_db()
+
+async def main():
+    init_db()
     await dp.start_polling(bot)
 
 
