@@ -228,6 +228,60 @@ async def choose_weight(callback: types.CallbackQuery):
     )
 
     await callback.answer()
+    @dp.callback_query(F.data.startswith("order_"))
+async def create_order(callback: types.CallbackQuery):
+
+    _, product_id, weight = callback.data.split("_")
+
+    product_id = int(product_id)
+    weight = int(weight)
+
+    products = load_json("products.json")
+    config = load_json("config.json")
+
+    product = next(
+        (p for p in products if p["id"] == product_id),
+        None
+    )
+
+    if not product:
+        await callback.message.answer("❌ Товар не найден.")
+        await callback.answer()
+        return
+
+    price = product["price_per_kg"] * weight / 1000
+    order_id = callback.from_user.id + int(asyncio.get_event_loop().time())
+
+    username = callback.from_user.username
+    if username:
+        user_text = f"@{username}"
+    else:
+        user_text = f"ID: {callback.from_user.id}"
+
+    order_text = (
+        f"🧾 Заказ #{order_id}\n\n"
+        f"Товар: {product['name']}\n"
+        f"Вес: {weight} г\n"
+        f"Сумма: {price:.2f} €\n\n"
+        f"Покупатель: {user_text}"
+    )
+
+    await callback.message.answer(
+        f"✅ Заказ оформлен!\n\n"
+        f"Номер заказа: #{order_id}\n"
+        f"Товар: {product['name']}\n"
+        f"Вес: {weight} г\n"
+        f"Сумма: {price:.2f} €\n\n"
+        f"💳 Следующий шаг: оплата.\n"
+        f"Отправьте номер заказа продавцу."
+    )
+
+    await bot.send_message(
+        chat_id=config["admin_id"],
+        text=f"📦 Новый заказ!\n\n{order_text}"
+    )
+
+    await callback.answer()
 @dp.callback_query(F.data == "support")
 async def support(callback: types.CallbackQuery):
 
