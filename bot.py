@@ -472,9 +472,47 @@ async def show_cart(callback: types.CallbackQuery):
 )
 
     await callback.answer()
+@dp.callback_query(F.data == "clear_cart")
+async def clear_cart(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
 
+    cursor.execute(
+        "DELETE FROM cart_items WHERE telegram_id = ?",
+        (callback.from_user.id,)
+    )
+
+    conn.commit()
+    conn.close()
+@dp.callback_query(F.data == "checkout")
+async def checkout(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "✅ Оформление заказа пока в разработке.\n\n"
+        "Следующий шаг — мы сделаем создание общего заказа из корзины."
+    )
+
+    await callback.answer()
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
+
+
+
+    await callback.message.answer(
+        "🗑 Корзина очищена.",
+        reply_markup=main_menu()
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "checkout")
+async def checkout(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "✅ Оформление заказа пока в разработке.\n\n"
+        "Следующий шаг — мы сделаем создание общего заказа из корзины."
+    )
+
+    await callback.answer()
 
     await callback.message.answer(
         "Выберите категорию товара ниже:",
