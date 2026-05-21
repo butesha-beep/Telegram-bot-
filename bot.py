@@ -623,6 +623,14 @@ conn.close()
 
 del pending_orders[user_id]
 
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "Выберите категорию товара ниже:",
+        reply_markup=main_menu()
+    )
+
+    await callback.answer()
 @dp.callback_query(F.data == "checkout")
 async def checkout(callback: types.CallbackQuery):
     conn = sqlite3.connect(DB_NAME)
