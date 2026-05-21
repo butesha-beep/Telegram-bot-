@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sqlite3
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,11 +17,50 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+DB_NAME = "shop.db"
 
 
 def load_json(filename):
     with open(filename, "r", encoding="utf-8") as file:
         return json.load(file)
+    
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS clients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE,
+            username TEXT,
+            first_name TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def save_client(user):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO clients (
+            telegram_id,
+            username,
+            first_name
+        )
+        VALUES (?, ?, ?)
+    """, (
+        user.id,
+        user.username,
+        user.first_name
+    ))
+
+    conn.commit()
+    conn.close()
 
 
 def main_menu():
@@ -50,6 +90,8 @@ def main_menu():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
+    save_client(message.from_user)
+
     config = load_json("config.json")
 
     await message.answer(
@@ -306,6 +348,7 @@ async def back_to_menu(callback: types.CallbackQuery):
 
 
 async def main():
+    init_db()
     await dp.start_polling(bot)
 
 
