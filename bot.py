@@ -18,7 +18,7 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 DB_NAME = "shop.db"
-
+pending_orders = {}
 
 def load_json(filename):
     with open(filename, "r", encoding="utf-8") as file:
@@ -497,7 +497,24 @@ async def clear_cart(callback: types.CallbackQuery):
     )
 
     await callback.answer()
+@dp.message()
+async def handle_order_data(message: types.Message):
+    user_id = message.from_user.id
 
+    if user_id not in pending_orders:
+        return
+
+    step = pending_orders[user_id]["step"]
+
+    if step == "phone":
+        pending_orders[user_id]["phone"] = message.text
+        pending_orders[user_id]["step"] = "address"
+
+        await message.answer(
+            "🏠 Теперь введите адрес доставки:"
+        )
+
+        return
 
 @dp.callback_query(F.data == "checkout")
 async def checkout(callback: types.CallbackQuery):
@@ -511,77 +528,20 @@ async def checkout(callback: types.CallbackQuery):
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
+    conn.close()
 
     if not cart_items:
-        conn.close()
         await callback.message.answer("🛒 Корзина пустая.")
         await callback.answer()
         return
 
-    products = load_json("products.json")
-    config = load_json("config.json")
-
-    order_id = callback.from_user.id + int(asyncio.get_event_loop().time())
-
-    username = callback.from_user.username
-    if username:
-        user_text = f"@{username}"
-    else:
-        user_text = f"ID: {callback.from_user.id}"
-
-    order_text = f"🧾 Заказ #{order_id}\n\n"
-    total = 0
-
-    for product_id, weight in cart_items:
-        product = next(
-            (p for p in products if p["id"] == product_id),
-            None
-        )
-
-        if not product:
-            continue
-
-        price = product["price_per_kg"] * weight / 1000
-        total += price
-
-        order_text += (
-            f"• {product['name']}\n"
-            f"  Вес: {weight} г\n"
-            f"  Сумма: {price:.2f} €\n\n"
-        )
-
-    order_text += (
-        f"💰 Итого: {total:.2f} €\n\n"
-        f"Покупатель: {user_text}"
-    )
-
-    cursor.execute(
-        "DELETE FROM cart_items WHERE telegram_id = ?",
-        (callback.from_user.id,)
-    )
-
-    conn.commit()
-    conn.close()
+    pending_orders[callback.from_user.id] = {
+        "cart_items": cart_items,
+        "step": "phone"
+    }
 
     await callback.message.answer(
-        f"✅ Заказ оформлен!\n\n"
-        f"Номер заказа: #{order_id}\n"
-        f"Сумма: {total:.2f} €\n\n"
-        f"Отправьте номер заказа продавцу для оплаты."
-    )
-
-    await bot.send_message(
-        chat_id=config["admin_id"],
-        text=f"📦 Новый заказ из корзины!\n\n{order_text}"
+        "📞 Введите ваш номер телефона для связи:"
     )
 
     await callback.answer()
-
-
-async def main():
-    init_db()
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
