@@ -257,9 +257,9 @@ async def choose_weight(callback: types.CallbackQuery):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Оформить заказ",
-                    callback_data=f"order_{product_id}_{weight}"
-                )
+    text="🛒 Добавить в корзину",
+    callback_data=f"cart_add_{product_id}_{weight}"
+)
             ],
             [
                 InlineKeyboardButton(
@@ -276,6 +276,38 @@ async def choose_weight(callback: types.CallbackQuery):
         f"Вес: {weight} г\n"
         f"Сумма: {price:.2f} €",
         reply_markup=keyboard
+    )
+
+    await callback.answer()
+    @dp.callback_query(F.data.startswith("cart_add_"))
+async def add_to_cart(callback: types.CallbackQuery):
+    _, _, product_id, weight = callback.data.split("_")
+
+    product_id = int(product_id)
+    weight = int(weight)
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO cart_items (
+            telegram_id,
+            product_id,
+            weight
+        )
+        VALUES (?, ?, ?)
+    """, (
+        callback.from_user.id,
+        product_id,
+        weight
+    ))
+
+    conn.commit()
+    conn.close()
+
+    await callback.message.answer(
+        "🛒 Товар добавлен в корзину.\n\n"
+        "Можешь выбрать ещё товары."
     )
 
     await callback.answer()
