@@ -279,7 +279,7 @@ async def choose_weight(callback: types.CallbackQuery):
     )
 
     await callback.answer()
-    @dp.callback_query(F.data.startswith("cart_add_"))
+@dp.callback_query(F.data.startswith("cart_add_"))
 async def add_to_cart(callback: types.CallbackQuery):
     _, _, product_id, weight = callback.data.split("_")
 
