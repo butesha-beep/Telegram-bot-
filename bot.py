@@ -47,6 +47,18 @@ def init_db():
         weight INTEGER
     )
 """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER,
+            telegram_id INTEGER,
+            username TEXT,
+            phone TEXT,
+            address TEXT,
+            total REAL,
+            status TEXT
+        )
+    """)
 
     conn.commit()
     conn.close()
