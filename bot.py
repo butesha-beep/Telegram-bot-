@@ -501,36 +501,78 @@ async def clear_cart(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "checkout")
 async def checkout(callback: types.CallbackQuery):
-    await callback.message.answer(
-        "✅ Оформление заказа пока в разработке.\n\n"
-        "Следующий шаг — мы сделаем создание общего заказа из корзины."
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT product_id, weight
+        FROM cart_items
+        WHERE telegram_id = ?
+    """, (callback.from_user.id,))
+
+    cart_items = cursor.fetchall()
+
+    if not cart_items:
+        conn.close()
+        await callback.message.answer("🛒 Корзина пустая.")
+        await callback.answer()
+        return
+
+    products = load_json("products.json")
+    config = load_json("config.json")
+
+    order_id = callback.from_user.id + int(asyncio.get_event_loop().time())
+
+    username = callback.from_user.username
+    if username:
+        user_text = f"@{username}"
+    else:
+        user_text = f"ID: {callback.from_user.id}"
+
+    order_text = f"🧾 Заказ #{order_id}\n\n"
+    total = 0
+
+    for product_id, weight in cart_items:
+        product = next(
+            (p for p in products if p["id"] == product_id),
+            None
+        )
+
+        if not product:
+            continue
+
+        price = product["price_per_kg"] * weight / 1000
+        total += price
+
+        order_text += (
+            f"• {product['name']}\n"
+            f"  Вес: {weight} г\n"
+            f"  Сумма: {price:.2f} €\n\n"
+        )
+
+    order_text += (
+        f"💰 Итого: {total:.2f} €\n\n"
+        f"Покупатель: {user_text}"
     )
 
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: types.CallbackQuery):
-    await callback.message.answer(
-        "Выберите категорию товара ниже:",
-        reply_markup=main_menu()
+    cursor.execute(
+        "DELETE FROM cart_items WHERE telegram_id = ?",
+        (callback.from_user.id,)
     )
 
-    await callback.answer()
+    conn.commit()
+    conn.close()
 
-
-@dp.callback_query(F.data == "checkout")
-async def checkout(callback: types.CallbackQuery):
     await callback.message.answer(
-        "✅ Оформление заказа пока в разработке.\n\n"
-        "Следующий шаг — мы сделаем создание общего заказа из корзины."
+        f"✅ Заказ оформлен!\n\n"
+        f"Номер заказа: #{order_id}\n"
+        f"Сумма: {total:.2f} €\n\n"
+        f"Отправьте номер заказа продавцу для оплаты."
     )
 
-    await callback.answer()
-
-    await callback.message.answer(
-        "Выберите категорию товара ниже:",
-        reply_markup=main_menu()
+    await bot.send_message(
+        chat_id=config["admin_id"],
+        text=f"📦 Новый заказ из корзины!\n\n{order_text}"
     )
 
     await callback.answer()
