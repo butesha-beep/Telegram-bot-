@@ -583,14 +583,18 @@ async def handle_order_data(message: types.Message):
         conn.commit()
         conn.close()
 
-        await message.answer(
-            f"✅ Заказ оформлен!\n\n"
-            f"Номер заказа: #{order_id}\n"
-            f"Сумма: {total:.2f} €\n\n"
-            f"Мы свяжемся с вами для подтверждения."
-        )
+    await message.answer(
+    f"✅ Заказ оформлен!\n\n"
+    f"Номер заказа: #{order_id}\n"
+    f"Сумма: {total:.2f} €\n\n"
+    f"💳 Выберите способ оплаты:\n\n"
+    f"🏦 IBAN / Bank Transfer\n"
+    f"💬 PayPal\n"
+    f"💵 Оплата наличкой при встрече"
+)
+        
 
-        await bot.send_message(
+    await bot.send_message(
             chat_id=config["admin_id"],
             text=f"📦 Новый заказ!\n\n{order_text}"
         )
@@ -635,7 +639,7 @@ async def back_to_menu(callback: types.CallbackQuery):
     )
 
     await callback.answer()
-    
+
 async def main():
     init_db()
     await dp.start_polling(bot)
