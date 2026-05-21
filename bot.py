@@ -585,6 +585,38 @@ async def handle_order_data(message: types.Message):
 
         del pending_orders[user_id]
 
+
+@dp.callback_query(F.data == "checkout")
+async def checkout(callback: types.CallbackQuery):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT product_id, weight
+        FROM cart_items
+        WHERE telegram_id = ?
+    """, (callback.from_user.id,))
+
+    cart_items = cursor.fetchall()
+    conn.close()
+
+    if not cart_items:
+        await callback.message.answer("🛒 Корзина пустая.")
+        await callback.answer()
+        return
+
+    pending_orders[callback.from_user.id] = {
+        "cart_items": cart_items,
+        "step": "phone"
+    }
+
+    await callback.message.answer(
+        "📞 Введите ваш номер телефона для связи:"
+    )
+
+    await callback.answer()
+
+
 async def main():
     init_db()
     await dp.start_polling(bot)
