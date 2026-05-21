@@ -38,6 +38,15 @@ def init_db():
         )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS cart_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER,
+        product_id INTEGER,
+        weight INTEGER
+    )
+""")
+
     conn.commit()
     conn.close()
 
