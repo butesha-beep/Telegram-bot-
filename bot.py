@@ -595,9 +595,42 @@ async def handle_order_data(message: types.Message):
             text=f"📦 Новый заказ!\n\n{order_text}"
         )
 
-        del pending_orders[user_id]
+conn = sqlite3.connect(DB_NAME)
+cursor = conn.cursor()
+cursor.execute("""
+            INSERT INTO orders (
+                order_id,
+                telegram_id,
+                username,
+                phone,
+                address,
+                total,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            order_id,
+            user_id,
+            username,
+            phone,
+            address,
+            total,
+            "new"
+        ))
 
+conn.commit()
+conn.close()
 
+del pending_orders[user_id]
+
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "Выберите категорию товара ниже:",
+        reply_markup=main_menu()
+    )
+
+    await callback.answer()
 @dp.callback_query(F.data == "checkout")
 async def checkout(callback: types.CallbackQuery):
     conn = sqlite3.connect(DB_NAME)
