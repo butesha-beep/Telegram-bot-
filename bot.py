@@ -228,7 +228,7 @@ async def choose_weight(callback: types.CallbackQuery):
     )
 
     await callback.answer()
-    @dp.callback_query(F.data.startswith("order_"))
+@dp.callback_query(F.data.startswith("order_"))
 async def create_order(callback: types.CallbackQuery):
 
     _, product_id, weight = callback.data.split("_")
