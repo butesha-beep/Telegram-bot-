@@ -595,32 +595,6 @@ async def handle_order_data(message: types.Message):
             text=f"📦 Новый заказ!\n\n{order_text}"
         )
 
-conn = sqlite3.connect(DB_NAME)
-cursor = conn.cursor()
-cursor.execute("""
-            INSERT INTO orders (
-                order_id,
-                telegram_id,
-                username,
-                phone,
-                address,
-                total,
-                status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            order_id,
-            user_id,
-            username,
-            phone,
-            address,
-            total,
-            "new"
-        ))
-
-conn.commit()
-conn.close()
-
 del pending_orders[user_id]
 
 
