@@ -285,6 +285,7 @@ async def choose_weight(callback: types.CallbackQuery):
     )
 
     await callback.answer()
+
 @dp.callback_query(F.data.startswith("cart_add_"))
 async def add_to_cart(callback: types.CallbackQuery):
     _, _, product_id, weight = callback.data.split("_")
@@ -311,12 +312,31 @@ async def add_to_cart(callback: types.CallbackQuery):
     conn.commit()
     conn.close()
 
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🏠 Главное меню",
+                    callback_data="back_to_menu"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🛒 Корзина",
+                    callback_data="cart"
+                )
+            ]
+        ]
+    )
+
     await callback.message.answer(
         "🛒 Товар добавлен в корзину.\n\n"
-        "Можешь выбрать ещё товары."
+        "Можешь выбрать ещё товары или открыть корзину.",
+        reply_markup=keyboard
     )
 
     await callback.answer()
+
 @dp.callback_query(F.data.startswith("order_"))
 async def create_order(callback: types.CallbackQuery):
 
@@ -381,7 +401,6 @@ async def support(callback: types.CallbackQuery):
     )
 
     await callback.answer()
-
 @dp.callback_query(F.data == "cart")
 async def show_cart(callback: types.CallbackQuery):
 
