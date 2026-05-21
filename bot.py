@@ -462,7 +462,13 @@ async def show_cart(callback: types.CallbackQuery):
                 text="🗑 Очистить корзину",
                 callback_data="clear_cart"
             )
-        ]
+        ],
+        [
+    InlineKeyboardButton(
+        text="🏠 Главное меню",
+        callback_data="back_to_menu"
+    )
+]
     ]
 )
 
@@ -484,6 +490,15 @@ async def clear_cart(callback: types.CallbackQuery):
 
     conn.commit()
     conn.close()
+
+    await callback.message.answer(
+        "🗑 Корзина очищена.",
+        reply_markup=main_menu()
+    )
+
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "checkout")
 async def checkout(callback: types.CallbackQuery):
     await callback.message.answer(
@@ -492,13 +507,12 @@ async def checkout(callback: types.CallbackQuery):
     )
 
     await callback.answer()
+
+
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
-
-
-
     await callback.message.answer(
-        "🗑 Корзина очищена.",
+        "Выберите категорию товара ниже:",
         reply_markup=main_menu()
     )
 
