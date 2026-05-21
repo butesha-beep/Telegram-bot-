@@ -430,7 +430,27 @@ async def show_cart(callback: types.CallbackQuery):
 
     text += f"💰 Общая сумма: {total:.2f} €"
 
-    await callback.message.answer(text)
+    keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Оформить заказ",
+                callback_data="checkout"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🗑 Очистить корзину",
+                callback_data="clear_cart"
+            )
+        ]
+    ]
+)
+
+    await callback.message.answer(
+    text,
+    reply_markup=keyboard
+)
 
     await callback.answer()
 
