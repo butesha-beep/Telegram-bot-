@@ -91,7 +91,13 @@ def main_menu():
             callback_data="support"
         )
     ])
-
+    keyboard.append([
+    InlineKeyboardButton(
+        text="🛒 Корзина",
+        callback_data="cart"
+    )
+])
+    
     return InlineKeyboardMarkup(
         inline_keyboard=keyboard
     )
@@ -376,6 +382,57 @@ async def support(callback: types.CallbackQuery):
 
     await callback.answer()
 
+@dp.callback_query(F.data == "cart")
+async def show_cart(callback: types.CallbackQuery):
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT product_id, weight
+        FROM cart_items
+        WHERE telegram_id = ?
+    """, (callback.from_user.id,))
+
+    cart_items = cursor.fetchall()
+    conn.close()
+
+    if not cart_items:
+        await callback.message.answer(
+            "🛒 Корзина пустая."
+        )
+        await callback.answer()
+        return
+
+    products = load_json("products.json")
+
+    text = "🛒 Ваша корзина:\n\n"
+    total = 0
+
+    for product_id, weight in cart_items:
+
+        product = next(
+            (p for p in products if p["id"] == product_id),
+            None
+        )
+
+        if not product:
+            continue
+
+        price = product["price_per_kg"] * weight / 1000
+        total += price
+
+        text += (
+            f"• {product['name']}\n"
+            f"  Вес: {weight} г\n"
+            f"  Сумма: {price:.2f} €\n\n"
+        )
+
+    text += f"💰 Общая сумма: {total:.2f} €"
+
+    await callback.message.answer(text)
+
+    await callback.answer()
 
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
