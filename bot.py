@@ -514,39 +514,76 @@ async def handle_order_data(message: types.Message):
         await message.answer(
             "🏠 Теперь введите адрес доставки:"
         )
-
         return
 
-@dp.callback_query(F.data == "checkout")
-async def checkout(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    if step == "address":
+        pending_orders[user_id]["address"] = message.text
 
-    cursor.execute("""
-        SELECT product_id, weight
-        FROM cart_items
-        WHERE telegram_id = ?
-    """, (callback.from_user.id,))
+        cart_items = pending_orders[user_id]["cart_items"]
+        phone = pending_orders[user_id]["phone"]
+        address = pending_orders[user_id]["address"]
 
-    cart_items = cursor.fetchall()
-    conn.close()
+        products = load_json("products.json")
+        config = load_json("config.json")
 
-    if not cart_items:
-        await callback.message.answer("🛒 Корзина пустая.")
-        await callback.answer()
-        return
+        order_id = user_id + int(asyncio.get_event_loop().time())
 
-    pending_orders[callback.from_user.id] = {
-        "cart_items": cart_items,
-        "step": "phone"
-    }
+        username = message.from_user.username
+        if username:
+            user_text = f"@{username}"
+        else:
+            user_text = f"ID: {user_id}"
 
-    await callback.message.answer(
-        "📞 Введите ваш номер телефона для связи:"
-    )
+        order_text = f"🧾 Заказ #{order_id}\n\n"
+        total = 0
 
-    await callback.answer()
+        for product_id, weight in cart_items:
+            product = next(
+                (p for p in products if p["id"] == product_id),
+                None
+            )
 
+            if not product:
+                continue
+
+            price = product["price_per_kg"] * weight / 1000
+            total += price
+
+            order_text += (
+                f"• {product['name']}\n"
+                f"  Вес: {weight} г\n"
+                f"  Сумма: {price:.2f} €\n\n"
+            )
+
+        order_text += (
+            f"💰 Итого: {total:.2f} €\n\n"
+            f"👤 Покупатель: {user_text}\n"
+            f"📞 Телефон: {phone}\n"
+            f"🏠 Адрес: {address}"
+        )
+
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM cart_items WHERE telegram_id = ?",
+            (user_id,)
+        )
+        conn.commit()
+        conn.close()
+
+        await message.answer(
+            f"✅ Заказ оформлен!\n\n"
+            f"Номер заказа: #{order_id}\n"
+            f"Сумма: {total:.2f} €\n\n"
+            f"Мы свяжемся с вами для подтверждения."
+        )
+
+        await bot.send_message(
+            chat_id=config["admin_id"],
+            text=f"📦 Новый заказ!\n\n{order_text}"
+        )
+
+        del pending_orders[user_id]
 
 async def main():
     init_db()
