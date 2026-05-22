@@ -78,6 +78,14 @@ def init_db():
         )
     """)
     try:
+        cursor.execute("ALTER TABLE orders ALTER COLUMN order_id TYPE BIGINT")
+        cursor.execute("ALTER TABLE orders ALTER COLUMN telegram_id TYPE BIGINT")
+        conn.commit()
+    except Exception as e:
+        print("ORDERS BIGINT MIGRATION ERROR:", e)
+        conn.rollback()
+
+    try:
         cursor.execute(
             "ALTER TABLE orders ADD COLUMN payment_method TEXT"
         )
