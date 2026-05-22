@@ -667,11 +667,29 @@ async def pay_iban(callback: types.CallbackQuery):
 async def pay_paypal(callback: types.CallbackQuery):
     config = load_json("config.json")
 
+    paid_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Я оплатил",
+                    callback_data="payment_done"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 Главное меню",
+                    callback_data="back_to_menu"
+                )
+            ]
+        ]
+    )
+
     await callback.message.answer(
         f"💬 Оплата через PayPal\n\n"
         f"PayPal: {config['paypal']}\n\n"
         f"В комментарии укажите номер заказа.\n"
-        f"После оплаты отправьте скрин продавцу."
+        f"После оплаты нажмите кнопку ниже.",
+        reply_markup=paid_keyboard
     )
 
     await callback.answer()
