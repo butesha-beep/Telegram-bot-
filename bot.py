@@ -587,10 +587,8 @@ async def handle_order_data(message: types.Message):
     f"✅ Заказ оформлен!\n\n"
     f"Номер заказа: #{order_id}\n"
     f"Сумма: {total:.2f} €\n\n"
-    f"💳 Выберите способ оплаты:\n\n"
-    f"🏦 IBAN / Bank Transfer\n"
-    f"💬 PayPal\n"
-    f"💵 Оплата наличкой при встрече"
+    f"💳 Выберите способ оплаты:",
+    reply_markup=payment_menu()
 )
         
 
@@ -639,6 +637,36 @@ async def back_to_menu(callback: types.CallbackQuery):
     )
 
     await callback.answer()
+
+def payment_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🏦 Оплата IBAN",
+                    callback_data="pay_iban"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💵 Оплата наличкой",
+                    callback_data="pay_cash"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🅿️ PayPal",
+                    callback_data="pay_paypal"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 Главное меню",
+                    callback_data="back_to_menu"
+                )
+            ]
+        ]
+    )
 
 async def main():
     init_db()
