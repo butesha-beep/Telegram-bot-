@@ -843,13 +843,13 @@ async def checkout(callback: types.CallbackQuery):
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="✅ Use saved data",
+                        text="✅ Использовать сохранённые данные",
                         callback_data="use_saved_data"
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        text="✏️ Enter new data",
+                        text="✏️ Ввести новые данные",
                         callback_data="enter_new_data"
                     )
                 ]
