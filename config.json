@@ -1,12 +1,7 @@
 {
   "brand_name": "Deal Market NL",
   "support_username": "@Deal_MarketNL",
-  "currency": "EUR" ,
-  "admin_id": 5487279104
-},
-{
-  "brand_name": "Deal Market NL",
-  "support_username": "@твой_ник",
+  "currency": "EUR",
   "admin_id": 5487279104,
   "iban": "NL00BANK0000000000",
   "receiver_name": "Vladyslav Butenko",
