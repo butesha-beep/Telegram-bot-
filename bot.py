@@ -71,7 +71,7 @@ cursor.execute("""
         weight INTEGER
     )
 """)
-    cursor.execute("""
+cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
             order_id INTEGER,
@@ -83,15 +83,15 @@ cursor.execute("""
             status TEXT
         )
     """)
-    try:
+try:
         cursor.execute(
             "ALTER TABLE orders ADD COLUMN payment_method TEXT"
     )
-    except:
+except:
         conn.rollback()
 
-    conn.commit()
-    conn.close()
+conn.commit()
+conn.close()
 
 
 def save_client(user):
