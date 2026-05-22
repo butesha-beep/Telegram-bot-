@@ -669,6 +669,7 @@ async def handle_order_data(message: types.Message):
     if step == "phone":
         pending_orders[user_id]["phone"] = message.text
         pending_orders[user_id]["step"] = "address"
+        print(f"CHECKOUT PHONE SAVED {user_id}: {message.text}")
 
         await message.answer(
             "🏠 Теперь введите адрес доставки:"
@@ -677,100 +678,114 @@ async def handle_order_data(message: types.Message):
 
     if step == "address":
         pending_orders[user_id]["address"] = message.text
+        print(f"CHECKOUT ADDRESS SAVED {user_id}: {message.text}")
 
-        cart_items = pending_orders[user_id]["cart_items"]
-        phone = pending_orders[user_id]["phone"]
-        address = pending_orders[user_id]["address"]
+        try:
+            cart_items = pending_orders[user_id]["cart_items"]
+            phone = pending_orders[user_id]["phone"]
+            address = pending_orders[user_id]["address"]
 
-        products = load_json("products.json")
-        config = load_json("config.json")
+            products = load_json("products.json")
+            config = load_json("config.json")
 
-        order_id = user_id + int(asyncio.get_event_loop().time())
+            order_id = user_id + int(asyncio.get_event_loop().time())
 
-        username = message.from_user.username
-        if username:
-            user_text = f"@{username}"
-        else:
-            user_text = f"ID: {user_id}"
+            username = message.from_user.username
+            if username:
+                user_text = f"@{username}"
+            else:
+                user_text = f"ID: {user_id}"
 
-        order_text = f"🧾 Заказ #{order_id}\n\n"
-        total = 0
+            order_text = f"🧾 Заказ #{order_id}\n\n"
+            total = 0
 
-        for product_id, weight in cart_items:
-            product = next(
-                (p for p in products if p["id"] == product_id),
-                None
-            )
+            for product_id, weight in cart_items:
+                product = next(
+                    (p for p in products if p["id"] == product_id),
+                    None
+                )
 
-            if not product:
-                continue
+                if not product:
+                    continue
 
-            price = product["price_per_kg"] * weight / 1000
-            total += price
+                price = product["price_per_kg"] * weight / 1000
+                total += price
+
+                order_text += (
+                    f"• {product['name']}\n"
+                    f"  Вес: {weight} г\n"
+                    f"  Сумма: {price:.2f} €\n\n"
+                )
 
             order_text += (
-                f"• {product['name']}\n"
-                f"  Вес: {weight} г\n"
-                f"  Сумма: {price:.2f} €\n\n"
+                f"💰 Итого: {total:.2f} €\n\n"
+                f"👤 Покупатель: {user_text}\n"
+                f"📞 Телефон: {phone}\n"
+                f"🏠 Адрес: {address}"
             )
 
-        order_text += (
-            f"💰 Итого: {total:.2f} €\n\n"
-            f"👤 Покупатель: {user_text}\n"
-            f"📞 Телефон: {phone}\n"
-            f"🏠 Адрес: {address}"
-        )
-
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        
-        # Save order to database
-        cursor.execute("""
-            INSERT INTO orders (
+            # Save order to database
+            conn = psycopg2.connect(DATABASE_URL)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT INTO orders (
+                    order_id,
+                    telegram_id,
+                    username,
+                    phone,
+                    address,
+                    total,
+                    status
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (
                 order_id,
-                telegram_id,
-                username,
+                user_id,
+                message.from_user.username,
                 phone,
                 address,
                 total,
-                status
+                "pending"
+            ))
+            
+            # Delete cart items
+            cursor.execute(
+                "DELETE FROM cart_items WHERE telegram_id = %s",
+                (user_id,)
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (
-            order_id,
-            user_id,
-            message.from_user.username,
-            phone,
-            address,
-            total,
-            "pending"
-        ))
-        
-        # Delete cart items
-        cursor.execute(
-            "DELETE FROM cart_items WHERE telegram_id = %s",
-            (user_id,)
-        )
-        conn.commit()
-        conn.close()
+            conn.commit()
+            conn.close()
+            print(f"ORDER SAVED {order_id}: total={total:.2f}€")
 
-        # Send confirmation to customer
-        await message.answer(
-            f"✅ Заказ оформлен!\n\n"
-            f"Номер заказа: #{order_id}\n"
-            f"Сумма: {total:.2f} €\n\n"
-            f"💳 Выберите способ оплаты:",
-            reply_markup=payment_menu()
-        )
+            # Send confirmation to customer
+            await message.answer(
+                f"✅ Заказ оформлен!\n\n"
+                f"Номер заказа: #{order_id}\n"
+                f"Сумма: {total:.2f} €\n\n"
+                f"💳 Выберите способ оплаты:",
+                reply_markup=payment_menu()
+            )
+            print("CUSTOMER CONFIRMATION SENT")
 
-        # Send notification to admin
-        await bot.send_message(
-            chat_id=config["admin_id"],
-            text=f"📦 Новый заказ!\n\n{order_text}"
-        )
-        
-        # Clear pending order state
-        del pending_orders[user_id]
+            # Send notification to admin
+            await bot.send_message(
+                chat_id=config["admin_id"],
+                text=f"📦 Новый заказ!\n\n{order_text}"
+            )
+            print("ADMIN NOTIFICATION SENT")
+            
+            # Clear pending order state
+            if user_id in pending_orders:
+                del pending_orders[user_id]
+                
+        except Exception as e:
+            print(f"ERROR IN CHECKOUT: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            await message.answer(
+                "❌ Ошибка при оформлении заказа. Попробуйте позже."
+            )
 
 
 
