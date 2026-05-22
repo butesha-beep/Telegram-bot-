@@ -99,7 +99,9 @@ def save_client(user):
             first_name
         )
         VALUES (%s, %s, %s)
-        ON CONFLICT (telegram_id) DO NOTHING
+        ON CONFLICT (telegram_id) DO UPDATE SET
+            username = EXCLUDED.username,
+            first_name = EXCLUDED.first_name
     """, (
         user.id,
         user.username,
@@ -531,6 +533,8 @@ async def start(message: types.Message):
     if user_id in pending_orders:
         del pending_orders[user_id]
     
+    save_client(message.from_user)
+    
     config = load_json("config.json")
 
     await message.answer(
@@ -594,7 +598,7 @@ async def show_clients(message: types.Message):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT telegram_id, username, first_name
+        SELECT telegram_id, username, first_name, phone, address
         FROM clients
         ORDER BY id DESC
         LIMIT 20
@@ -609,12 +613,14 @@ async def show_clients(message: types.Message):
 
     text = "👥 База клиентов:\n\n"
 
-    for telegram_id, username, first_name in clients:
+    for telegram_id, username, first_name, phone, address in clients:
         user_display = f"@{username}" if username else "без username"
 
         text += (
             f"👤 {user_display}\n"
             f"📝 Имя: {first_name if first_name else 'не указано'}\n"
+            f"📞 Телефон: {phone if phone else 'не указан'}\n"
+            f"🏠 Адрес: {address if address else 'не указан'}\n"
             f"🆔 ID: {telegram_id}\n\n"
         )
 
