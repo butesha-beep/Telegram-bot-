@@ -895,7 +895,7 @@ async def payment_done(callback: types.CallbackQuery):
 
     await callback.answer()
 
-    @dp.message(Command("orders"))
+@dp.message(Command("orders"))
 async def show_orders(message: types.Message):
     config = load_json("config.json")
 
