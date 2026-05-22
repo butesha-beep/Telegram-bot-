@@ -41,7 +41,7 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS clients (
             id SERIAL PRIMARY KEY,
-            telegram_id INTEGER UNIQUE,
+            telegram_id BIGINT UNIQUE,
             username TEXT,
             first_name TEXT
         )
@@ -63,7 +63,7 @@ def init_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS cart_items (
         id SERIAL PRIMARY KEY,
-        telegram_id INTEGER,
+        telegram_id BIGINT,
         product_id INTEGER,
         weight INTEGER
     )
@@ -72,7 +72,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
             order_id INTEGER,
-            telegram_id INTEGER,
+            telegram_id BIGINT,
             username TEXT,
             phone TEXT,
             address TEXT,
