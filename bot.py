@@ -724,6 +724,31 @@ def payment_menu():
             ]
         ]
     )
+@dp.callback_query(F.data == "payment_done")
+async def payment_done(callback: types.CallbackQuery):
+    config = load_json("config.json")
+
+    username = callback.from_user.username
+
+    if username:
+        user_text = f"@{username}"
+    else:
+        user_text = f"ID: {callback.from_user.id}"
+
+    await bot.send_message(
+        chat_id=config["admin_id"],
+        text=(
+            "💰 Клиент сообщил об оплате.\n\n"
+            f"Покупатель: {user_text}"
+        )
+    )
+
+    await callback.message.answer(
+        "✅ Спасибо! Продавец получил уведомление об оплате.\n\n"
+        "Ожидайте подтверждения заказа."
+    )
+
+    await callback.answer()
 
 async def main():
     init_db()
