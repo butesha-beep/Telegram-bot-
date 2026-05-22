@@ -817,6 +817,12 @@ async def checkout(callback: types.CallbackQuery):
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
+
+    cursor.execute(
+        "SELECT phone, address FROM clients WHERE telegram_id = %s",
+        (callback.from_user.id,)
+    )
+    client_contact = cursor.fetchone()
     conn.close()
 
     if not cart_items:
@@ -824,10 +830,160 @@ async def checkout(callback: types.CallbackQuery):
         await callback.answer()
         return
 
+    if client_contact and client_contact[0] and client_contact[1]:
+        phone, address = client_contact
+        pending_orders[callback.from_user.id] = {
+            "cart_items": cart_items,
+            "step": "use_saved",
+            "phone": phone,
+            "address": address
+        }
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Use saved data",
+                        callback_data="use_saved_data"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="✏️ Enter new data",
+                        callback_data="enter_new_data"
+                    )
+                ]
+            ]
+        )
+
+        await callback.message.answer(
+            f"Мы нашли сохранённые контактные данные:\n📞 {phone}\n🏠 {address}\n\n"
+            "Использовать их для оформления заказа?",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+        return
+
     pending_orders[callback.from_user.id] = {
         "cart_items": cart_items,
         "step": "phone"
     }
+
+    await callback.message.answer(
+        "📞 Введите ваш номер телефона для связи:"
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "use_saved_data")
+async def use_saved_data(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in pending_orders:
+        await callback.answer()
+        return
+
+    if pending_orders[user_id].get("step") != "use_saved":
+        await callback.answer()
+        return
+
+    cart_items = pending_orders[user_id]["cart_items"]
+    phone = pending_orders[user_id]["phone"]
+    address = pending_orders[user_id]["address"]
+
+    products = load_json("products.json")
+    config = load_json("config.json")
+
+    order_id = user_id + int(asyncio.get_event_loop().time())
+
+    username = callback.from_user.username
+    if username:
+        user_text = f"@{username}"
+    else:
+        user_text = f"ID: {user_id}"
+
+    order_text = f"🧾 Заказ #{order_id}\n\n"
+    total = 0
+
+    for product_id, weight in cart_items:
+        product = next(
+            (p for p in products if p["id"] == product_id),
+            None
+        )
+
+        if not product:
+            continue
+
+        price = product["price_per_kg"] * weight / 1000
+        total += price
+
+        order_text += (
+            f"• {product['name']}\n"
+            f"  Вес: {weight} г\n"
+            f"  Сумма: {price:.2f} €\n\n"
+        )
+
+    order_text += (
+        f"💰 Итого: {total:.2f} €\n\n"
+        f"👤 Покупатель: {user_text}\n"
+        f"📞 Телефон: {phone}\n"
+        f"🏠 Адрес: {address}"
+    )
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO orders (
+            order_id,
+            telegram_id,
+            username,
+            phone,
+            address,
+            total,
+            status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (
+        order_id,
+        user_id,
+        callback.from_user.username,
+        phone,
+        address,
+        total,
+        "pending"
+    ))
+    cursor.execute(
+        "DELETE FROM cart_items WHERE telegram_id = %s",
+        (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    await callback.message.answer(
+        f"✅ Заказ оформлен!\n\n"
+        f"Номер заказа: #{order_id}\n"
+        f"Сумма: {total:.2f} €\n\n"
+        f"💳 Выберите способ оплаты:",
+        reply_markup=payment_menu()
+    )
+
+    await bot.send_message(
+        chat_id=config["admin_id"],
+        text=f"📦 Новый заказ!\n\n{order_text}"
+    )
+
+    del pending_orders[user_id]
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "enter_new_data")
+async def enter_new_data(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in pending_orders:
+        await callback.answer()
+        return
+
+    pending_orders[user_id]["step"] = "phone"
 
     await callback.message.answer(
         "📞 Введите ваш номер телефона для связи:"
