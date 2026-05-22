@@ -141,19 +141,6 @@ def main_menu():
     )
 
 
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    # save_client(message.from_user)
-
-    config = load_json("config.json")
-
-    await message.answer(
-        f"👋 Добро пожаловать в {config['brand_name']}!\n\n"
-        f"Выберите категорию товара ниже:",
-        reply_markup=main_menu()
-    )
-
-
 @dp.callback_query(F.data.startswith("category_"))
 async def show_category(callback: types.CallbackQuery):
 
@@ -535,11 +522,114 @@ async def clear_cart(callback: types.CallbackQuery):
     )
 
     await callback.answer()
+
+
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    # Reset checkout state if user is in pending orders
+    user_id = message.from_user.id
+    if user_id in pending_orders:
+        del pending_orders[user_id]
+    
+    config = load_json("config.json")
+
+    await message.answer(
+        f"👋 Добро пожаловать в {config['brand_name']}!\n\n"
+        f"Выберите категорию товара ниже:",
+        reply_markup=main_menu()
+    )
+
+
+@dp.message(Command("orders"))
+async def show_orders(message: types.Message):
+    config = load_json("config.json")
+
+    if message.from_user.id != config["admin_id"]:
+        await message.answer("⛔️ У вас нет доступа.")
+        return
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT order_id, username, phone, total, status, payment_method
+        FROM orders
+        ORDER BY id DESC
+        LIMIT 5
+    """)
+
+    orders = cursor.fetchall()
+    conn.close()
+
+    if not orders:
+        await message.answer("📭 Заказов пока нет.")
+        return
+
+    text = "📦 Последние заказы:\n\n"
+
+    for order in orders:
+        order_id, username, phone, total, status, payment_method = order
+
+        text += (
+            f"🧾 Заказ #{order_id}\n"
+            f"👤 Клиент: @{username if username else 'без username'}\n"
+            f"📞 Телефон: {phone}\n"
+            f"💰 Сумма: {total:.2f} €\n"
+            f"💳 Оплата: {payment_method if payment_method else 'не выбрана'}\n"
+            f"📌 Статус: {status}\n\n"
+        )
+
+    await message.answer(text)
+
+
+@dp.message(Command("clients"))
+async def show_clients(message: types.Message):
+    config = load_json("config.json")
+
+    if message.from_user.id != config["admin_id"]:
+        await message.answer("⛔️ У вас нет доступа.")
+        return
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT telegram_id, username, first_name
+        FROM clients
+        ORDER BY id DESC
+        LIMIT 20
+    """)
+
+    clients = cursor.fetchall()
+    conn.close()
+
+    if not clients:
+        await message.answer("📭 Клиентов пока нет.")
+        return
+
+    text = "👥 База клиентов:\n\n"
+
+    for telegram_id, username, first_name in clients:
+        user_display = f"@{username}" if username else "без username"
+
+        text += (
+            f"👤 {user_display}\n"
+            f"📝 Имя: {first_name if first_name else 'не указано'}\n"
+            f"🆔 ID: {telegram_id}\n\n"
+        )
+
+    await message.answer(text)
+
+
 @dp.message()
 async def handle_order_data(message: types.Message):
     user_id = message.from_user.id
 
     if user_id not in pending_orders:
+        return
+
+    # Don't save commands as phone or address
+    if message.text and message.text.startswith("/"):
         return
 
     step = pending_orders[user_id]["step"]
@@ -933,84 +1023,6 @@ async def payment_done(callback: types.CallbackQuery):
 
     await callback.answer()
 
-@dp.message(Command("orders"))
-async def show_orders(message: types.Message):
-    config = load_json("config.json")
-
-    if message.from_user.id != config["admin_id"]:
-        await message.answer("⛔️ У вас нет доступа.")
-        return
-
-    conn = psycopg2.connect(DATABASE_URL)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT order_id, username, phone, total, status, payment_method
-        FROM orders
-        ORDER BY id DESC
-        LIMIT 5
-    """)
-
-    orders = cursor.fetchall()
-    conn.close()
-
-    if not orders:
-        await message.answer("📭 Заказов пока нет.")
-        return
-
-    text = "📦 Последние заказы:\n\n"
-
-    for order in orders:
-        order_id, username, phone, total, status, payment_method = order
-
-        text += (
-            f"🧾 Заказ #{order_id}\n"
-            f"👤 Клиент: @{username if username else 'без username'}\n"
-            f"📞 Телефон: {phone}\n"
-            f"💰 Сумма: {total:.2f} €\n"
-            f"💳 Оплата: {payment_method if payment_method else 'не выбрана'}\n"
-            f"📌 Статус: {status}\n\n"
-        )
-
-    await message.answer(text)
-
-@dp.message(Command("clients"))
-async def show_clients(message: types.Message):
-    config = load_json("config.json")
-
-    if message.from_user.id != config["admin_id"]:
-        await message.answer("⛔️ У вас нет доступа.")
-        return
-
-    conn = psycopg2.connect(DATABASE_URL)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT telegram_id, username, first_name
-        FROM clients
-        ORDER BY id DESC
-        LIMIT 20
-    """)
-
-    clients = cursor.fetchall()
-    conn.close()
-
-    if not clients:
-        await message.answer("📭 Клиентов пока нет.")
-        return
-
-    text = "👥 База клиентов:\n\n"
-
-    for telegram_id, username, first_name in clients:
-        user_display = f"@{username}" if username else "без username"
-
-        text += (
-            f"👤 {user_display}\n"
-            f"📝 Имя: {first_name if first_name else 'не указано'}\n"
-            f"🆔 ID: {telegram_id}\n\n"
-        )
-
-    await message.answer(text)
 
 async def main():
     init_db()
