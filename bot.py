@@ -948,10 +948,10 @@ async def show_clients(message: types.Message):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT DISTINCT telegram_id, username, phone
-        FROM orders
+        SELECT telegram_id, username, first_name
+        FROM clients
         ORDER BY id DESC
-        LIMIT 10
+        LIMIT 20
     """)
 
     clients = cursor.fetchall()
@@ -961,15 +961,15 @@ async def show_clients(message: types.Message):
         await message.answer("📭 Клиентов пока нет.")
         return
 
-    text = "👥 Последние клиенты:\n\n"
+    text = "👥 База клиентов:\n\n"
 
-    for client in clients:
-        telegram_id, username, phone = client
+    for telegram_id, username, first_name in clients:
+        user_display = f"@{username}" if username else "без username"
 
         text += (
-            f"👤 @{username if username else 'без username'}\n"
-            f"🆔 ID: {telegram_id}\n"
-            f"📞 Телефон: {phone}\n\n"
+            f"👤 {user_display}\n"
+            f"📝 Имя: {first_name if first_name else 'не указано'}\n"
+            f"🆔 ID: {telegram_id}\n\n"
         )
 
     await message.answer(text)
