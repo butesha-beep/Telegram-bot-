@@ -49,29 +49,29 @@ def init_db():
             first_name TEXT
         )
     """)
-try:
+    try:
         cursor.execute(
             "ALTER TABLE clients ADD COLUMN phone TEXT"
         )
-except:
+    except:
         conn.rollback()
 
-try:
+    try:
         cursor.execute(
             "ALTER TABLE clients ADD COLUMN address TEXT"
         )
-except:
+    except:
         conn.rollback()
 
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS cart_items (
-        id SERIAL PRIMARY KEY,
-        telegram_id BIGINT,
-        product_id INTEGER,
-        weight INTEGER
-    )
-""")
-cursor.execute("""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cart_items (
+            id SERIAL PRIMARY KEY,
+            telegram_id BIGINT,
+            product_id INTEGER,
+            weight INTEGER
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
             order_id INTEGER,
@@ -83,15 +83,15 @@ cursor.execute("""
             status TEXT
         )
     """)
-try:
+    try:
         cursor.execute(
             "ALTER TABLE orders ADD COLUMN payment_method TEXT"
-    )
-except:
+        )
+    except:
         conn.rollback()
 
-conn.commit()
-conn.close()
+    conn.commit()
+    conn.close()
 
 
 def save_client(user):
