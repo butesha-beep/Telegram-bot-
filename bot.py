@@ -37,11 +37,11 @@ def load_json(filename):
 def init_db():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
-cursor.execute("DROP TABLE IF EXISTS cart_items")
-cursor.execute("DROP TABLE IF EXISTS orders")
-cursor.execute("DROP TABLE IF EXISTS clients")
-conn.commit()
-cursor.execute("""
+    cursor.execute("DROP TABLE IF EXISTS cart_items")
+    cursor.execute("DROP TABLE IF EXISTS orders")
+    cursor.execute("DROP TABLE IF EXISTS clients")
+    conn.commit()
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS clients (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT UNIQUE,
