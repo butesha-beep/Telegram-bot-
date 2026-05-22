@@ -59,6 +59,12 @@ def init_db():
             status TEXT
         )
     """)
+    try:
+        cursor.execute(
+            "ALTER TABLE orders ADD COLUMN payment_method TEXT"
+    )
+    except:
+        pass
 
     conn.commit()
     conn.close()
@@ -633,6 +639,22 @@ async def checkout(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "pay_iban")
 async def pay_iban(callback: types.CallbackQuery):
     config = load_json("config.json")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE orders
+        SET payment_method = ?
+        WHERE telegram_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        ("IBAN", callback.from_user.id)
+    )
+
+    conn.commit()
+    conn.close()
 
     paid_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
