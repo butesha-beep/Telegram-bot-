@@ -692,6 +692,26 @@ async def pay_iban(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "pay_paypal")
 async def pay_paypal(callback: types.CallbackQuery):
     config = load_json("config.json")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE orders
+        SET payment_method = ?
+        WHERE id = (
+            SELECT id
+            FROM orders
+            WHERE telegram_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+        )
+        """,
+        ("PayPal", callback.from_user.id)
+    )
+
+    conn.commit()
+    conn.close()
 
     paid_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -724,6 +744,26 @@ async def pay_paypal(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "pay_cash")
 async def pay_cash(callback: types.CallbackQuery):
     config = load_json("config.json")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE orders
+        SET payment_method = ?
+        WHERE id = (
+            SELECT id
+            FROM orders
+            WHERE telegram_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+        )
+        """,
+        ("Cash", callback.from_user.id)
+    )
+
+    conn.commit()
+    conn.close()
 
     username = callback.from_user.username
 
