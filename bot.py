@@ -895,6 +895,47 @@ async def payment_done(callback: types.CallbackQuery):
 
     await callback.answer()
 
+    @dp.message(Command("orders"))
+async def show_orders(message: types.Message):
+    config = load_json("config.json")
+
+    if message.from_user.id != config["admin_id"]:
+        await message.answer("⛔️ У вас нет доступа.")
+        return
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT order_id, username, phone, total, status, payment_method
+        FROM orders
+        ORDER BY id DESC
+        LIMIT 5
+    """)
+
+    orders = cursor.fetchall()
+    conn.close()
+
+    if not orders:
+        await message.answer("📭 Заказов пока нет.")
+        return
+
+    text = "📦 Последние заказы:\n\n"
+
+    for order in orders:
+        order_id, username, phone, total, status, payment_method = order
+
+        text += (
+            f"🧾 Заказ #{order_id}\n"
+            f"👤 Клиент: @{username if username else 'без username'}\n"
+            f"📞 Телефон: {phone}\n"
+            f"💰 Сумма: {total:.2f} €\n"
+            f"💳 Оплата: {payment_method if payment_method else 'не выбрана'}\n"
+            f"📌 Статус: {status}\n\n"
+        )
+
+    await message.answer(text)
+
 async def main():
     init_db()
     await dp.start_polling(bot)
