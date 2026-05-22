@@ -629,6 +629,44 @@ async def checkout(callback: types.CallbackQuery):
 
     await callback.answer()
 
+@dp.callback_query(F.data == "pay_iban")
+async def pay_iban(callback: types.CallbackQuery):
+    config = load_json("config.json")
+
+    await callback.message.answer(
+        f"🏦 Оплата через IBAN / Bank Transfer\n\n"
+        f"IBAN: {config['iban']}\n"
+        f"Получатель: {config['receiver_name']}\n\n"
+        f"В назначении платежа укажите номер заказа.\n"
+        f"После оплаты отправьте скрин продавцу."
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "pay_paypal")
+async def pay_paypal(callback: types.CallbackQuery):
+    config = load_json("config.json")
+
+    await callback.message.answer(
+        f"💬 Оплата через PayPal\n\n"
+        f"PayPal: {config['paypal']}\n\n"
+        f"В комментарии укажите номер заказа.\n"
+        f"После оплаты отправьте скрин продавцу."
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "pay_cash")
+async def pay_cash(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "💵 Оплата наличкой при встрече.\n\n"
+        "Продавец свяжется с вами для подтверждения заказа."
+    )
+
+    await callback.answer()
+
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
     await callback.message.answer(
