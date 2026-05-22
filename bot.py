@@ -845,7 +845,8 @@ async def pay_iban(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET payment_method = %s
+        SET payment_method = %s,
+            status = %s
         WHERE id = (
             SELECT id
             FROM orders
@@ -854,7 +855,7 @@ async def pay_iban(callback: types.CallbackQuery):
             LIMIT 1
         )
         """,
-        ("IBAN", callback.from_user.id)
+        ("IBAN", "awaiting_payment", callback.from_user.id)
     )
 
     conn.commit()
@@ -898,7 +899,8 @@ async def pay_paypal(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET payment_method = %s
+        SET payment_method = %s,
+            status = %s
         WHERE id = (
             SELECT id
             FROM orders
@@ -907,7 +909,7 @@ async def pay_paypal(callback: types.CallbackQuery):
             LIMIT 1
         )
         """,
-        ("PayPal", callback.from_user.id)
+        ("PayPal", "awaiting_payment", callback.from_user.id)
     )
 
     conn.commit()
@@ -950,7 +952,8 @@ async def pay_cash(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET payment_method = %s
+        SET payment_method = %s,
+            status = %s
         WHERE id = (
             SELECT id
             FROM orders
@@ -959,7 +962,7 @@ async def pay_cash(callback: types.CallbackQuery):
             LIMIT 1
         )
         """,
-        ("Cash", callback.from_user.id)
+        ("Cash", "cash_on_delivery", callback.from_user.id)
     )
 
     conn.commit()
