@@ -936,6 +936,44 @@ async def show_orders(message: types.Message):
 
     await message.answer(text)
 
+@dp.message(Command("clients"))
+async def show_clients(message: types.Message):
+    config = load_json("config.json")
+
+    if message.from_user.id != config["admin_id"]:
+        await message.answer("⛔️ У вас нет доступа.")
+        return
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT DISTINCT telegram_id, username, phone
+        FROM orders
+        ORDER BY id DESC
+        LIMIT 10
+    """)
+
+    clients = cursor.fetchall()
+    conn.close()
+
+    if not clients:
+        await message.answer("📭 Клиентов пока нет.")
+        return
+
+    text = "👥 Последние клиенты:\n\n"
+
+    for client in clients:
+        telegram_id, username, phone = client
+
+        text += (
+            f"👤 @{username if username else 'без username'}\n"
+            f"🆔 ID: {telegram_id}\n"
+            f"📞 Телефон: {phone}\n\n"
+        )
+
+    await message.answer(text)
+
 async def main():
     init_db()
     await dp.start_polling(bot)
