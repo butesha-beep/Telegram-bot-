@@ -146,7 +146,7 @@ def main_menu():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    save_client(message.from_user)
+    # save_client(message.from_user)
 
     config = load_json("config.json")
 
