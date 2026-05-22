@@ -3,6 +3,8 @@ import json
 from json.tool import main
 import os
 import sqlite3
+import psycopg2
+import os
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -18,7 +20,7 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-DB_NAME = "shop.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 pending_orders = {}
 
 def load_json(filename):
@@ -27,7 +29,7 @@ def load_json(filename):
     
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -84,7 +86,7 @@ def init_db():
 
 
 def save_client(user):
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -325,7 +327,7 @@ async def add_to_cart(callback: types.CallbackQuery):
     product_id = int(product_id)
     weight = int(weight)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -436,7 +438,7 @@ async def support(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "cart")
 async def show_cart(callback: types.CallbackQuery):
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -512,7 +514,7 @@ async def show_cart(callback: types.CallbackQuery):
     await callback.answer()
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute(
@@ -593,7 +595,7 @@ async def handle_order_data(message: types.Message):
             f"🏠 Адрес: {address}"
         )
 
-        conn = sqlite3.connect(DB_NAME)
+        conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute(
             "DELETE FROM cart_items WHERE telegram_id = ?",
@@ -620,7 +622,7 @@ async def handle_order_data(message: types.Message):
 
 @dp.callback_query(F.data == "checkout")
 async def checkout(callback: types.CallbackQuery):
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -652,7 +654,7 @@ async def checkout(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "pay_iban")
 async def pay_iban(callback: types.CallbackQuery):
     config = load_json("config.json")
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute(
@@ -720,7 +722,7 @@ async def pay_iban(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "pay_paypal")
 async def pay_paypal(callback: types.CallbackQuery):
     config = load_json("config.json")
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute(
@@ -772,7 +774,7 @@ async def pay_paypal(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "pay_cash")
 async def pay_cash(callback: types.CallbackQuery):
     config = load_json("config.json")
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute(
@@ -882,7 +884,7 @@ async def payment_done(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "payment_done")
 async def payment_done(callback: types.CallbackQuery):
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute(
@@ -931,7 +933,7 @@ async def show_orders(message: types.Message):
         await message.answer("⛔️ У вас нет доступа.")
         return
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -972,7 +974,7 @@ async def show_clients(message: types.Message):
         await message.answer("⛔️ У вас нет доступа.")
         return
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
     cursor.execute("""
