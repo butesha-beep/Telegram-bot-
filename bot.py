@@ -643,15 +643,19 @@ async def pay_iban(callback: types.CallbackQuery):
     cursor = conn.cursor()
 
     cursor.execute(
-        """
-        UPDATE orders
-        SET payment_method = ?
+    """
+    UPDATE orders
+    SET payment_method = ?
+    WHERE id = (
+        SELECT id
+        FROM orders
         WHERE telegram_id = ?
         ORDER BY id DESC
         LIMIT 1
-        """,
-        ("IBAN", callback.from_user.id)
     )
+    """,
+    ("IBAN", callback.from_user.id)
+)
 
     conn.commit()
     conn.close()
@@ -803,6 +807,50 @@ async def payment_done(callback: types.CallbackQuery):
     await callback.message.answer(
         "✅ Спасибо! Продавец получил уведомление об оплате.\n\n"
         "Ожидайте подтверждения заказа."
+    )
+
+    await callback.answer()
+
+@dp.callback_query(F.data == "payment_done")
+async def payment_done(callback: types.CallbackQuery):
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE orders
+        SET status = ?
+        WHERE telegram_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        ("payment_reported", callback.from_user.id)
+    )
+
+    conn.commit()
+    conn.close()
+
+    config = load_json("config.json")
+
+    username = callback.from_user.username
+
+    if username:
+        user_text = f"@{username}"
+    else:
+        user_text = f"ID: {callback.from_user.id}"
+
+    await callback.message.answer(
+        "✅ Информация об оплате отправлена продавцу.\n\n"
+        "Ожидайте подтверждения заказа."
+    )
+
+    await bot.send_message(
+        chat_id=config["admin_id"],
+        text=(
+            "💸 Клиент сообщил об оплате.\n\n"
+            f"Покупатель: {user_text}"
+        )
     )
 
     await callback.answer()
