@@ -39,8 +39,9 @@ def init_db():
     cursor = conn.cursor()
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS clients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        CREATE TABLE IF NOT id SERIAL PRIMARY KEY,
+                   EXISTS clients (
+    
             telegram_id INTEGER UNIQUE,
             username TEXT,
             first_name TEXT
