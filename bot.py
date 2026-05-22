@@ -39,9 +39,8 @@ def init_db():
     cursor = conn.cursor()
 
     cursor.execute("""
-        CREATE TABLE IF NOT id SERIAL PRIMARY KEY,
-                   EXISTS clients (
-    
+        CREATE TABLE IF NOT EXISTS clients (
+            id SERIAL PRIMARY KEY,
             telegram_id INTEGER UNIQUE,
             username TEXT,
             first_name TEXT
@@ -63,7 +62,7 @@ def init_db():
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS cart_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         telegram_id INTEGER,
         product_id INTEGER,
         weight INTEGER
@@ -71,7 +70,7 @@ def init_db():
 """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             order_id INTEGER,
             telegram_id INTEGER,
             username TEXT,
@@ -97,12 +96,13 @@ def save_client(user):
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT OR IGNORE INTO clients (
+        INSERT INTO clients (
             telegram_id,
             username,
             first_name
         )
-        VALUES (?, ?, ?)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (telegram_id) DO NOTHING
     """, (
         user.id,
         user.username,
@@ -343,7 +343,7 @@ async def add_to_cart(callback: types.CallbackQuery):
             product_id,
             weight
         )
-        VALUES (?, ?, ?)
+        VALUES (%s, %s, %s)
     """, (
         callback.from_user.id,
         product_id,
@@ -451,7 +451,7 @@ async def show_cart(callback: types.CallbackQuery):
     cursor.execute("""
         SELECT product_id, weight
         FROM cart_items
-        WHERE telegram_id = ?
+        WHERE telegram_id = %s
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
@@ -525,7 +525,7 @@ async def clear_cart(callback: types.CallbackQuery):
     cursor = conn.cursor()
 
     cursor.execute(
-        "DELETE FROM cart_items WHERE telegram_id = ?",
+        "DELETE FROM cart_items WHERE telegram_id = %s",
         (callback.from_user.id,)
     )
 
@@ -605,7 +605,7 @@ async def handle_order_data(message: types.Message):
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM cart_items WHERE telegram_id = ?",
+            "DELETE FROM cart_items WHERE telegram_id = %s",
             (user_id,)
         )
         conn.commit()
@@ -635,7 +635,7 @@ async def checkout(callback: types.CallbackQuery):
     cursor.execute("""
         SELECT product_id, weight
         FROM cart_items
-        WHERE telegram_id = ?
+        WHERE telegram_id = %s
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
@@ -667,11 +667,11 @@ async def pay_iban(callback: types.CallbackQuery):
     cursor.execute(
     """
     UPDATE orders
-    SET payment_method = ?
+    SET payment_method = %s
     WHERE id = (
         SELECT id
         FROM orders
-        WHERE telegram_id = ?
+        WHERE telegram_id = %s
         ORDER BY id DESC
         LIMIT 1
     )
@@ -685,8 +685,8 @@ async def pay_iban(callback: types.CallbackQuery):
     cursor.execute(
     """
     UPDATE clients
-    SET phone = ?, address = ?
-    WHERE telegram_id = ?
+    SET phone = %s, address = %s
+    WHERE telegram_id = %s
     """,
     (
         phone,
@@ -735,11 +735,11 @@ async def pay_paypal(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET payment_method = ?
+        SET payment_method = %s
         WHERE id = (
             SELECT id
             FROM orders
-            WHERE telegram_id = ?
+            WHERE telegram_id = %s
             ORDER BY id DESC
             LIMIT 1
         )
@@ -787,11 +787,11 @@ async def pay_cash(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET payment_method = ?
+        SET payment_method = %s
         WHERE id = (
             SELECT id
             FROM orders
-            WHERE telegram_id = ?
+            WHERE telegram_id = %s
             ORDER BY id DESC
             LIMIT 1
         )
@@ -897,10 +897,14 @@ async def payment_done(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET status = ?
-        WHERE telegram_id = ?
-        ORDER BY id DESC
-        LIMIT 1
+        SET status = %s
+        WHERE id = (
+            SELECT id
+            FROM orders
+            WHERE telegram_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+        )
         """,
         ("payment_reported", callback.from_user.id)
     )
