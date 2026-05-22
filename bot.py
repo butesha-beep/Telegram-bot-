@@ -731,6 +731,29 @@ async def handle_order_data(message: types.Message):
 
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
+
+        # Update or insert client contact info
+        cursor.execute("""
+            INSERT INTO clients (
+                telegram_id,
+                username,
+                first_name,
+                phone,
+                address
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (telegram_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                phone = EXCLUDED.phone,
+                address = EXCLUDED.address
+        """, (
+            user_id,
+            message.from_user.username,
+            message.from_user.first_name,
+            phone,
+            address
+        ))
         
         # Save order to database
         cursor.execute("""
