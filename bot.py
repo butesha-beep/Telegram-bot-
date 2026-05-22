@@ -556,10 +556,10 @@ async def show_orders(message: types.Message):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT order_id, username, phone, total, status, payment_method
+        SELECT order_id, telegram_id, username, phone, address, total, status, payment_method
         FROM orders
         ORDER BY id DESC
-        LIMIT 5
+        LIMIT 20
     """)
 
     orders = cursor.fetchall()
@@ -571,16 +571,17 @@ async def show_orders(message: types.Message):
 
     text = "📦 Последние заказы:\n\n"
 
-    for order in orders:
-        order_id, username, phone, total, status, payment_method = order
+    for order_id, telegram_id, username, phone, address, total, status, payment_method in orders:
 
         text += (
             f"🧾 Заказ #{order_id}\n"
             f"👤 Клиент: @{username if username else 'без username'}\n"
+            f"🆔 ID: {telegram_id}\n"
             f"📞 Телефон: {phone}\n"
+            f"🏠 Адрес: {address}\n"
             f"💰 Сумма: {total:.2f} €\n"
-            f"💳 Оплата: {payment_method if payment_method else 'не выбрана'}\n"
-            f"📌 Статус: {status}\n\n"
+            f"📌 Статус: {status}\n"
+            f"💳 Оплата: {payment_method if payment_method else 'не выбрана'}\n\n"
         )
 
     await message.answer(text)
@@ -722,12 +723,39 @@ async def handle_order_data(message: types.Message):
 
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
+        
+        # Save order to database
+        cursor.execute("""
+            INSERT INTO orders (
+                order_id,
+                telegram_id,
+                username,
+                phone,
+                address,
+                total,
+                status
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            order_id,
+            user_id,
+            message.from_user.username,
+            phone,
+            address,
+            total,
+            "pending"
+        ))
+        
+        # Delete cart items
         cursor.execute(
             "DELETE FROM cart_items WHERE telegram_id = %s",
             (user_id,)
         )
         conn.commit()
         conn.close()
+        
+        # Clear pending order state
+        del pending_orders[user_id]
 
     await message.answer(
     f"✅ Заказ оформлен!\n\n"
@@ -783,37 +811,22 @@ async def pay_iban(callback: types.CallbackQuery):
     cursor = conn.cursor()
 
     cursor.execute(
-    """
-    UPDATE orders
-    SET payment_method = %s
-    WHERE id = (
-        SELECT id
-        FROM orders
-        WHERE telegram_id = %s
-        ORDER BY id DESC
-        LIMIT 1
+        """
+        UPDATE orders
+        SET payment_method = %s
+        WHERE id = (
+            SELECT id
+            FROM orders
+            WHERE telegram_id = %s
+            ORDER BY id DESC
+            LIMIT 1
+        )
+        """,
+        ("IBAN", callback.from_user.id)
     )
-    """,
-    ("IBAN", callback.from_user.id)
-)
 
     conn.commit()
     conn.close()
-
-    cursor.execute(
-    """
-    UPDATE clients
-    SET phone = %s, address = %s
-    WHERE telegram_id = %s
-    """,
-    (
-        phone,
-        address,
-        user_id
-    )
-)
-
-    conn.commit()
 
     paid_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
