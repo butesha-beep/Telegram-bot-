@@ -679,9 +679,26 @@ async def pay_paypal(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "pay_cash")
 async def pay_cash(callback: types.CallbackQuery):
+    config = load_json("config.json")
+
+    username = callback.from_user.username
+
+    if username:
+        user_text = f"@{username}"
+    else:
+        user_text = f"ID: {callback.from_user.id}"
+
     await callback.message.answer(
-        "💵 Оплата наличкой при встрече.\n\n"
+        "💵 Вы выбрали оплату наличкой при встрече.\n\n"
         "Продавец свяжется с вами для подтверждения заказа."
+    )
+
+    await bot.send_message(
+        chat_id=config["admin_id"],
+        text=(
+            "💵 Клиент выбрал оплату наличкой.\n\n"
+            f"Покупатель: {user_text}"
+        )
     )
 
     await callback.answer()
