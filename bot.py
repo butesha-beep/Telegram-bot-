@@ -629,25 +629,6 @@ async def checkout(callback: types.CallbackQuery):
 
     await callback.answer()
 
-@dp.callback_query(F.data == "pay_iban")
-async def pay_iban(callback: types.CallbackQuery):
-    config = load_json("config.json")
-paid_keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="✅ Я оплатил",
-                callback_data="payment_done"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="🏠 Главное меню",
-                callback_data="back_to_menu"
-            )
-        ]
-    ]
-)
 
 @dp.callback_query(F.data == "pay_iban")
 async def pay_iban(callback: types.CallbackQuery):
