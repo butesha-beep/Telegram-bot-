@@ -38,6 +38,19 @@ def init_db():
             first_name TEXT
         )
     """)
+    try:
+        cursor.execute(
+            "ALTER TABLE clients ADD COLUMN phone TEXT"
+        )
+    except:
+        pass
+
+    try:
+        cursor.execute(
+            "ALTER TABLE clients ADD COLUMN address TEXT"
+        )
+    except:
+        pass
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS cart_items (
@@ -659,6 +672,21 @@ async def pay_iban(callback: types.CallbackQuery):
 
     conn.commit()
     conn.close()
+
+    cursor.execute(
+    """
+    UPDATE clients
+    SET phone = ?, address = ?
+    WHERE telegram_id = ?
+    """,
+    (
+        phone,
+        address,
+        user_id
+    )
+)
+
+    conn.commit()
 
     paid_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
