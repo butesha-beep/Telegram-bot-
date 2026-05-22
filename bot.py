@@ -20,9 +20,11 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
+
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL is not set")
+    available_vars = [key for key in os.environ.keys() if "DATABASE" in key or key.startswith("PG")]
+    raise ValueError(f"DATABASE_URL is not set. Available DB vars: {available_vars}")
 pending_orders = {}
 
 def load_json(filename):
