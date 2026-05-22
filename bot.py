@@ -598,9 +598,20 @@ async def show_clients(message: types.Message):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT telegram_id, username, first_name, phone, address
-        FROM clients
-        ORDER BY id DESC
+        SELECT 
+            c.telegram_id,
+            c.username,
+            c.first_name,
+            c.phone,
+            c.address,
+            COUNT(o.id) as order_count,
+            COALESCE(SUM(o.total), 0) as total_spent,
+            MAX(o.id) as last_order_id,
+            (SELECT status FROM orders WHERE telegram_id = c.telegram_id ORDER BY id DESC LIMIT 1) as last_order_status
+        FROM clients c
+        LEFT JOIN orders o ON c.telegram_id = o.telegram_id
+        GROUP BY c.id, c.telegram_id, c.username, c.first_name, c.phone, c.address
+        ORDER BY c.id DESC
         LIMIT 20
     """)
 
@@ -613,16 +624,30 @@ async def show_clients(message: types.Message):
 
     text = "👥 База клиентов:\n\n"
 
-    for telegram_id, username, first_name, phone, address in clients:
+    for telegram_id, username, first_name, phone, address, order_count, total_spent, last_order_id, last_order_status in clients:
         user_display = f"@{username}" if username else "без username"
 
         text += (
             f"👤 {user_display}\n"
             f"📝 Имя: {first_name if first_name else 'не указано'}\n"
-            f"📞 Телефон: {phone if phone else 'не указан'}\n"
-            f"🏠 Адрес: {address if address else 'не указан'}\n"
-            f"🆔 ID: {telegram_id}\n\n"
         )
+        
+        if phone:
+            text += f"📞 Телефон: {phone}\n"
+        if address:
+            text += f"🏠 Адрес: {address}\n"
+        
+        text += f"🆔 ID: {telegram_id}\n"
+        text += f"📦 Заказов: {order_count}\n"
+        
+        if order_count > 0:
+            text += f"💰 Потрачено: {total_spent:.2f} €\n"
+            if last_order_status:
+                text += f"📌 Последний заказ: #{last_order_id} ({last_order_status})\n"
+        else:
+            text += "📦 Заказов пока нет\n"
+        
+        text += "\n"
 
     await message.answer(text)
 
