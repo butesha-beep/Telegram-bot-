@@ -753,23 +753,24 @@ async def handle_order_data(message: types.Message):
         )
         conn.commit()
         conn.close()
-        
-        # Clear pending order state
-        del pending_orders[user_id]
 
-    await message.answer(
-    f"✅ Заказ оформлен!\n\n"
-    f"Номер заказа: #{order_id}\n"
-    f"Сумма: {total:.2f} €\n\n"
-    f"💳 Выберите способ оплаты:",
-    reply_markup=payment_menu()
-)
-        
+        # Send confirmation to customer
+        await message.answer(
+            f"✅ Заказ оформлен!\n\n"
+            f"Номер заказа: #{order_id}\n"
+            f"Сумма: {total:.2f} €\n\n"
+            f"💳 Выберите способ оплаты:",
+            reply_markup=payment_menu()
+        )
 
-    await bot.send_message(
+        # Send notification to admin
+        await bot.send_message(
             chat_id=config["admin_id"],
             text=f"📦 Новый заказ!\n\n{order_text}"
         )
+        
+        # Clear pending order state
+        del pending_orders[user_id]
 
 
 
