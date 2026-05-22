@@ -51,14 +51,14 @@ def init_db():
             "ALTER TABLE clients ADD COLUMN phone TEXT"
         )
     except:
-        pass
+        conn.rollback()
 
     try:
         cursor.execute(
             "ALTER TABLE clients ADD COLUMN address TEXT"
         )
     except:
-        pass
+        conn.rollback()
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS cart_items (
@@ -85,7 +85,7 @@ def init_db():
             "ALTER TABLE orders ADD COLUMN payment_method TEXT"
     )
     except:
-        pass
+        conn.rollback()
 
     conn.commit()
     conn.close()
