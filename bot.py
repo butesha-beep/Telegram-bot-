@@ -21,8 +21,6 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
-print("TEST_VAR =", os.getenv("TEST_VAR"))
-print("DATABASE_URL exists =", bool(os.getenv("DATABASE_URL")))
 
 if not DATABASE_URL:
     available_vars = [key for key in os.environ.keys() if "DATABASE" in key or key.startswith("PG")]
@@ -37,10 +35,6 @@ def load_json(filename):
 def init_db():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
-    cursor.execute("DROP TABLE IF EXISTS cart_items")
-    cursor.execute("DROP TABLE IF EXISTS orders")
-    cursor.execute("DROP TABLE IF EXISTS clients")
-    conn.commit()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS clients (
             id SERIAL PRIMARY KEY,
