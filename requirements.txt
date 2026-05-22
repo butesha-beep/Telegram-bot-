@@ -1,1 +1,1 @@
-aiogram
+psycopg2-binary
