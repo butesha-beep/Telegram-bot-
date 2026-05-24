@@ -77,6 +77,26 @@ def init_db():
             status TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            is_active BOOLEAN DEFAULT TRUE
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY,
+            category_id INTEGER REFERENCES categories(id),
+            name TEXT NOT NULL,
+            price_per_kg REAL NOT NULL,
+            description TEXT,
+            image_url TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            sort_order INTEGER DEFAULT 0
+        )
+    """)
     try:
         cursor.execute("ALTER TABLE orders ALTER COLUMN order_id TYPE BIGINT")
         cursor.execute("ALTER TABLE orders ALTER COLUMN telegram_id TYPE BIGINT")
