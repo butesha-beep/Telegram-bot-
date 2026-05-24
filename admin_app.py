@@ -89,6 +89,52 @@ async def products():
         return html
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
+@app.get("/products/new", response_class=HTMLResponse)
+async def new_product_form():
+    html = """
+    <h1>New Product</h1>
+    <form method="post" action="/products/new">
+      <label>category_id: <input name="category_id"/></label><br/>
+      <label>name: <input name="name"/></label><br/>
+      <label>price_per_kg: <input name="price_per_kg"/></label><br/>
+      <label>description: <input name="description"/></label><br/>
+      <label>image_url: <input name="image_url"/></label><br/>
+      <label>sort_order: <input name="sort_order" value="0"/></label><br/>
+      <label>is_active: <input type="checkbox" name="is_active" value="1"/></label><br/>
+      <input type="submit" value="Create"/>
+    </form>
+    """
+    return html
+
+
+@app.post("/products/new", response_class=HTMLResponse)
+async def create_product(
+    category_id: int = Form(...),
+    name: str = Form(...),
+    price_per_kg: float = Form(...),
+    description: str = Form(''),
+    image_url: str = Form(''),
+    sort_order: int = Form(0),
+    is_active: str = Form(None),
+):
+    active = True if is_active else False
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM products")
+        new_id = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            INSERT INTO products (category_id, name, price_per_kg, description, image_url, sort_order, is_active)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (category_id, name, price_per_kg, description, image_url, sort_order, active),
+        )
+        conn.commit()
+        conn.close()
+        return "<h1>Product created</h1><p><a href=\"/products\">Back to products</a></p>"
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
 
 
 @app.get("/products/{product_id}/edit", response_class=HTMLResponse)
