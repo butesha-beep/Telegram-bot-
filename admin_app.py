@@ -165,6 +165,133 @@ async def update_product(
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
 
+@app.get("/categories", response_class=HTMLResponse)
+async def categories():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, name, sort_order, is_active
+            FROM categories
+            ORDER BY sort_order, id
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+
+        html = "<h1>Categories</h1>"
+        html += "<p><a href=\"/categories/new\">Create new category</a></p>"
+        html += "<table border='1' cellpadding='5'>"
+        html += "<tr><th>ID</th><th>Name</th><th>Sort Order</th><th>Active</th><th>Actions</th></tr>"
+        for row in rows:
+            cid, name, sort_order, is_active = row
+            active_text = "yes" if is_active else "no"
+            html += f"<tr><td>{cid}</td><td>{name}</td><td>{sort_order}</td><td>{active_text}</td><td><a href=\"/categories/{cid}/edit\">Edit</a></td></tr>"
+        html += "</table>"
+        return html
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.get("/categories/new", response_class=HTMLResponse)
+async def new_category_form():
+    html = """
+    <h1>New Category</h1>
+    <form method="post" action="/categories/new">
+      <label>name: <input name="name"/></label><br/>
+      <label>sort_order: <input name="sort_order"/></label><br/>
+      <label>is_active: <input type="checkbox" name="is_active" value="1"/></label><br/>
+      <input type="submit" value="Create"/>
+    </form>
+    """
+    return html
+
+
+@app.post("/categories/new", response_class=HTMLResponse)
+async def create_category(
+    name: str = Form(...),
+    sort_order: int = Form(0),
+    is_active: str = Form(None),
+):
+    active = True if is_active else False
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO categories (name, sort_order, is_active)
+            VALUES (%s, %s, %s)
+            """,
+            (name, sort_order, active),
+        )
+        conn.commit()
+        conn.close()
+        return "<h1>Category created</h1><p><a href=\"/categories\">Back to categories</a></p>"
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.get("/categories/{category_id}/edit", response_class=HTMLResponse)
+async def edit_category_form(category_id: int):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT name, sort_order, is_active
+            FROM categories
+            WHERE id = %s
+            """,
+            (category_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return "<h1>Category not found</h1>"
+
+        name, sort_order, is_active = row
+        checked = "checked" if is_active else ""
+        html = f"""
+        <h1>Edit Category</h1>
+        <form method="post" action="/categories/{category_id}/edit">
+          <label>name: <input name="name" value="{name}"/></label><br/>
+          <label>sort_order: <input name="sort_order" value="{sort_order}"/></label><br/>
+          <label>is_active: <input type="checkbox" name="is_active" value="1" {checked}/></label><br/>
+          <input type="submit" value="Update"/>
+        </form>
+        """
+        return html
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.post("/categories/{category_id}/edit", response_class=HTMLResponse)
+async def update_category(
+    category_id: int,
+    name: str = Form(...),
+    sort_order: int = Form(0),
+    is_active: str = Form(None),
+):
+    active = True if is_active else False
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE categories
+            SET name = %s,
+                sort_order = %s,
+                is_active = %s
+            WHERE id = %s
+            """,
+            (name, sort_order, active, category_id),
+        )
+        conn.commit()
+        conn.close()
+        return f"<h1>Category updated</h1><p><a href=\"/categories\">Back to categories</a></p>"
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
