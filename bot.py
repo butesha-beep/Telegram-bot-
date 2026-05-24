@@ -32,6 +32,38 @@ def load_json(filename):
         return json.load(file)
     
 
+def get_products():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, category_id, name, price_per_kg, description, image_url, is_active
+            FROM products
+            WHERE is_active = TRUE
+            ORDER BY sort_order, id
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+
+        if rows:
+            products = []
+            for row in rows:
+                product_id, category_id, name, price_per_kg, description, image_url, is_active = row
+                products.append({
+                    "id": product_id,
+                    "category_id": category_id,
+                    "name": name,
+                    "price_per_kg": price_per_kg,
+                    "description": description,
+                    "photo": image_url,
+                    "is_active": is_active
+                })
+            return products
+    except Exception:
+        pass
+
+    return load_json("products.json")
+
 def init_db():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -263,7 +295,7 @@ async def show_category(callback: types.CallbackQuery):
 
     category_id = int(callback.data.split("_")[1])
 
-    products = load_json("products.json")
+    products = get_products()
 
     category_products = [
         product
@@ -308,7 +340,7 @@ async def show_product(callback: types.CallbackQuery):
 
     product_id = int(callback.data.split("_")[1])
 
-    products = load_json("products.json")
+    products = get_products()
 
     product = next(
         (p for p in products if p["id"] == product_id),
@@ -385,7 +417,7 @@ async def choose_weight(callback: types.CallbackQuery):
     product_id = int(product_id)
     weight = int(weight)
 
-    products = load_json("products.json")
+    products = get_products()
 
     product = next(
         (p for p in products if p["id"] == product_id),
@@ -487,7 +519,7 @@ async def create_order(callback: types.CallbackQuery):
     product_id = int(product_id)
     weight = int(weight)
 
-    products = load_json("products.json")
+    products = get_products()
     config = load_json("config.json")
 
     product = next(
@@ -565,7 +597,7 @@ async def show_cart(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    products = load_json("products.json")
+    products = get_products()
 
     text = "🛒 Ваша корзина:\n\n"
     total = 0
@@ -797,7 +829,7 @@ async def handle_order_data(message: types.Message):
         phone = pending_orders[user_id]["phone"]
         address = pending_orders[user_id]["address"]
 
-        products = load_json("products.json")
+        products = get_products()
         config = load_json("config.json")
 
         order_id = user_id + int(asyncio.get_event_loop().time())
@@ -998,7 +1030,7 @@ async def use_saved_data(callback: types.CallbackQuery):
     phone = pending_orders[user_id]["phone"]
     address = pending_orders[user_id]["address"]
 
-    products = load_json("products.json")
+    products = get_products()
     config = load_json("config.json")
 
     order_id = user_id + int(asyncio.get_event_loop().time())
