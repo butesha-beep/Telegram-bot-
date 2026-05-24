@@ -33,7 +33,7 @@ async def orders():
         html += "<tr><th>ID</th><th>Order ID</th><th>Username</th><th>Phone</th><th>Address</th><th>Total (€)</th><th>Status</th><th>Payment Method</th><th>Actions</th></tr>"
         for row in rows:
             id_, order_id, username, phone, address, total, status, payment_method = row
-            actions = []
+            actions = [f"<a href=\"/orders/{order_id}\">View</a>"]
             for s in ("paid", "preparing", "done", "cancelled"):
                 actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button type=\"submit\">{s.capitalize()}</button></form>")
             actions_html = " ".join(actions)
@@ -58,6 +58,60 @@ async def update_order_status(order_id: str, status: str):
         return f"<h1>Order status updated</h1><p><a href=\"/orders\">Back to orders</a></p>"
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.get("/orders/{order_id}", response_class=HTMLResponse)
+async def order_detail(order_id: str):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, order_id, username, phone, address, total, status, payment_method
+            FROM orders
+            WHERE order_id = %s
+            """,
+            (order_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return f"<h1>Order not found</h1><p><a href=\"/orders\">Back to orders</a></p>"
+
+        id_, order_id, username, phone, address, total, status, payment_method = row
+        try:
+            cursor.execute(
+                """
+                SELECT product_name, weight, price
+                FROM cart_items
+                WHERE order_id = %s
+                """,
+                (order_id,),
+            )
+            items = cursor.fetchall()
+        except Exception:
+            items = []
+        conn.close()
+
+        html = f"<h1>Order {order_id}</h1>"
+        html += f"<p>id: {id_}</p>"
+        html += f"<p>username: {username or '-'}</p>"
+        html += f"<p>phone: {phone or '-'}</p>"
+        html += f"<p>address: {address or '-'}</p>"
+        html += f"<p>total: {total:.2f}</p>"
+        html += f"<p>status: {status}</p>"
+        html += f"<p>payment_method: {payment_method or '-'}</p>"
+        if items:
+            html += "<h2>Items</h2><table border='1' cellpadding='5'>"
+            html += "<tr><th>Product</th><th>Weight</th><th>Price</th></tr>"
+            for product_name, weight, price in items:
+                html += f"<tr><td>{product_name}</td><td>{weight}</td><td>{price:.2f}</td></tr>"
+            html += "</table>"
+        html += f"<p><a href=\"/orders\">Back to orders</a></p>"
+        return html
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
 
 @app.get("/clients", response_class=HTMLResponse)
 async def clients():
