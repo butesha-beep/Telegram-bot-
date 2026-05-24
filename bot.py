@@ -116,6 +116,70 @@ def init_db():
     conn.close()
 
 
+def seed_products_from_json():
+    categories = load_json("categories.json")
+    products = load_json("products.json")
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    for category in categories:
+        cursor.execute(
+            """
+            INSERT INTO categories (id, name, sort_order, is_active)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name,
+                sort_order = EXCLUDED.sort_order,
+                is_active = EXCLUDED.is_active
+            """,
+            (
+                category["id"],
+                category["name"],
+                category.get("sort_order", 0),
+                category.get("is_active", True)
+            )
+        )
+
+    for product in products:
+        cursor.execute(
+            """
+            INSERT INTO products (
+                id,
+                category_id,
+                name,
+                price_per_kg,
+                description,
+                image_url,
+                is_active,
+                sort_order
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                category_id = EXCLUDED.category_id,
+                name = EXCLUDED.name,
+                price_per_kg = EXCLUDED.price_per_kg,
+                description = EXCLUDED.description,
+                image_url = EXCLUDED.image_url,
+                is_active = EXCLUDED.is_active,
+                sort_order = EXCLUDED.sort_order
+            """,
+            (
+                product["id"],
+                product["category_id"],
+                product["name"],
+                product["price_per_kg"],
+                product.get("description"),
+                product.get("image_url"),
+                product.get("is_active", True),
+                product.get("sort_order", 0)
+            )
+        )
+
+    conn.commit()
+    conn.close()
+
+
 def save_client(user):
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -1281,6 +1345,7 @@ async def payment_done(callback: types.CallbackQuery):
 
 async def main():
     init_db()
+    seed_products_from_json()
     await dp.start_polling(bot)
 
 
