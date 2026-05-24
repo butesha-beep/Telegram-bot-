@@ -20,37 +20,20 @@ async def orders():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        has_created_at = False
-        try:
-            cursor.execute("""
-                SELECT id, order_id, username, phone, address, total, status, payment_method, created_at
-                FROM orders
-                ORDER BY id DESC
-                LIMIT 50
-            """)
-            rows = cursor.fetchall()
-            has_created_at = True
-        except Exception:
-            cursor.execute("""
-                SELECT id, order_id, username, phone, address, total, status, payment_method
-                FROM orders
-                ORDER BY id DESC
-                LIMIT 50
-            """)
-            rows = cursor.fetchall()
+        cursor.execute("""
+            SELECT id, order_id, username, phone, address, total, status, payment_method
+            FROM orders
+            ORDER BY id DESC
+            LIMIT 50
+        """)
+        rows = cursor.fetchall()
         conn.close()
         
         html = "<h1>Orders</h1><table border='1' cellpadding='5'>"
-        if has_created_at:
-            html += "<tr><th>ID</th><th>Order ID</th><th>Username</th><th>Phone</th><th>Address</th><th>Total (€)</th><th>Status</th><th>Payment Method</th><th>Created At</th></tr>"
-            for row in rows:
-                id_, order_id, username, phone, address, total, status, payment_method, created_at = row
-                html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{status}</td><td>{payment_method or '-'}</td><td>{created_at}</td></tr>"
-        else:
-            html += "<tr><th>ID</th><th>Order ID</th><th>Username</th><th>Phone</th><th>Address</th><th>Total (€)</th><th>Status</th><th>Payment Method</th></tr>"
-            for row in rows:
-                id_, order_id, username, phone, address, total, status, payment_method = row
-                html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{status}</td><td>{payment_method or '-'}</td></tr>"
+        html += "<tr><th>ID</th><th>Order ID</th><th>Username</th><th>Phone</th><th>Address</th><th>Total (€)</th><th>Status</th><th>Payment Method</th></tr>"
+        for row in rows:
+            id_, order_id, username, phone, address, total, status, payment_method = row
+            html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{status}</td><td>{payment_method or '-'}</td></tr>"
         html += "</table>"
         return html
     except Exception as e:
