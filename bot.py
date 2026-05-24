@@ -111,6 +111,16 @@ def init_db():
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_items (
+            id SERIAL PRIMARY KEY,
+            order_id BIGINT NOT NULL,
+            product_id INTEGER,
+            product_name TEXT,
+            weight INTEGER,
+            price REAL
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
@@ -916,7 +926,21 @@ async def handle_order_data(message: types.Message):
             total,
             "pending"
         ))
-        
+
+        cursor.execute(
+            "SELECT c.product_id, c.weight, p.name, p.price_per_kg "
+            "FROM cart_items c "
+            "JOIN products p ON p.id = c.product_id "
+            "WHERE c.telegram_id = %s",
+            (user_id,)
+        )
+        order_rows = cursor.fetchall()
+        for product_id, weight, product_name, price_per_kg in order_rows:
+            price = price_per_kg * weight
+            cursor.execute(
+                "INSERT INTO order_items (order_id, product_id, product_name, weight, price) VALUES (%s, %s, %s, %s, %s)",
+                (order_id, product_id, product_name, weight, price)
+            )
         # Delete cart items
         cursor.execute(
             "DELETE FROM cart_items WHERE telegram_id = %s",
@@ -1111,6 +1135,22 @@ async def use_saved_data(callback: types.CallbackQuery):
         total,
         "pending"
     ))
+
+    cursor.execute(
+        "SELECT c.product_id, c.weight, p.name, p.price_per_kg "
+        "FROM cart_items c "
+        "JOIN products p ON p.id = c.product_id "
+        "WHERE c.telegram_id = %s",
+        (user_id,)
+    )
+    order_rows = cursor.fetchall()
+    for product_id, weight, product_name, price_per_kg in order_rows:
+        price = price_per_kg * weight
+        cursor.execute(
+            "INSERT INTO order_items (order_id, product_id, product_name, weight, price) VALUES (%s, %s, %s, %s, %s)",
+            (order_id, product_id, product_name, weight, price)
+        )
+
     cursor.execute(
         "DELETE FROM cart_items WHERE telegram_id = %s",
         (user_id,)

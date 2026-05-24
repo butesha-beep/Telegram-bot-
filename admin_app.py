@@ -102,11 +102,15 @@ async def order_detail(order_id: str):
         html += f"<p>status: {status}</p>"
         html += f"<p>payment_method: {payment_method or '-'}</p>"
         if items:
+            subtotal = sum((price or 0) for _, _, price in items)
             html += "<h2>Items</h2><table border='1' cellpadding='5'>"
             html += "<tr><th>Product</th><th>Weight</th><th>Price</th></tr>"
             for product_name, weight, price in items:
                 html += f"<tr><td>{product_name}</td><td>{weight}</td><td>{price:.2f}</td></tr>"
+            html += f"<tr><td colspan='2'><strong>Subtotal</strong></td><td><strong>{subtotal:.2f}</strong></td></tr>"
             html += "</table>"
+        else:
+            html += "<p>No order items found</p>"
         html += f"<p><a href=\"/orders\">Back to orders</a></p>"
         return html
     except Exception as e:
