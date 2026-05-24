@@ -927,16 +927,15 @@ async def handle_order_data(message: types.Message):
             "pending"
         ))
 
-        cursor.execute(
-            "SELECT c.product_id, c.weight, p.name, p.price_per_kg "
-            "FROM cart_items c "
-            "JOIN products p ON p.id = c.product_id "
-            "WHERE c.telegram_id = %s",
-            (user_id,)
-        )
-        order_rows = cursor.fetchall()
-        for product_id, weight, product_name, price_per_kg in order_rows:
-            price = price_per_kg * weight
+        for product_id, weight in cart_items:
+            product = next(
+                (p for p in products if p["id"] == product_id),
+                None
+            )
+            if not product:
+                continue
+            product_name = product["name"]
+            price = product["price_per_kg"] * weight
             cursor.execute(
                 "INSERT INTO order_items (order_id, product_id, product_name, weight, price) VALUES (%s, %s, %s, %s, %s)",
                 (order_id, product_id, product_name, weight, price)
@@ -1136,16 +1135,15 @@ async def use_saved_data(callback: types.CallbackQuery):
         "pending"
     ))
 
-    cursor.execute(
-        "SELECT c.product_id, c.weight, p.name, p.price_per_kg "
-        "FROM cart_items c "
-        "JOIN products p ON p.id = c.product_id "
-        "WHERE c.telegram_id = %s",
-        (user_id,)
-    )
-    order_rows = cursor.fetchall()
-    for product_id, weight, product_name, price_per_kg in order_rows:
-        price = price_per_kg * weight
+    for product_id, weight in cart_items:
+        product = next(
+            (p for p in products if p["id"] == product_id),
+            None
+        )
+        if not product:
+            continue
+        product_name = product["name"]
+        price = product["price_per_kg"] * weight
         cursor.execute(
             "INSERT INTO order_items (order_id, product_id, product_name, weight, price) VALUES (%s, %s, %s, %s, %s)",
             (order_id, product_id, product_name, weight, price)
