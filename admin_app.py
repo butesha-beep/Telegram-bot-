@@ -79,42 +79,59 @@ async def products():
         conn.close()
 
         html = "<h1>Products</h1><table border='1' cellpadding='5'>"
-        html += "<tr><th>ID</th><th>Name</th><th>Price/kg (€)</th><th>Image</th><th>Active</th><th>Category</th></tr>"
+        html += "<tr><th>ID</th><th>Name</th><th>Price/kg (€)</th><th>Image</th><th>Active</th><th>Category</th><th>Actions</th></tr>"
         for row in rows:
             pid, name, price, image_url, is_active, category_name = row
             img_html = f"<img src=\"{image_url}\" width=80/>" if image_url else "-"
             active_text = "yes" if is_active else "no"
-            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td>{active_text}</td><td>{category_name or '-'}</td></tr>"
+            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td>{active_text}</td><td>{category_name or '-'}</td><td><a href=\"/products/{pid}/edit\">Edit</a></td></tr>"
         html += "</table>"
         return html
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/products/{product_id}/edit", response_class=HTMLResponse)
+async def edit_product_form(product_id: int):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT category_id, name, price_per_kg, description, image_url, sort_order, is_active
+            FROM products
+            WHERE id = %s
+            """,
+            (product_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return "<h1>Product not found</h1>"
+
+        category_id, name, price_per_kg, description, image_url, sort_order, is_active = row
+        checked = "checked" if is_active else ""
+        html = f"""
+        <h1>Edit Product</h1>
+        <form method="post" action="/products/{product_id}/edit">
+          <label>category_id: <input name="category_id" value="{category_id}"/></label><br/>
+          <label>name: <input name="name" value="{name}"/></label><br/>
+          <label>price_per_kg: <input name="price_per_kg" value="{price_per_kg}"/></label><br/>
+          <label>description: <input name="description" value="{description or ''}"/></label><br/>
+          <label>image_url: <input name="image_url" value="{image_url or ''}"/></label><br/>
+          <label>sort_order: <input name="sort_order" value="{sort_order}"/></label><br/>
+          <label>is_active: <input type="checkbox" name="is_active" value="1" {checked}/></label><br/>
+          <input type="submit" value="Update"/>
+        </form>
+        """
+        return html
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
 
 
-@app.get("/products/new", response_class=HTMLResponse)
-async def new_product_form():
-    html = """
-    <h1>New Product</h1>
-    <form method="post" action="/products/new">
-      <label>category_id: <input name="category_id"/></label><br/>
-      <label>name: <input name="name"/></label><br/>
-      <label>price_per_kg: <input name="price_per_kg"/></label><br/>
-      <label>description: <input name="description"/></label><br/>
-      <label>image_url: <input name="image_url"/></label><br/>
-      <label>sort_order: <input name="sort_order"/></label><br/>
-      <label>is_active: <input type="checkbox" name="is_active" value="1"/></label><br/>
-      <input type="submit" value="Create"/>
-    </form>
-    """
-    return html
-
-
-@app.post("/products/new", response_class=HTMLResponse)
-async def create_product(
+@app.post("/products/{product_id}/edit", response_class=HTMLResponse)
+async def update_product(
+    product_id: int,
     category_id: int = Form(...),
     name: str = Form(...),
     price_per_kg: float = Form(...),
@@ -129,14 +146,25 @@ async def create_product(
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO products
-                (category_id, name, price_per_kg, description, image_url, sort_order, is_active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            UPDATE products
+            SET category_id = %s,
+                name = %s,
+                price_per_kg = %s,
+                description = %s,
+                image_url = %s,
+                sort_order = %s,
+                is_active = %s
+            WHERE id = %s
             """,
-            (category_id, name, price_per_kg, description, image_url, sort_order, active),
+            (category_id, name, price_per_kg, description, image_url, sort_order, active, product_id),
         )
         conn.commit()
         conn.close()
-        return "<h1>Product created</h1><p><a href=\"/products\">Back to products</a></p>"
+        return f"<h1>Product updated</h1><p><a href=\"/products\">Back to products</a></p>"
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
