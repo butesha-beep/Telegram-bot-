@@ -1,2 +1,5 @@
 aiogram
+aiogram
 psycopg2-binary
+fastapi
+uvicorn
