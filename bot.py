@@ -55,6 +55,7 @@ def get_products():
                     "name": name,
                     "price_per_kg": price_per_kg,
                     "description": description,
+                    "image_url": image_url,
                     "photo": image_url,
                     "is_active": is_active
                 })
