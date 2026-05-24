@@ -969,6 +969,25 @@ async def checkout(callback: types.CallbackQuery):
         await callback.answer()
         return
 
+    products = get_products()
+    config = load_json("config.json")
+    minimum_order_amount = config.get("minimum_order_amount", 20)
+    
+    total = 0
+    for product_id, weight in cart_items:
+        product = next((p for p in products if p["id"] == product_id), None)
+        if product:
+            total += product["price_per_kg"] * weight / 1000
+    
+    if total < minimum_order_amount:
+        missing = minimum_order_amount - total
+        await callback.message.answer(
+            f"🚚 Минимальная сумма заказа для доставки: {minimum_order_amount:.2f} €\n"
+            f"Добавьте товаров ещё на {missing:.2f} €."
+        )
+        await callback.answer()
+        return
+
     if client_contact and client_contact[0] and client_contact[1]:
         phone, address = client_contact
         pending_orders[callback.from_user.id] = {
