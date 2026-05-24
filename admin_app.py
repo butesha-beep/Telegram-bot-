@@ -30,12 +30,32 @@ async def orders():
         conn.close()
         
         html = "<h1>Orders</h1><table border='1' cellpadding='5'>"
-        html += "<tr><th>ID</th><th>Order ID</th><th>Username</th><th>Phone</th><th>Address</th><th>Total (€)</th><th>Status</th><th>Payment Method</th></tr>"
+        html += "<tr><th>ID</th><th>Order ID</th><th>Username</th><th>Phone</th><th>Address</th><th>Total (€)</th><th>Status</th><th>Payment Method</th><th>Actions</th></tr>"
         for row in rows:
             id_, order_id, username, phone, address, total, status, payment_method = row
-            html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{status}</td><td>{payment_method or '-'}</td></tr>"
+            actions = []
+            for s in ("paid", "preparing", "done", "cancelled"):
+                actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button type=\"submit\">{s.capitalize()}</button></form>")
+            actions_html = " ".join(actions)
+            html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{status}</td><td>{payment_method or '-'}</td><td>{actions_html}</td></tr>"
         html += "</table>"
         return html
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.post("/orders/{order_id}/status/{status}", response_class=HTMLResponse)
+async def update_order_status(order_id: str, status: str):
+    allowed = {"paid", "preparing", "done", "cancelled"}
+    if status not in allowed:
+        return f"<h1>Invalid status</h1><p>Allowed: {', '.join(sorted(allowed))}</p>"
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE orders SET status = %s WHERE order_id = %s", (status, order_id))
+        conn.commit()
+        conn.close()
+        return f"<h1>Order status updated</h1><p><a href=\"/orders\">Back to orders</a></p>"
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
