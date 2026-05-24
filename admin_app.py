@@ -84,7 +84,12 @@ async def products():
             pid, name, price, image_url, is_active, category_name = row
             img_html = f"<img src=\"{image_url}\" width=80/>" if image_url else "-"
             active_text = "yes" if is_active else "no"
-            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td>{active_text}</td><td>{category_name or '-'}</td><td><a href=\"/products/{pid}/edit\">Edit</a></td></tr>"
+            actions_html = f"<a href=\"/products/{pid}/edit\">Edit</a>"
+            if is_active:
+                actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button type=\"submit\">Deactivate</button></form>"
+            else:
+                actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button type=\"submit\">Activate</button></form>"
+            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td>{active_text}</td><td>{category_name or '-'}</td><td>{actions_html}</td></tr>"
         html += "</table>"
         return html
     except Exception as e:
@@ -225,6 +230,32 @@ async def update_product(
         conn.commit()
         conn.close()
         return f"<h1>Product updated</h1><p><a href=\"/products\">Back to products</a></p>"
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.post("/products/{product_id}/deactivate", response_class=HTMLResponse)
+async def deactivate_product(product_id: int):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE products SET is_active = FALSE WHERE id = %s", (product_id,))
+        conn.commit()
+        conn.close()
+        return f"<h1>Product deactivated</h1><p><a href=\"/products\">Back to products</a></p>"
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.post("/products/{product_id}/activate", response_class=HTMLResponse)
+async def activate_product(product_id: int):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE products SET is_active = TRUE WHERE id = %s", (product_id,))
+        conn.commit()
+        conn.close()
+        return f"<h1>Product activated</h1><p><a href=\"/products\">Back to products</a></p>"
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
