@@ -83,8 +83,9 @@ async def order_detail(order_id: str):
             cursor.execute(
                 """
                 SELECT product_name, weight, price
-                FROM cart_items
+                FROM order_items
                 WHERE order_id = %s
+                ORDER BY id
                 """,
                 (order_id,),
             )
