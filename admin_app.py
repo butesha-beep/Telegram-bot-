@@ -125,10 +125,28 @@ async def create_product(
         new_id = cursor.fetchone()[0]
         cursor.execute(
             """
-            INSERT INTO products (category_id, name, price_per_kg, description, image_url, sort_order, is_active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO products (
+    id,
+    category_id,
+    name,
+    price_per_kg,
+    description,
+    image_url,
+    is_active,
+    sort_order
+)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (category_id, name, price_per_kg, description, image_url, sort_order, active),
+            (
+    new_id,
+    category_id,
+    name,
+    price_per_kg,
+    description,
+    image_url,
+    active,
+    sort_order
+),
         )
         conn.commit()
         conn.close()
