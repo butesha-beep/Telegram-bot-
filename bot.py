@@ -205,7 +205,30 @@ def save_client(user):
 
 
 def main_menu():
-    categories = load_json("categories.json")
+    categories = []
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, name
+            FROM categories
+            WHERE is_active = TRUE
+            ORDER BY sort_order, id
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+
+        if rows:
+            categories = [
+                {"id": row[0], "name": row[1]}
+                for row in rows
+            ]
+    except Exception:
+        categories = []
+
+    if not categories:
+        categories = load_json("categories.json")
 
     keyboard = []
 
