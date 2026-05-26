@@ -93,7 +93,33 @@ def admin_css():
     cursor: pointer;
   }
   .button.secondary { background: #3f3f46; color: var(--text); }
-  .status { color: var(--accent); font-weight: 700; }
+  .status {
+    display: inline-block;
+    padding: 4px 8px;
+    border: 1px solid rgba(249, 115, 22, 0.45);
+    border-radius: 999px;
+    background: rgba(249, 115, 22, 0.12);
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .action-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 5px;
+    min-width: 0;
+    max-width: 190px;
+  }
+  .action-group form { display: inline-flex !important; margin: 0 !important; padding: 0 !important; }
+  .action-group .button {
+    margin: 0;
+    padding: 5px 7px;
+    font-size: 11px;
+    line-height: 1.1;
+    white-space: nowrap;
+  }
   .dash-hero {
     display: flex;
     align-items: flex-end;
@@ -137,6 +163,7 @@ def admin_css():
     .admin-card { padding: 18px; }
     .dash-hero { align-items: flex-start; flex-direction: column; }
     .dash-grid { grid-template-columns: 1fr; }
+    .action-group { flex-direction: column; max-width: 150px; }
     table { display: block; overflow-x: auto; white-space: nowrap; }
   }
 </style>
@@ -294,17 +321,23 @@ async def orders():
         rows = cursor.fetchall()
         conn.close()
         
-        html = f"<html><head><title>Orders</title>{PAGE_STYLE}</head><body><div class='container'><h1>Orders</h1><table>"
-        html += "<tr><th>ID</th><th>Order ID</th><th>Username</th><th>Phone</th><th>Address</th><th>Total (€)</th><th>Status</th><th>Payment Method</th><th>Actions</th></tr>"
+        html = "<section class='admin-card'><h1>📦 Заказы</h1><div class='dash-table-wrap'><table>"
+        html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Действия</th></tr>"
         for row in rows:
             id_, order_id, username, phone, address, total, status, payment_method = row
-            actions = [f"<a class=\"button\" href=\"/orders/{order_id}\">View</a>"]
+            status_labels = {
+                "paid": "Оплачен",
+                "preparing": "Готовится",
+                "done": "Готов",
+                "cancelled": "Отмена",
+            }
+            actions = [f"<a class=\"button\" href=\"/orders/{order_id}\">Открыть</a>"]
             for s in ("paid", "preparing", "done", "cancelled"):
-                actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{s.capitalize()}</button></form>")
-            actions_html = " ".join(actions)
+                actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{status_labels[s]}</button></form>")
+            actions_html = f"<div class=\"action-group\">{' '.join(actions)}</div>"
             html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td><span class='status'>{status}</span></td><td>{payment_method or '-'}</td><td>{actions_html}</td></tr>"
-        html += "</table></div></body></html>"
-        return html
+        html += "</table></div></section>"
+        return admin_layout("📦 Заказы", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -422,20 +455,21 @@ async def products():
         rows = cursor.fetchall()
         conn.close()
 
-        html = f"<html><head><title>Products</title>{PAGE_STYLE}</head><body><div class='container'><h1>Products</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><table>"
-        html += "<tr><th>ID</th><th>Name</th><th>Price/kg (€)</th><th>Image</th><th>Active</th><th>Category</th><th>Actions</th></tr>"
+        html = "<section class='admin-card'><h1>🛒 Товары</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><div class='dash-table-wrap'><table>"
+        html += "<tr><th>ID</th><th>Название</th><th>Цена</th><th>Фото</th><th>Статус</th><th>Категория</th><th>Действия</th></tr>"
         for row in rows:
             pid, name, price, image_url, is_active, category_name = row
             img_html = f"<img src=\"{image_url}\" width=80 style=\"border-radius:6px;\"/>" if image_url else "-"
             active_text = "yes" if is_active else "no"
-            actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Edit</a>"
+            actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Редактировать</a>"
             if is_active:
-                actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Deactivate</button></form>"
+                actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Выключить</button></form>"
             else:
-                actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Activate</button></form>"
-            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td>{active_text}</td><td>{category_name or '-'}</td><td>{actions_html}</td></tr>"
-        html += "</table></div></body></html>"
-        return html
+                actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Включить</button></form>"
+            actions_html = f"<div class=\"action-group\">{actions_html}</div>"
+            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status'>{active_text}</span></td><td>{category_name or '-'}</td><td>{actions_html}</td></tr>"
+        html += "</table></div></section>"
+        return admin_layout("🛒 Товары", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 @app.get("/products/new", response_class=HTMLResponse)
