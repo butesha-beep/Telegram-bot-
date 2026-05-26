@@ -1,4 +1,5 @@
 import os
+import html
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 import psycopg2
@@ -24,11 +25,256 @@ PAGE_STYLE = """
 </style>
 """
 
+def admin_css():
+    return """
+<style>
+  :root {
+    --bg: #121212;
+    --panel: #1c1c1f;
+    --panel-soft: #252529;
+    --text: #f7f7f7;
+    --muted: #b7b7bd;
+    --line: #34343a;
+    --accent: #f97316;
+    --accent-hover: #ea580c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--accent-hover); }
+  .admin-shell { min-height: 100vh; }
+  .admin-topbar {
+    border-bottom: 1px solid var(--line);
+    background: #18181b;
+  }
+  .admin-nav {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 14px 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+  }
+  .admin-brand { font-weight: 700; letter-spacing: 0; color: var(--text); }
+  .admin-links { display: flex; flex-wrap: wrap; gap: 14px; }
+  .admin-links a { color: var(--muted); font-size: 14px; }
+  .admin-links a:hover { color: var(--accent); }
+  .admin-container {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 34px 28px;
+  }
+  .admin-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 24px;
+  }
+  h1, h2 { margin: 0 0 16px; color: var(--text); }
+  p { color: var(--muted); line-height: 1.5; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 12px 14px; text-align: left; }
+  th { background: var(--panel-soft); color: var(--text); }
+  .button, .button-link, button {
+    display: inline-block;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #111111;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .button.secondary { background: #3f3f46; color: var(--text); }
+  .status { color: var(--accent); font-weight: 700; }
+  .dash-hero {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 22px;
+  }
+  .dash-kicker {
+    margin: 0 0 8px;
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .dash-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+  .dash-card {
+    display: block;
+    min-height: 118px;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--accent);
+    border-radius: 10px;
+    background: var(--panel);
+    color: var(--text);
+  }
+  .dash-card:hover { border-color: var(--accent); color: var(--text); }
+  .dash-card strong { display: block; margin-bottom: 8px; font-size: 18px; }
+  .dash-card span { color: var(--muted); font-size: 14px; }
+  .stat-value { display: block; margin-top: 10px; font-size: 28px; font-weight: 700; color: var(--text); }
+  .dash-section { margin-top: 22px; }
+  .dash-table-wrap { overflow-x: auto; }
+  .view-link { font-weight: 700; white-space: nowrap; }
+  @media (max-width: 720px) {
+    .admin-nav { align-items: flex-start; flex-direction: column; padding: 14px 18px; }
+    .admin-container { padding: 22px 18px; }
+    .admin-card { padding: 18px; }
+    .dash-hero { align-items: flex-start; flex-direction: column; }
+    .dash-grid { grid-template-columns: 1fr; }
+    table { display: block; overflow-x: auto; white-space: nowrap; }
+  }
+</style>
+"""
+
+
+def admin_layout(title, content):
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  {admin_css()}
+</head>
+<body>
+  <div class="admin-shell">
+    <header class="admin-topbar">
+      <nav class="admin-nav">
+        <a class="admin-brand" href="/">🏠 Главная</a>
+        <div class="admin-links">
+          <a href="/orders">📦 Заказы</a>
+          <a href="/products">🛒 Товары</a>
+          <a href="/categories">🗂 Категории</a>
+          <a href="/clients">👥 Клиенты</a>
+        </div>
+      </nav>
+    </header>
+    <main class="admin-container">{content}</main>
+  </div>
+</body>
+</html>"""
+
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return "Deal Market Admin Panel works"
+    stats = None
+    latest_orders = []
+    error_message = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(total), 0)
+            FROM orders
+            """
+        )
+        stats = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT order_id, username, phone, address, total, status
+            FROM orders
+            ORDER BY id DESC
+            LIMIT 5
+            """
+        )
+        latest_orders = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        error_message = str(e)
+
+    if stats:
+        total_orders, pending_orders, paid_orders, revenue = stats
+        stat_cards = f"""
+        <div class="dash-grid">
+          <div class="dash-card"><span>Всего заказов</span><strong class="stat-value">{total_orders}</strong></div>
+          <div class="dash-card"><span>Ожидают оплаты</span><strong class="stat-value">{pending_orders}</strong></div>
+          <div class="dash-card"><span>Оплачены</span><strong class="stat-value">{paid_orders}</strong></div>
+          <div class="dash-card"><span>Выручка</span><strong class="stat-value">EUR {float(revenue):.2f}</strong></div>
+        </div>
+        """
+    else:
+        stat_cards = f"""
+        <section class="admin-card">
+          <h2>Статистика недоступна</h2>
+          <p>{html.escape(error_message or 'Подключение к базе данных недоступно.')}</p>
+        </section>
+        """
+
+    order_rows = ""
+    for order_id, username, phone, address, total, status in latest_orders:
+        order_id_text = html.escape(str(order_id))
+        order_rows += f"""
+        <tr>
+          <td>{order_id_text}</td>
+          <td>{html.escape(str(username or '-'))}</td>
+          <td>{html.escape(str(phone or '-'))}</td>
+          <td>{html.escape(str(address or '-'))}</td>
+          <td>EUR {float(total):.2f}</td>
+          <td><span class="status">{html.escape(str(status or '-'))}</span></td>
+          <td><a class="view-link" href="/orders/{order_id_text}">Открыть</a></td>
+        </tr>
+        """
+    latest_section = """
+        <p>Последних заказов пока нет.</p>
+    """
+    if order_rows:
+        latest_section = f"""
+        <div class="dash-table-wrap">
+          <table>
+            <tr><th>ID заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th></th></tr>
+            {order_rows}
+          </table>
+        </div>
+        """
+
+    return admin_layout(
+        "Deal Market NL",
+        f"""
+        <section class="dash-hero">
+          <div>
+            <p class="dash-kicker">Панель управления</p>
+            <h1>Deal Market NL</h1>
+            <p>Быстрый доступ к заказам, каталогу, категориям и клиентам.</p>
+          </div>
+        </section>
+
+        <div class="dash-grid">
+          <a class="dash-card" href="/orders"><strong>Заказы</strong><span>Просмотр и обновление заказов клиентов</span></a>
+          <a class="dash-card" href="/products"><strong>Товары</strong><span>Редактирование товаров и наличия</span></a>
+          <a class="dash-card" href="/categories"><strong>Категории</strong><span>Управление разделами каталога</span></a>
+          <a class="dash-card" href="/clients"><strong>Клиенты</strong><span>Просмотр сохраненных данных клиентов</span></a>
+        </div>
+
+        {stat_cards}
+
+        <section class="admin-card dash-section">
+          <h2>Последние заказы</h2>
+          {latest_section}
+        </section>
+        """,
+    )
 
 @app.get("/health")
 async def health():
@@ -176,7 +422,7 @@ async def products():
         rows = cursor.fetchall()
         conn.close()
 
-        html = f"<html><head><title>Products</title>{PAGE_STYLE}</head><body><div class='container'><h1>Products</h1><table>"
+        html = f"<html><head><title>Products</title>{PAGE_STYLE}</head><body><div class='container'><h1>Products</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><table>"
         html += "<tr><th>ID</th><th>Name</th><th>Price/kg (€)</th><th>Image</th><th>Active</th><th>Category</th><th>Actions</th></tr>"
         for row in rows:
             pid, name, price, image_url, is_active, category_name = row
@@ -372,7 +618,7 @@ async def categories():
         conn.close()
 
         html = "<h1>Categories</h1>"
-        html += "<p><a href=\"/categories/new\">Create new category</a></p>"
+        html += "<p><a class=\"button button-link\" href=\"/categories/new\">➕ Новая категория</a></p>"
         html += "<table border='1' cellpadding='5'>"
         html += "<tr><th>ID</th><th>Name</th><th>Sort Order</th><th>Active</th><th>Actions</th></tr>"
         for row in rows:
