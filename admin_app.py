@@ -157,6 +157,23 @@ def admin_css():
   .dash-section { margin-top: 22px; }
   .dash-table-wrap { overflow-x: auto; }
   .view-link { font-weight: 700; white-space: nowrap; }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .detail-field {
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel-soft);
+  }
+  .detail-field strong {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-size: 13px;
+  }
   .products-table {
     min-width: 860px;
   }
@@ -245,6 +262,7 @@ def admin_css():
     .admin-card { padding: 18px; }
     .dash-hero { align-items: flex-start; flex-direction: column; }
     .dash-grid { grid-template-columns: 1fr; }
+    .detail-grid { grid-template-columns: 1fr; }
     .action-group { flex-direction: column; max-width: 150px; }
     table { display: block; overflow-x: auto; white-space: nowrap; }
   }
@@ -486,26 +504,26 @@ async def order_detail(order_id: str):
             items = []
         conn.close()
 
-        html = f"<html><head><title>Order {order_id}</title>{PAGE_STYLE}</head><body><div class='container'><h1>Order {order_id}</h1><div class='card'>"
-        html += f"<div class='field'><strong>Order ID:</strong> {order_id}</div>"
-        html += f"<div class='field'><strong>Client:</strong> {username or '-'}</div>"
-        html += f"<div class='field'><strong>Phone:</strong> {phone or '-'}</div>"
-        html += f"<div class='field'><strong>Address:</strong> {address or '-'}</div>"
-        html += f"<div class='field'><strong>Status:</strong> <span class='status'>{status}</span></div>"
-        html += f"<div class='field'><strong>Payment:</strong> {payment_method or '-'}</div>"
-        html += "</div>"
+        html = f"<section class='admin-card'><h1>Заказ {order_id}</h1><div class='detail-grid'>"
+        html += f"<div class='detail-field'><strong>№ заказа</strong>{order_id}</div>"
+        html += f"<div class='detail-field'><strong>Клиент</strong>{username or '-'}</div>"
+        html += f"<div class='detail-field'><strong>Телефон</strong>{phone or '-'}</div>"
+        html += f"<div class='detail-field'><strong>Адрес</strong>{address or '-'}</div>"
+        html += f"<div class='detail-field'><strong>Статус</strong><span class='status'>{status}</span></div>"
+        html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method or '-'}</div>"
+        html += "</div></section>"
         if items:
-            html += "<h2>Items</h2><table>"
-            html += "<tr><th>Product</th><th>Weight</th></tr>"
+            html += "<section class='admin-card dash-section'><h2>Товары</h2><div class='dash-table-wrap'><table>"
+            html += "<tr><th>Товар</th><th>Вес</th></tr>"
             for product_name, weight, price in items:
                 html += f"<tr><td>{product_name}</td><td>{weight}</td></tr>"
-            html += "</table>"
-            html += f"<p><strong>Total: €{total:.2f}</strong></p>"
+            html += "</table></div>"
+            html += f"<p><strong>Итого: €{total:.2f}</strong></p></section>"
         else:
-            html += "<p>No order items found</p>"
-            html += f"<p><strong>Total: €{total:.2f}</strong></p>"
-        html += f"<p><a class='button button-link' href=\"/orders\">Back to orders</a></p></div></body></html>"
-        return html
+            html += "<section class='admin-card dash-section'><p>Товары не найдены.</p>"
+            html += f"<p><strong>Итого: €{total:.2f}</strong></p></section>"
+        html += f"<p><a class='button button-link' href=\"/orders\">← К заказам</a></p>"
+        return admin_layout(f"Заказ {order_id}", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
