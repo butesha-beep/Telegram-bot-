@@ -5,6 +5,25 @@ import psycopg2
 
 app = FastAPI()
 
+PAGE_STYLE = """
+<style>
+  body { font-family: Arial, sans-serif; background: #f4f6f8; color: #2b2b2b; margin: 0; padding: 0; }
+  .container { max-width: 1100px; margin: 30px auto; padding: 24px; background: #ffffff; box-shadow: 0 10px 24px rgba(0,0,0,0.08); border-radius: 12px; }
+  h1, h2 { margin: 0 0 16px; color: #1f2937; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th, td { border: 1px solid #d1d5db; padding: 12px 14px; }
+  th { background: #f3f4f6; text-align: left; }
+  tr:nth-child(even) td { background: #f9fafb; }
+  .button, .button-link { display: inline-block; padding: 7px 12px; margin: 2px 4px 2px 0; color: #ffffff; background: #2563eb; text-decoration: none; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; }
+  .button.secondary { background: #6b7280; }
+  .card { padding: 18px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px; margin-top: 16px; }
+  .field { margin: 10px 0; }
+  .field strong { color: #374151; }
+  .status { font-weight: 700; color: #0f172a; }
+  a { color: #2563eb; }
+</style>
+"""
+
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 
 @app.get("/", response_class=HTMLResponse)
@@ -29,16 +48,16 @@ async def orders():
         rows = cursor.fetchall()
         conn.close()
         
-        html = "<h1>Orders</h1><table border='1' cellpadding='5'>"
+        html = f"<html><head><title>Orders</title>{PAGE_STYLE}</head><body><div class='container'><h1>Orders</h1><table>"
         html += "<tr><th>ID</th><th>Order ID</th><th>Username</th><th>Phone</th><th>Address</th><th>Total (€)</th><th>Status</th><th>Payment Method</th><th>Actions</th></tr>"
         for row in rows:
             id_, order_id, username, phone, address, total, status, payment_method = row
-            actions = [f"<a href=\"/orders/{order_id}\">View</a>"]
+            actions = [f"<a class=\"button\" href=\"/orders/{order_id}\">View</a>"]
             for s in ("paid", "preparing", "done", "cancelled"):
-                actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button type=\"submit\">{s.capitalize()}</button></form>")
+                actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{s.capitalize()}</button></form>")
             actions_html = " ".join(actions)
-            html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{status}</td><td>{payment_method or '-'}</td><td>{actions_html}</td></tr>"
-        html += "</table>"
+            html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td><span class='status'>{status}</span></td><td>{payment_method or '-'}</td><td>{actions_html}</td></tr>"
+        html += "</table></div></body></html>"
         return html
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
@@ -94,24 +113,25 @@ async def order_detail(order_id: str):
             items = []
         conn.close()
 
-        html = f"<h1>Order {order_id}</h1>"
-        html += f"<p>id: {id_}</p>"
-        html += f"<p>username: {username or '-'}</p>"
-        html += f"<p>phone: {phone or '-'}</p>"
-        html += f"<p>address: {address or '-'}</p>"
-        html += f"<p>status: {status}</p>"
-        html += f"<p>payment_method: {payment_method or '-'}</p>"
+        html = f"<html><head><title>Order {order_id}</title>{PAGE_STYLE}</head><body><div class='container'><h1>Order {order_id}</h1><div class='card'>"
+        html += f"<div class='field'><strong>Order ID:</strong> {order_id}</div>"
+        html += f"<div class='field'><strong>Client:</strong> {username or '-'}</div>"
+        html += f"<div class='field'><strong>Phone:</strong> {phone or '-'}</div>"
+        html += f"<div class='field'><strong>Address:</strong> {address or '-'}</div>"
+        html += f"<div class='field'><strong>Status:</strong> <span class='status'>{status}</span></div>"
+        html += f"<div class='field'><strong>Payment:</strong> {payment_method or '-'}</div>"
+        html += "</div>"
         if items:
-            html += "<h2>Items</h2><table border='1' cellpadding='5'>"
+            html += "<h2>Items</h2><table>"
             html += "<tr><th>Product</th><th>Weight</th></tr>"
             for product_name, weight, price in items:
                 html += f"<tr><td>{product_name}</td><td>{weight}</td></tr>"
             html += "</table>"
-            html += f"<p>Total: €{total:.2f}</p>"
+            html += f"<p><strong>Total: €{total:.2f}</strong></p>"
         else:
             html += "<p>No order items found</p>"
-            html += f"<p>Total: €{total:.2f}</p>"
-        html += f"<p><a href=\"/orders\">Back to orders</a></p>"
+            html += f"<p><strong>Total: €{total:.2f}</strong></p>"
+        html += f"<p><a class='button button-link' href=\"/orders\">Back to orders</a></p></div></body></html>"
         return html
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
@@ -156,19 +176,19 @@ async def products():
         rows = cursor.fetchall()
         conn.close()
 
-        html = "<h1>Products</h1><table border='1' cellpadding='5'>"
+        html = f"<html><head><title>Products</title>{PAGE_STYLE}</head><body><div class='container'><h1>Products</h1><table>"
         html += "<tr><th>ID</th><th>Name</th><th>Price/kg (€)</th><th>Image</th><th>Active</th><th>Category</th><th>Actions</th></tr>"
         for row in rows:
             pid, name, price, image_url, is_active, category_name = row
-            img_html = f"<img src=\"{image_url}\" width=80/>" if image_url else "-"
+            img_html = f"<img src=\"{image_url}\" width=80 style=\"border-radius:6px;\"/>" if image_url else "-"
             active_text = "yes" if is_active else "no"
-            actions_html = f"<a href=\"/products/{pid}/edit\">Edit</a>"
+            actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Edit</a>"
             if is_active:
-                actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button type=\"submit\">Deactivate</button></form>"
+                actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Deactivate</button></form>"
             else:
-                actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button type=\"submit\">Activate</button></form>"
+                actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Activate</button></form>"
             html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td>{active_text}</td><td>{category_name or '-'}</td><td>{actions_html}</td></tr>"
-        html += "</table>"
+        html += "</table></div></body></html>"
         return html
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
