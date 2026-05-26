@@ -193,6 +193,20 @@ def admin_css():
   .products-table .action-group {
     max-width: 170px;
   }
+  .categories-table {
+    min-width: 640px;
+  }
+  .categories-table th,
+  .categories-table td {
+    vertical-align: middle;
+  }
+  .categories-table td:nth-child(2) {
+    min-width: 180px;
+    font-weight: 700;
+  }
+  .categories-table .action-group {
+    max-width: 140px;
+  }
   .admin-form {
     display: grid;
     gap: 16px;
@@ -421,7 +435,19 @@ async def update_order_status(order_id: str, status: str):
         cursor.execute("UPDATE orders SET status = %s WHERE order_id = %s", (status, order_id))
         conn.commit()
         conn.close()
-        return f"<h1>Order status updated</h1><p><a href=\"/orders\">Back to orders</a></p>"
+        return admin_layout(
+            "✅ Статус заказа обновлён",
+            f"""
+            <section class="admin-card">
+              <h1>✅ Статус заказа обновлён</h1>
+              <p>Статус заказа успешно изменён.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/orders">← К заказам</a>
+                <a class="button button-link secondary" href="/orders/{order_id}">Открыть заказ</a>
+              </div>
+            </section>
+            """,
+        )
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -523,7 +549,7 @@ async def products():
         rows = cursor.fetchall()
         conn.close()
 
-        html = "<section class='admin-card'><h1>🛒 Товары</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><div class='dash-table-wrap'><table class='products-table'>"
+        html = "<section class='admin-card'><h1>🛒 Товары</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><p>Скрытые товары не показываются в каталоге, но остаются в системе.</p><div class='dash-table-wrap'><table class='products-table'>"
         html += "<tr><th>ID</th><th>Название</th><th>Цена</th><th>Фото</th><th>Статус</th><th>Категория</th><th>Действия</th></tr>"
         for row in rows:
             pid, name, price, image_url, is_active, category_name = row
@@ -532,9 +558,9 @@ async def products():
             status_class = "active" if is_active else "inactive"
             actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Редактировать</a>"
             if is_active:
-                actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Выключить</button></form>"
+                actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Скрыть</button></form>"
             else:
-                actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Включить</button></form>"
+                actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Вернуть</button></form>"
             actions_html = f"<div class=\"action-group\">{actions_html}</div>"
             html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_name or '-'}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
@@ -548,15 +574,15 @@ async def new_product_form():
       <h1>➕ Новый товар</h1>
       <p><a href="/products">← Назад к товарам</a></p>
       <form class="admin-form" method="post" action="/products/new">
-        <label>category_id <input name="category_id"/></label>
-        <label>name <input name="name"/></label>
-        <label>price_per_kg <input name="price_per_kg"/></label>
-        <label>description <input name="description"/></label>
-        <label>image_url <input name="image_url"/></label>
-        <label>sort_order <input name="sort_order" value="0"/></label>
-        <label>is_active <input type="checkbox" name="is_active" value="1"/></label>
+        <label>Категория <input name="category_id"/></label>
+        <label>Название товара <input name="name"/></label>
+        <label>Цена за кг (€) <input name="price_per_kg"/></label>
+        <label>Описание <input name="description"/></label>
+        <label>Ссылка на фото <input name="image_url"/></label>
+        <label>Порядок сортировки <input name="sort_order" value="0"/><small>Меньше число = выше в списке</small></label>
+        <label>Товар активен <input type="checkbox" name="is_active" value="1"/></label>
         <div class="form-actions">
-          <input class="button" type="submit" value="Create"/>
+          <input class="button" type="submit" value="Создать товар"/>
         </div>
       </form>
     </section>
@@ -607,7 +633,19 @@ async def create_product(
         )
         conn.commit()
         conn.close()
-        return "<h1>Product created</h1><p><a href=\"/products\">Back to products</a></p>"
+        return admin_layout(
+            "✅ Товар создан",
+            """
+            <section class="admin-card">
+              <h1>✅ Товар создан</h1>
+              <p>Товар успешно добавлен.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/products">← К товарам</a>
+                <a class="button button-link secondary" href="/products/new">➕ Добавить ещё товар</a>
+              </div>
+            </section>
+            """,
+        )
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -633,19 +671,24 @@ async def edit_product_form(product_id: int):
         category_id, name, price_per_kg, description, image_url, sort_order, is_active = row
         checked = "checked" if is_active else ""
         html = f"""
-        <h1>Edit Product</h1>
-        <form method="post" action="/products/{product_id}/edit">
-          <label>category_id: <input name="category_id" value="{category_id}"/></label><br/>
-          <label>name: <input name="name" value="{name}"/></label><br/>
-          <label>price_per_kg: <input name="price_per_kg" value="{price_per_kg}"/></label><br/>
-          <label>description: <input name="description" value="{description or ''}"/></label><br/>
-          <label>image_url: <input name="image_url" value="{image_url or ''}"/></label><br/>
-          <label>sort_order: <input name="sort_order" value="{sort_order}"/></label><br/>
-          <label>is_active: <input type="checkbox" name="is_active" value="1" {checked}/></label><br/>
-          <input type="submit" value="Update"/>
-        </form>
+        <section class="admin-card">
+          <h1>✏️ Редактировать товар</h1>
+          <p><a href="/products">← Назад к товарам</a></p>
+          <form class="admin-form" method="post" action="/products/{product_id}/edit">
+            <label>Категория <input name="category_id" value="{category_id}"/></label>
+            <label>Название товара <input name="name" value="{name}"/></label>
+            <label>Цена за кг (€) <input name="price_per_kg" value="{price_per_kg}"/></label>
+            <label>Описание <input name="description" value="{description or ''}"/></label>
+            <label>Ссылка на фото <input name="image_url" value="{image_url or ''}"/></label>
+            <label>Порядок сортировки <input name="sort_order" value="{sort_order}"/><small>Меньше число = выше в списке</small></label>
+            <label>Товар активен <input type="checkbox" name="is_active" value="1" {checked}/></label>
+            <div class="form-actions">
+              <input class="button" type="submit" value="Сохранить изменения"/>
+            </div>
+          </form>
+        </section>
         """
-        return html
+        return admin_layout("✏️ Редактировать товар", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -681,7 +724,19 @@ async def update_product(
         )
         conn.commit()
         conn.close()
-        return f"<h1>Product updated</h1><p><a href=\"/products\">Back to products</a></p>"
+        return admin_layout(
+            "✅ Товар обновлён",
+            f"""
+            <section class="admin-card">
+              <h1>✅ Товар обновлён</h1>
+              <p>Изменения успешно сохранены.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/products">← К товарам</a>
+                <a class="button button-link secondary" href="/products/{product_id}/edit">✏️ Продолжить редактирование</a>
+              </div>
+            </section>
+            """,
+        )
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -725,16 +780,16 @@ async def categories():
         rows = cursor.fetchall()
         conn.close()
 
-        html = "<h1>Categories</h1>"
-        html += "<p><a class=\"button button-link\" href=\"/categories/new\">➕ Новая категория</a></p>"
-        html += "<table border='1' cellpadding='5'>"
-        html += "<tr><th>ID</th><th>Name</th><th>Sort Order</th><th>Active</th><th>Actions</th></tr>"
+        html = "<section class='admin-card'><h1>🗂 Категории</h1><p><a class=\"button button-link\" href=\"/categories/new\">➕ Новая категория</a></p><div class='dash-table-wrap'><table class='categories-table'>"
+        html += "<tr><th>ID</th><th>Название</th><th>Порядок</th><th>Статус</th><th>Действия</th></tr>"
         for row in rows:
             cid, name, sort_order, is_active = row
-            active_text = "yes" if is_active else "no"
-            html += f"<tr><td>{cid}</td><td>{name}</td><td>{sort_order}</td><td>{active_text}</td><td><a href=\"/categories/{cid}/edit\">Edit</a></td></tr>"
-        html += "</table>"
-        return html
+            active_text = "Активна" if is_active else "Скрыта"
+            status_class = "active" if is_active else "inactive"
+            actions_html = f"<div class=\"action-group\"><a class=\"button\" href=\"/categories/{cid}/edit\">Редактировать</a></div>"
+            html += f"<tr><td>{cid}</td><td>{name}</td><td>{sort_order}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{actions_html}</td></tr>"
+        html += "</table></div></section>"
+        return admin_layout("🗂 Категории", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -742,15 +797,20 @@ async def categories():
 @app.get("/categories/new", response_class=HTMLResponse)
 async def new_category_form():
     html = """
-    <h1>New Category</h1>
-    <form method="post" action="/categories/new">
-      <label>name: <input name="name"/></label><br/>
-      <label>sort_order: <input name="sort_order"/></label><br/>
-      <label>is_active: <input type="checkbox" name="is_active" value="1"/></label><br/>
-      <input type="submit" value="Create"/>
-    </form>
+    <section class="admin-card">
+      <h1>➕ Новая категория</h1>
+      <p><a href="/categories">← Назад к категориям</a></p>
+      <form class="admin-form" method="post" action="/categories/new">
+        <label>Название категории <input name="name"/></label>
+        <label>Порядок сортировки <input name="sort_order"/></label>
+        <label>Активна <input type="checkbox" name="is_active" value="1"/></label>
+        <div class="form-actions">
+          <input class="button" type="submit" value="Создать категорию"/>
+        </div>
+      </form>
+    </section>
     """
-    return html
+    return admin_layout("➕ Новая категория", html)
 
 
 @app.post("/categories/new", response_class=HTMLResponse)
@@ -772,7 +832,19 @@ async def create_category(
         )
         conn.commit()
         conn.close()
-        return "<h1>Category created</h1><p><a href=\"/categories\">Back to categories</a></p>"
+        return admin_layout(
+            "✅ Категория создана",
+            """
+            <section class="admin-card">
+              <h1>✅ Категория создана</h1>
+              <p>Категория успешно добавлена.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/categories">← К категориям</a>
+                <a class="button button-link secondary" href="/categories/new">➕ Добавить ещё</a>
+              </div>
+            </section>
+            """,
+        )
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -798,15 +870,20 @@ async def edit_category_form(category_id: int):
         name, sort_order, is_active = row
         checked = "checked" if is_active else ""
         html = f"""
-        <h1>Edit Category</h1>
-        <form method="post" action="/categories/{category_id}/edit">
-          <label>name: <input name="name" value="{name}"/></label><br/>
-          <label>sort_order: <input name="sort_order" value="{sort_order}"/></label><br/>
-          <label>is_active: <input type="checkbox" name="is_active" value="1" {checked}/></label><br/>
-          <input type="submit" value="Update"/>
-        </form>
+        <section class="admin-card">
+          <h1>✏️ Редактировать категорию</h1>
+          <p><a href="/categories">← Назад к категориям</a></p>
+          <form class="admin-form" method="post" action="/categories/{category_id}/edit">
+            <label>Название категории <input name="name" value="{name}"/></label>
+            <label>Порядок сортировки <input name="sort_order" value="{sort_order}"/></label>
+            <label>Активна <input type="checkbox" name="is_active" value="1" {checked}/></label>
+            <div class="form-actions">
+              <input class="button" type="submit" value="Сохранить изменения"/>
+            </div>
+          </form>
+        </section>
         """
-        return html
+        return admin_layout("✏️ Редактировать категорию", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -834,7 +911,19 @@ async def update_category(
         )
         conn.commit()
         conn.close()
-        return f"<h1>Category updated</h1><p><a href=\"/categories\">Back to categories</a></p>"
+        return admin_layout(
+            "✅ Категория обновлена",
+            f"""
+            <section class="admin-card">
+              <h1>✅ Категория обновлена</h1>
+              <p>Изменения успешно сохранены.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/categories">← К категориям</a>
+                <a class="button button-link secondary" href="/categories/{category_id}/edit">✏️ Продолжить редактирование</a>
+              </div>
+            </section>
+            """,
+        )
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
