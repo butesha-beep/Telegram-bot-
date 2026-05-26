@@ -157,6 +157,42 @@ def admin_css():
   .dash-section { margin-top: 22px; }
   .dash-table-wrap { overflow-x: auto; }
   .view-link { font-weight: 700; white-space: nowrap; }
+  .products-table {
+    min-width: 860px;
+  }
+  .products-table th,
+  .products-table td {
+    vertical-align: middle;
+  }
+  .products-table td:nth-child(2) {
+    min-width: 180px;
+    font-weight: 700;
+  }
+  .products-table td:nth-child(3) {
+    white-space: nowrap;
+  }
+  .product-thumb {
+    display: block;
+    width: 72px;
+    height: 54px;
+    object-fit: cover;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel-soft);
+  }
+  .status.active {
+    border-color: rgba(34, 197, 94, 0.45);
+    background: rgba(34, 197, 94, 0.12);
+    color: #4ade80;
+  }
+  .status.inactive {
+    border-color: rgba(148, 163, 184, 0.35);
+    background: rgba(148, 163, 184, 0.12);
+    color: #cbd5e1;
+  }
+  .products-table .action-group {
+    max-width: 170px;
+  }
   @media (max-width: 720px) {
     .admin-nav { align-items: flex-start; flex-direction: column; padding: 14px 18px; }
     .admin-container { padding: 22px 18px; }
@@ -455,19 +491,20 @@ async def products():
         rows = cursor.fetchall()
         conn.close()
 
-        html = "<section class='admin-card'><h1>🛒 Товары</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><div class='dash-table-wrap'><table>"
+        html = "<section class='admin-card'><h1>🛒 Товары</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><div class='dash-table-wrap'><table class='products-table'>"
         html += "<tr><th>ID</th><th>Название</th><th>Цена</th><th>Фото</th><th>Статус</th><th>Категория</th><th>Действия</th></tr>"
         for row in rows:
             pid, name, price, image_url, is_active, category_name = row
-            img_html = f"<img src=\"{image_url}\" width=80 style=\"border-radius:6px;\"/>" if image_url else "-"
-            active_text = "yes" if is_active else "no"
+            img_html = f"<img class=\"product-thumb\" src=\"{image_url}\"/>" if image_url else "-"
+            active_text = "Активен" if is_active else "Выключен"
+            status_class = "active" if is_active else "inactive"
             actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Редактировать</a>"
             if is_active:
                 actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Выключить</button></form>"
             else:
                 actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Включить</button></form>"
             actions_html = f"<div class=\"action-group\">{actions_html}</div>"
-            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status'>{active_text}</span></td><td>{category_name or '-'}</td><td>{actions_html}</td></tr>"
+            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_name or '-'}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception as e:
