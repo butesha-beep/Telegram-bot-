@@ -486,7 +486,18 @@ async def order_detail(order_id: str):
         row = cursor.fetchone()
         if not row:
             conn.close()
-            return f"<h1>Order not found</h1><p><a href=\"/orders\">Back to orders</a></p>"
+            return admin_layout(
+                "⚠️ Заказ не найден",
+                """
+                <section class="admin-card">
+                  <h1>⚠️ Заказ не найден</h1>
+                  <p>Такой заказ не найден.</p>
+                  <div class="form-actions">
+                    <a class="button button-link" href="/orders">← К заказам</a>
+                  </div>
+                </section>
+                """,
+            )
 
         id_, order_id, username, phone, address, total, status, payment_method = row
         try:
@@ -542,13 +553,13 @@ async def clients():
         rows = cursor.fetchall()
         conn.close()
         
-        html = "<h1>Clients</h1><table border='1' cellpadding='5'>"
-        html += "<tr><th>Telegram ID</th><th>Username</th><th>Phone</th><th>Address</th></tr>"
+        html = "<section class='admin-card'><h1>👥 Клиенты</h1><div class='dash-table-wrap'><table>"
+        html += "<tr><th>Telegram ID</th><th>Клиент</th><th>Телефон</th><th>Адрес</th></tr>"
         for row in rows:
             telegram_id, username, phone, address = row
             html += f"<tr><td>{telegram_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td></tr>"
-        html += "</table>"
-        return html
+        html += "</table></div></section>"
+        return admin_layout("👥 Клиенты", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -684,7 +695,18 @@ async def edit_product_form(product_id: int):
         row = cursor.fetchone()
         conn.close()
         if not row:
-            return "<h1>Product not found</h1>"
+            return admin_layout(
+                "⚠️ Товар не найден",
+                """
+                <section class="admin-card">
+                  <h1>⚠️ Товар не найден</h1>
+                  <p>Такой товар не найден.</p>
+                  <div class="form-actions">
+                    <a class="button button-link" href="/products">← К товарам</a>
+                  </div>
+                </section>
+                """,
+            )
 
         category_id, name, price_per_kg, description, image_url, sort_order, is_active = row
         checked = "checked" if is_active else ""
@@ -767,7 +789,18 @@ async def deactivate_product(product_id: int):
         cursor.execute("UPDATE products SET is_active = FALSE WHERE id = %s", (product_id,))
         conn.commit()
         conn.close()
-        return f"<h1>Product deactivated</h1><p><a href=\"/products\">Back to products</a></p>"
+        return admin_layout(
+            "✅ Товар скрыт",
+            """
+            <section class="admin-card">
+              <h1>✅ Товар скрыт</h1>
+              <p>Товар скрыт из каталога.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/products">← К товарам</a>
+              </div>
+            </section>
+            """,
+        )
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -780,7 +813,18 @@ async def activate_product(product_id: int):
         cursor.execute("UPDATE products SET is_active = TRUE WHERE id = %s", (product_id,))
         conn.commit()
         conn.close()
-        return f"<h1>Product activated</h1><p><a href=\"/products\">Back to products</a></p>"
+        return admin_layout(
+            "✅ Товар возвращён",
+            """
+            <section class="admin-card">
+              <h1>✅ Товар возвращён</h1>
+              <p>Товар снова отображается в каталоге.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/products">← К товарам</a>
+              </div>
+            </section>
+            """,
+        )
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
@@ -883,7 +927,18 @@ async def edit_category_form(category_id: int):
         row = cursor.fetchone()
         conn.close()
         if not row:
-            return "<h1>Category not found</h1>"
+            return admin_layout(
+                "⚠️ Категория не найдена",
+                """
+                <section class="admin-card">
+                  <h1>⚠️ Категория не найдена</h1>
+                  <p>Такая категория не найдена.</p>
+                  <div class="form-actions">
+                    <a class="button button-link" href="/categories">← К категориям</a>
+                  </div>
+                </section>
+                """,
+            )
 
         name, sort_order, is_active = row
         checked = "checked" if is_active else ""
