@@ -193,6 +193,38 @@ def admin_css():
   .products-table .action-group {
     max-width: 170px;
   }
+  .admin-form {
+    display: grid;
+    gap: 16px;
+    max-width: 720px;
+  }
+  .admin-form label {
+    display: grid;
+    gap: 7px;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 700;
+  }
+  .admin-form input {
+    width: 100%;
+    padding: 11px 12px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--panel-soft);
+    color: var(--text);
+    font: inherit;
+  }
+  .admin-form input[type="checkbox"] {
+    width: auto;
+    accent-color: var(--accent);
+  }
+  .form-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-top: 4px;
+  }
   @media (max-width: 720px) {
     .admin-nav { align-items: flex-start; flex-direction: column; padding: 14px 18px; }
     .admin-container { padding: 22px 18px; }
@@ -512,19 +544,24 @@ async def products():
 @app.get("/products/new", response_class=HTMLResponse)
 async def new_product_form():
     html = """
-    <h1>New Product</h1>
-    <form method="post" action="/products/new">
-      <label>category_id: <input name="category_id"/></label><br/>
-      <label>name: <input name="name"/></label><br/>
-      <label>price_per_kg: <input name="price_per_kg"/></label><br/>
-      <label>description: <input name="description"/></label><br/>
-      <label>image_url: <input name="image_url"/></label><br/>
-      <label>sort_order: <input name="sort_order" value="0"/></label><br/>
-      <label>is_active: <input type="checkbox" name="is_active" value="1"/></label><br/>
-      <input type="submit" value="Create"/>
-    </form>
+    <section class="admin-card">
+      <h1>➕ Новый товар</h1>
+      <p><a href="/products">← Назад к товарам</a></p>
+      <form class="admin-form" method="post" action="/products/new">
+        <label>category_id <input name="category_id"/></label>
+        <label>name <input name="name"/></label>
+        <label>price_per_kg <input name="price_per_kg"/></label>
+        <label>description <input name="description"/></label>
+        <label>image_url <input name="image_url"/></label>
+        <label>sort_order <input name="sort_order" value="0"/></label>
+        <label>is_active <input type="checkbox" name="is_active" value="1"/></label>
+        <div class="form-actions">
+          <input class="button" type="submit" value="Create"/>
+        </div>
+      </form>
+    </section>
     """
-    return html
+    return admin_layout("➕ Новый товар", html)
 
 
 @app.post("/products/new", response_class=HTMLResponse)
