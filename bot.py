@@ -140,6 +140,48 @@ def init_db():
             sort_order INTEGER DEFAULT 0
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS product_options (
+            id SERIAL PRIMARY KEY,
+            product_id INTEGER REFERENCES products(id),
+            label TEXT NOT NULL,
+            weight INTEGER,
+            price REAL NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            is_active BOOLEAN DEFAULT TRUE
+        )
+    """)
+    cursor.execute("""
+        INSERT INTO product_options (
+            product_id,
+            label,
+            weight,
+            price,
+            sort_order,
+            is_active
+        )
+        SELECT
+            p.id,
+            option_data.label,
+            option_data.weight,
+            p.price_per_kg * option_data.weight / 1000,
+            option_data.weight,
+            TRUE
+        FROM products p
+        CROSS JOIN (
+            VALUES
+                ('50 г', 50),
+                ('100 г', 100),
+                ('200 г', 200),
+                ('500 г', 500)
+        ) AS option_data(label, weight)
+        WHERE p.is_active = TRUE
+          AND NOT EXISTS (
+              SELECT 1
+              FROM product_options po
+              WHERE po.product_id = p.id
+          )
+    """)
     try:
         cursor.execute("ALTER TABLE orders ALTER COLUMN order_id TYPE BIGINT")
         cursor.execute("ALTER TABLE orders ALTER COLUMN telegram_id TYPE BIGINT")
@@ -374,36 +416,77 @@ async def show_product(callback: types.CallbackQuery):
         f"⚖️ 100 г: {price_100g:.2f} €"
     )
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, label, weight, price
+            FROM product_options
+            WHERE product_id = %s
+              AND is_active = TRUE
+            ORDER BY sort_order, id
+            """,
+            (product_id,)
+        )
+        options = cursor.fetchall()
+        conn.close()
+    except Exception:
+        options = []
+
+    if options:
+        option_rows = []
+        option_row = []
+        for option_id, label, weight, option_price in options:
+            option_row.append(
                 InlineKeyboardButton(
-                    text="50 г",
-                    callback_data=f"weight_{product_id}_50"
-                ),
-                InlineKeyboardButton(
-                    text="100 г",
-                    callback_data=f"weight_{product_id}_100"
+                    text=f"{label} — {float(option_price):.2f} €",
+                    callback_data=f"option_{option_id}"
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="200 г",
-                    callback_data=f"weight_{product_id}_200"
-                ),
-                InlineKeyboardButton(
-                    text="500 г",
-                    callback_data=f"weight_{product_id}_500"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data=f"category_{product['category_id']}"
-                )
+            )
+            if len(option_row) == 2:
+                option_rows.append(option_row)
+                option_row = []
+        if option_row:
+            option_rows.append(option_row)
+        option_rows.append([
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"category_{product['category_id']}"
+            )
+        ])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=option_rows)
+    else:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="50 г",
+                        callback_data=f"weight_{product_id}_50"
+                    ),
+                    InlineKeyboardButton(
+                        text="100 г",
+                        callback_data=f"weight_{product_id}_100"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="200 г",
+                        callback_data=f"weight_{product_id}_200"
+                    ),
+                    InlineKeyboardButton(
+                        text="500 г",
+                        callback_data=f"weight_{product_id}_500"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data=f"category_{product['category_id']}"
+                    )
+                ]
             ]
-        ]
-    )
+        )
 
     photo = product.get("photo") or product.get("image_url")
 
@@ -424,6 +507,77 @@ async def show_product(callback: types.CallbackQuery):
             text,
             reply_markup=keyboard
         )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("option_"))
+async def choose_option(callback: types.CallbackQuery):
+    option_id = int(callback.data.split("_")[1])
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT product_id, label, weight, price
+        FROM product_options
+        WHERE id = %s
+          AND is_active = TRUE
+        """,
+        (option_id,)
+    )
+    option = cursor.fetchone()
+    conn.close()
+
+    if not option:
+        await callback.message.answer("❌ Вариант не найден.")
+        await callback.answer()
+        return
+
+    product_id, label, weight, price = option
+
+    if weight is None:
+        await callback.message.answer("❌ Для этого варианта не указан вес.")
+        await callback.answer()
+        return
+
+    products = get_products()
+    product = next(
+        (p for p in products if p["id"] == product_id),
+        None
+    )
+
+    if not product:
+        await callback.message.answer(
+            "❌ Товар не найден."
+        )
+        await callback.answer()
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛒 Добавить в корзину",
+                    callback_data=f"cart_add_{product_id}_{weight}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=f"product_{product_id}"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.answer(
+        f"🧮 Расчёт заказа\n\n"
+        f"Товар: {product['name']}\n"
+        f"Вариант: {label}\n"
+        f"Сумма: {float(price):.2f} €",
+        reply_markup=keyboard
+    )
 
     await callback.answer()
 
