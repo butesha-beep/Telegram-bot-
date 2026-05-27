@@ -405,12 +405,20 @@ async def show_product(callback: types.CallbackQuery):
         ]
     )
 
-    if product.get("photo"):
-        await callback.message.answer_photo(
-            photo=product["photo"],
-            caption=text,
-            reply_markup=keyboard
-        )
+    photo = product.get("photo") or product.get("image_url")
+
+    if photo:
+        try:
+            await callback.message.answer_photo(
+                photo=photo,
+                caption=text,
+                reply_markup=keyboard
+            )
+        except Exception:
+            await callback.message.answer(
+                text,
+                reply_markup=keyboard
+            )
     else:
         await callback.message.answer(
             text,
@@ -593,7 +601,7 @@ async def show_cart(callback: types.CallbackQuery):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT product_id, weight
+        SELECT id, product_id, weight
         FROM cart_items
         WHERE telegram_id = %s
     """, (callback.from_user.id,))
@@ -612,8 +620,9 @@ async def show_cart(callback: types.CallbackQuery):
 
     text = "🛒 Ваша корзина:\n\n"
     total = 0
+    remove_buttons = []
 
-    for product_id, weight in cart_items:
+    for cart_item_id, product_id, weight in cart_items:
 
         product = next(
             (p for p in products if p["id"] == product_id),
@@ -621,6 +630,12 @@ async def show_cart(callback: types.CallbackQuery):
         )
 
         if not product:
+            remove_buttons.append([
+                InlineKeyboardButton(
+                    text="❌ Remove item",
+                    callback_data=f"remove_item_{cart_item_id}"
+                )
+            ])
             continue
 
         price = product["price_per_kg"] * weight / 1000
@@ -631,11 +646,17 @@ async def show_cart(callback: types.CallbackQuery):
             f"  Вес: {weight} г\n"
             f"  Сумма: {price:.2f} €\n\n"
         )
+        remove_buttons.append([
+            InlineKeyboardButton(
+                text=f"❌ {product['name']}",
+                callback_data=f"remove_item_{cart_item_id}"
+            )
+        ])
 
     text += f"💰 Общая сумма: {total:.2f} €"
 
     keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
+    inline_keyboard=remove_buttons + [
         [
             InlineKeyboardButton(
                 text="✅ Оформить заказ",
@@ -663,6 +684,24 @@ async def show_cart(callback: types.CallbackQuery):
 )
 
     await callback.answer()
+
+@dp.callback_query(F.data.startswith("remove_item_"))
+async def remove_item(callback: types.CallbackQuery):
+    cart_item_id = int(callback.data.split("_")[2])
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "DELETE FROM cart_items WHERE id = %s AND telegram_id = %s",
+        (cart_item_id, callback.from_user.id)
+    )
+
+    conn.commit()
+    conn.close()
+
+    await show_cart(callback)
+
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart(callback: types.CallbackQuery):
     conn = psycopg2.connect(DATABASE_URL)
