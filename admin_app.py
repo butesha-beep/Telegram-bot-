@@ -210,6 +210,32 @@ def admin_css():
   .products-table .action-group {
     max-width: 170px;
   }
+  .category-row td {
+    padding: 14px;
+    background: rgba(249, 115, 22, 0.10);
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 700;
+  }
+  .quick-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 16px 0;
+  }
+  .quick-nav a {
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel-soft);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .quick-nav a:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
   .categories-table {
     min-width: 640px;
   }
@@ -578,20 +604,41 @@ async def products():
         rows = cursor.fetchall()
         conn.close()
 
-        html = "<section class='admin-card'><h1>🛒 Товары</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><p>Скрытые товары не показываются в каталоге, но остаются в системе.</p><div class='dash-table-wrap'><table class='products-table'>"
-        html += "<tr><th>ID</th><th>Название</th><th>Цена</th><th>Фото</th><th>Статус</th><th>Категория</th><th>Действия</th></tr>"
+        grouped_products = {}
+        category_order = []
         for row in rows:
-            pid, name, price, image_url, is_active, category_name = row
-            img_html = f"<img class=\"product-thumb\" src=\"{image_url}\"/>" if image_url else "-"
-            active_text = "Активен" if is_active else "Выключен"
-            status_class = "active" if is_active else "inactive"
-            actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Редактировать</a>"
-            if is_active:
-                actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Скрыть</button></form>"
-            else:
-                actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Вернуть</button></form>"
-            actions_html = f"<div class=\"action-group\">{actions_html}</div>"
-            html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_name or '-'}</td><td>{actions_html}</td></tr>"
+            category_label = row[5] or "Без категории"
+            if category_label not in grouped_products:
+                grouped_products[category_label] = []
+                category_order.append(category_label)
+            grouped_products[category_label].append(row)
+
+        category_anchors = {}
+        for index, category_label in enumerate(category_order, 1):
+            anchor = "-".join("".join(ch.lower() if ch.isalnum() else "-" for ch in category_label).split("-"))
+            category_anchors[category_label] = f"category-{index}-{anchor or 'items'}"
+
+        html = "<section class='admin-card' id='all-products'><h1>🛒 Товары</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><p>Скрытые товары не показываются в каталоге, но остаются в системе.</p>"
+        html += "<div class='quick-nav'><a href='#all-products'>Все товары</a>"
+        for category_label in category_order:
+            html += f"<a href='#{category_anchors[category_label]}'>📁 {category_label}</a>"
+        html += "</div><div class='dash-table-wrap'><table class='products-table'>"
+        html += "<tr><th>ID</th><th>Название</th><th>Цена</th><th>Фото</th><th>Статус</th><th>Категория</th><th>Действия</th></tr>"
+
+        for category_label in category_order:
+            html += f"<tr class='category-row' id='{category_anchors[category_label]}'><td colspan='7'>📁 {category_label}</td></tr>"
+            for row in grouped_products[category_label]:
+                pid, name, price, image_url, is_active, category_name = row
+                img_html = f"<img class=\"product-thumb\" src=\"{image_url}\"/>" if image_url else "-"
+                active_text = "Активен" if is_active else "Выключен"
+                status_class = "active" if is_active else "inactive"
+                actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Редактировать</a>"
+                if is_active:
+                    actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Скрыть</button></form>"
+                else:
+                    actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Вернуть</button></form>"
+                actions_html = f"<div class=\"action-group\">{actions_html}</div>"
+                html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_label}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception as e:
@@ -693,8 +740,8 @@ async def edit_product_form(product_id: int):
             (product_id,),
         )
         row = cursor.fetchone()
-        conn.close()
         if not row:
+            conn.close()
             return admin_layout(
                 "⚠️ Товар не найден",
                 """
@@ -707,6 +754,17 @@ async def edit_product_form(product_id: int):
                 </section>
                 """,
             )
+        cursor.execute(
+            """
+            SELECT id, label, weight, price, sort_order, is_active
+            FROM product_options
+            WHERE product_id = %s
+            ORDER BY sort_order, id
+            """,
+            (product_id,),
+        )
+        options = cursor.fetchall()
+        conn.close()
 
         category_id, name, price_per_kg, description, image_url, sort_order, is_active = row
         checked = "checked" if is_active else ""
@@ -728,7 +786,266 @@ async def edit_product_form(product_id: int):
           </form>
         </section>
         """
+        html += """
+        <section class="admin-card dash-section">
+          <h2>⚖️ Варианты продажи</h2>
+        """
+        html += f"<p><a class='button button-link' href='/products/{product_id}/options/new'>➕ Добавить вариант</a></p>"
+        if options:
+            html += """
+          <div class="dash-table-wrap">
+            <table>
+              <tr><th>ID</th><th>Вариант</th><th>Вес</th><th>Цена</th><th>Сортировка</th><th>Статус</th><th>Действия</th></tr>
+            """
+            for option_id, label, weight, price, option_sort_order, option_is_active in options:
+                option_status = "Активен" if option_is_active else "Скрыт"
+                option_status_class = "active" if option_is_active else "inactive"
+                weight_text = weight if weight is not None else "-"
+                toggle_text = "👁 Скрыть" if option_is_active else "♻️ Включить"
+                actions_html = f"<a class='button' href='/options/{option_id}/edit'>✏️ Редактировать</a>"
+                actions_html += f" <form method='post' action='/options/{option_id}/toggle' style='display:inline; margin:0; padding:0;'><button class='button secondary' type='submit'>{toggle_text}</button></form>"
+                html += f"<tr><td>{option_id}</td><td>{label}</td><td>{weight_text}</td><td>{price:.2f}</td><td>{option_sort_order}</td><td><span class='status {option_status_class}'>{option_status}</span></td><td><div class='action-group'>{actions_html}</div></td></tr>"
+            html += """
+            </table>
+          </div>
+            """
+        else:
+            html += "<p>Варианты ещё не добавлены.</p>"
+        html += """
+        </section>
+        """
         return admin_layout("✏️ Редактировать товар", html)
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.get("/products/{product_id}/options/new", response_class=HTMLResponse)
+async def new_product_option_form(product_id: int):
+    html = f"""
+    <section class="admin-card">
+      <h1>➕ Новый вариант продажи</h1>
+      <p><a href="/products/{product_id}/edit">← Назад к товару</a></p>
+      <form class="admin-form" method="post" action="/products/{product_id}/options/new">
+        <label>Название варианта <input name="label"/></label>
+        <label>Вес в граммах <input name="weight"/></label>
+        <label>Цена <input name="price"/></label>
+        <label>Сортировка <input name="sort_order"/></label>
+        <label>Активен <input type="checkbox" name="is_active" value="1"/></label>
+        <div class="form-actions">
+          <input class="button" type="submit" value="Создать вариант"/>
+        </div>
+      </form>
+    </section>
+    """
+    return admin_layout("➕ Новый вариант продажи", html)
+
+
+@app.post("/products/{product_id}/options/new", response_class=HTMLResponse)
+async def create_product_option(
+    product_id: int,
+    label: str = Form(...),
+    weight: str = Form(None),
+    price: str = Form(...),
+    sort_order: str = Form("0"),
+    is_active: str = Form(None),
+):
+    active = True if is_active else False
+    weight_value = int(weight) if weight else None
+    sort_value = int(sort_order) if sort_order else 0
+    price_value = float(price)
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO product_options (
+                product_id,
+                label,
+                weight,
+                price,
+                sort_order,
+                is_active
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (product_id, label, weight_value, price_value, sort_value, active),
+        )
+        conn.commit()
+        conn.close()
+        return admin_layout(
+            "✅ Вариант создан",
+            f"""
+            <section class="admin-card">
+              <h1>✅ Вариант создан</h1>
+              <p>Вариант продажи успешно добавлен.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/products/{product_id}/edit">← К товару</a>
+                <a class="button button-link secondary" href="/products/{product_id}/options/new">➕ Добавить ещё вариант</a>
+              </div>
+            </section>
+            """,
+        )
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.get("/options/{option_id}/edit", response_class=HTMLResponse)
+async def edit_product_option_form(option_id: int):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT product_id, label, weight, price, sort_order, is_active
+            FROM product_options
+            WHERE id = %s
+            """,
+            (option_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return admin_layout(
+                "⚠️ Вариант не найден",
+                """
+                <section class="admin-card">
+                  <h1>⚠️ Вариант не найден</h1>
+                  <p>Такой вариант продажи не найден.</p>
+                  <div class="form-actions">
+                    <a class="button button-link" href="/products">← К товарам</a>
+                  </div>
+                </section>
+                """,
+            )
+
+        product_id, label, weight, price, sort_order, is_active = row
+        checked = "checked" if is_active else ""
+        weight_value = weight if weight is not None else ""
+        html = f"""
+        <section class="admin-card">
+          <h1>✏️ Редактировать вариант</h1>
+          <p><a href="/products/{product_id}/edit">← Назад к товару</a></p>
+          <form class="admin-form" method="post" action="/options/{option_id}/edit">
+            <label>Название варианта <input name="label" value="{label}"/></label>
+            <label>Вес в граммах <input name="weight" value="{weight_value}"/></label>
+            <label>Цена <input name="price" value="{price}"/></label>
+            <label>Сортировка <input name="sort_order" value="{sort_order}"/></label>
+            <label>Активен <input type="checkbox" name="is_active" value="1" {checked}/></label>
+            <div class="form-actions">
+              <input class="button" type="submit" value="Сохранить изменения"/>
+            </div>
+          </form>
+        </section>
+        """
+        return admin_layout("✏️ Редактировать вариант", html)
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.post("/options/{option_id}/edit", response_class=HTMLResponse)
+async def update_product_option(
+    option_id: int,
+    label: str = Form(...),
+    weight: str = Form(None),
+    price: str = Form(...),
+    sort_order: str = Form("0"),
+    is_active: str = Form(None),
+):
+    active = True if is_active else False
+    weight_value = int(weight) if weight else None
+    sort_value = int(sort_order) if sort_order else 0
+    price_value = float(price)
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("SELECT product_id FROM product_options WHERE id = %s", (option_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return admin_layout(
+                "⚠️ Вариант не найден",
+                """
+                <section class="admin-card">
+                  <h1>⚠️ Вариант не найден</h1>
+                  <p>Такой вариант продажи не найден.</p>
+                  <div class="form-actions">
+                    <a class="button button-link" href="/products">← К товарам</a>
+                  </div>
+                </section>
+                """,
+            )
+        product_id = row[0]
+        cursor.execute(
+            """
+            UPDATE product_options
+            SET label = %s,
+                weight = %s,
+                price = %s,
+                sort_order = %s,
+                is_active = %s
+            WHERE id = %s
+            """,
+            (label, weight_value, price_value, sort_value, active, option_id),
+        )
+        conn.commit()
+        conn.close()
+        return admin_layout(
+            "✅ Вариант обновлён",
+            f"""
+            <section class="admin-card">
+              <h1>✅ Вариант обновлён</h1>
+              <p>Изменения успешно сохранены.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/products/{product_id}/edit">← К товару</a>
+                <a class="button button-link secondary" href="/options/{option_id}/edit">✏️ Продолжить редактирование</a>
+              </div>
+            </section>
+            """,
+        )
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.post("/options/{option_id}/toggle", response_class=HTMLResponse)
+async def toggle_product_option(option_id: int):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE product_options SET is_active = NOT is_active WHERE id = %s RETURNING product_id, is_active",
+            (option_id,),
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        conn.close()
+        if not row:
+            return admin_layout(
+                "⚠️ Вариант не найден",
+                """
+                <section class="admin-card">
+                  <h1>⚠️ Вариант не найден</h1>
+                  <p>Такой вариант продажи не найден.</p>
+                  <div class="form-actions">
+                    <a class="button button-link" href="/products">← К товарам</a>
+                  </div>
+                </section>
+                """,
+            )
+        product_id, is_active = row
+        title = "✅ Вариант включён" if is_active else "✅ Вариант скрыт"
+        message = "Вариант снова доступен для выбора." if is_active else "Вариант скрыт из выбора."
+        return admin_layout(
+            title,
+            f"""
+            <section class="admin-card">
+              <h1>{title}</h1>
+              <p>{message}</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/products/{product_id}/edit">← К товару</a>
+              </div>
+            </section>
+            """,
+        )
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 

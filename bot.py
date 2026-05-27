@@ -440,7 +440,7 @@ async def show_product(callback: types.CallbackQuery):
         for option_id, label, weight, option_price in options:
             option_row.append(
                 InlineKeyboardButton(
-                    text=f"{label} — {float(option_price):.2f} €",
+                    text=label,
                     callback_data=f"option_{option_id}"
                 )
             )
