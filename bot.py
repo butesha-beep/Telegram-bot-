@@ -98,6 +98,7 @@ def init_db():
             weight INTEGER
         )
     """)
+    cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS option_id INTEGER")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
@@ -120,6 +121,7 @@ def init_db():
             price REAL
         )
     """)
+    cursor.execute("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS option_id INTEGER")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY,
@@ -559,7 +561,7 @@ async def choose_option(callback: types.CallbackQuery):
             [
                 InlineKeyboardButton(
                     text="🛒 Добавить в корзину",
-                    callback_data=f"cart_add_{product_id}_{weight}"
+                    callback_data=f"cart_add_option_{option_id}"
                 )
             ],
             [
@@ -632,6 +634,75 @@ async def choose_weight(callback: types.CallbackQuery):
     )
 
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cart_add_option_"))
+async def add_option_to_cart(callback: types.CallbackQuery):
+    option_id = int(callback.data.split("_")[3])
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT product_id, weight, price, label
+        FROM product_options
+        WHERE id = %s
+          AND is_active = TRUE
+        """,
+        (option_id,)
+    )
+    option = cursor.fetchone()
+
+    if not option:
+        conn.close()
+        await callback.message.answer("вќЊ Р’Р°СЂРёР°РЅС‚ РЅРµ РЅР°Р№РґРµРЅ.")
+        await callback.answer()
+        return
+
+    product_id, weight, price, label = option
+    cursor.execute("""
+        INSERT INTO cart_items (
+            telegram_id,
+            product_id,
+            weight,
+            option_id
+        )
+        VALUES (%s, %s, %s, %s)
+    """, (
+        callback.from_user.id,
+        product_id,
+        weight,
+        option_id
+    ))
+
+    conn.commit()
+    conn.close()
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="рџЏ  Р“Р»Р°РІРЅРѕРµ РјРµРЅСЋ",
+                    callback_data="back_to_menu"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="рџ›’ РљРѕСЂР·РёРЅР°",
+                    callback_data="cart"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.answer(
+        "рџ›’ РўРѕРІР°СЂ РґРѕР±Р°РІР»РµРЅ РІ РєРѕСЂР·РёРЅСѓ.\n\n"
+        "РњРѕР¶РµС€СЊ РІС‹Р±СЂР°С‚СЊ РµС‰С‘ С‚РѕРІР°СЂС‹ РёР»Рё РѕС‚РєСЂС‹С‚СЊ РєРѕСЂР·РёРЅСѓ.",
+        reply_markup=keyboard
+    )
+
+    await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("cart_add_"))
 async def add_to_cart(callback: types.CallbackQuery):
@@ -755,9 +826,16 @@ async def show_cart(callback: types.CallbackQuery):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT id, product_id, weight
-        FROM cart_items
-        WHERE telegram_id = %s
+        SELECT
+            ci.id,
+            ci.product_id,
+            ci.weight,
+            ci.option_id,
+            po.label,
+            po.price
+        FROM cart_items ci
+        LEFT JOIN product_options po ON po.id = ci.option_id
+        WHERE ci.telegram_id = %s
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
@@ -776,7 +854,7 @@ async def show_cart(callback: types.CallbackQuery):
     total = 0
     remove_buttons = []
 
-    for cart_item_id, product_id, weight in cart_items:
+    for cart_item_id, product_id, weight, option_id, option_label, option_price in cart_items:
 
         product = next(
             (p for p in products if p["id"] == product_id),
@@ -792,8 +870,32 @@ async def show_cart(callback: types.CallbackQuery):
             ])
             continue
 
-        price = product["price_per_kg"] * weight / 1000
+        if option_id and option_label is not None and option_price is not None:
+            price = float(option_price)
+            item_detail = f"  Р’Р°СЂРёР°РЅС‚: {option_label}\n"
+        else:
+            if option_id and option_price is not None:
+                price = float(option_price)
+                item_detail = f"  Р’Р°СЂРёР°РЅС‚: {option_label}\n"
+            else:
+                price = product["price_per_kg"] * weight / 1000
+                item_detail = f"  Р’РµСЃ: {weight} Рі\n"
+            item_detail = f"  Р’РµСЃ: {weight} Рі\n"
         total += price
+
+        if option_id and option_label is not None and option_price is not None:
+            text += (
+                f"вЂў {product['name']}\n"
+                f"{item_detail}"
+                f"  РЎСѓРјРјР°: {price:.2f} в‚¬\n\n"
+            )
+            remove_buttons.append([
+                InlineKeyboardButton(
+                    text=f"вќЊ {product['name']}",
+                    callback_data=f"remove_item_{cart_item_id}"
+                )
+            ])
+            continue
 
         text += (
             f"• {product['name']}\n"
@@ -1047,7 +1149,7 @@ async def handle_order_data(message: types.Message):
         order_text = f"🧾 Заказ #{order_id}\n\n"
         total = 0
 
-        for product_id, weight in cart_items:
+        for product_id, weight, option_id, option_label, option_price in cart_items:
             product = next(
                 (p for p in products if p["id"] == product_id),
                 None
@@ -1056,12 +1158,17 @@ async def handle_order_data(message: types.Message):
             if not product:
                 continue
 
-            price = product["price_per_kg"] * weight / 1000
+            if option_id and option_price is not None:
+                price = float(option_price)
+                item_detail = f"  Вариант: {option_label}\n"
+            else:
+                price = product["price_per_kg"] * weight / 1000
+                item_detail = f"  Вес: {weight} г\n"
             total += price
 
             order_text += (
                 f"• {product['name']}\n"
-                f"  Вес: {weight} г\n"
+                f"{item_detail}"
                 f"  Сумма: {price:.2f} €\n\n"
             )
 
@@ -1120,7 +1227,7 @@ async def handle_order_data(message: types.Message):
             "pending"
         ))
 
-        for product_id, weight in cart_items:
+        for product_id, weight, option_id, option_label, option_price in cart_items:
             product = next(
                 (p for p in products if p["id"] == product_id),
                 None
@@ -1128,10 +1235,13 @@ async def handle_order_data(message: types.Message):
             if not product:
                 continue
             product_name = product["name"]
-            price = (product["price_per_kg"] * weight) / 1000
+            if option_id and option_price is not None:
+                price = float(option_price)
+            else:
+                price = (product["price_per_kg"] * weight) / 1000
             cursor.execute(
-                "INSERT INTO order_items (order_id, product_id, product_name, weight, price) VALUES (%s, %s, %s, %s, %s)",
-                (order_id, product_id, product_name, weight, price)
+                "INSERT INTO order_items (order_id, product_id, product_name, weight, price, option_id) VALUES (%s, %s, %s, %s, %s, %s)",
+                (order_id, product_id, product_name, weight, price, option_id)
             )
         # Delete cart items
         cursor.execute(
@@ -1167,9 +1277,15 @@ async def checkout(callback: types.CallbackQuery):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT product_id, weight
-        FROM cart_items
-        WHERE telegram_id = %s
+        SELECT
+            ci.product_id,
+            ci.weight,
+            ci.option_id,
+            po.label,
+            po.price
+        FROM cart_items ci
+        LEFT JOIN product_options po ON po.id = ci.option_id
+        WHERE ci.telegram_id = %s
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
@@ -1191,10 +1307,13 @@ async def checkout(callback: types.CallbackQuery):
     minimum_order_amount = config.get("minimum_order_amount", 20)
     
     total = 0
-    for product_id, weight in cart_items:
+    for product_id, weight, option_id, option_label, option_price in cart_items:
         product = next((p for p in products if p["id"] == product_id), None)
         if product:
-            total += product["price_per_kg"] * weight / 1000
+            if option_id and option_price is not None:
+                total += float(option_price)
+            else:
+                total += product["price_per_kg"] * weight / 1000
     
     if total < minimum_order_amount:
         missing = minimum_order_amount - total
@@ -1280,7 +1399,7 @@ async def use_saved_data(callback: types.CallbackQuery):
     order_text = f"🧾 Заказ #{order_id}\n\n"
     total = 0
 
-    for product_id, weight in cart_items:
+    for product_id, weight, option_id, option_label, option_price in cart_items:
         product = next(
             (p for p in products if p["id"] == product_id),
             None
@@ -1289,12 +1408,17 @@ async def use_saved_data(callback: types.CallbackQuery):
         if not product:
             continue
 
-        price = product["price_per_kg"] * weight / 1000
+        if option_id and option_price is not None:
+            price = float(option_price)
+            item_detail = f"  Вариант: {option_label}\n"
+        else:
+            price = product["price_per_kg"] * weight / 1000
+            item_detail = f"  Вес: {weight} г\n"
         total += price
 
         order_text += (
             f"• {product['name']}\n"
-            f"  Вес: {weight} г\n"
+            f"{item_detail}"
             f"  Сумма: {price:.2f} €\n\n"
         )
 
@@ -1328,7 +1452,7 @@ async def use_saved_data(callback: types.CallbackQuery):
         "pending"
     ))
 
-    for product_id, weight in cart_items:
+    for product_id, weight, option_id, option_label, option_price in cart_items:
         product = next(
             (p for p in products if p["id"] == product_id),
             None
@@ -1336,10 +1460,13 @@ async def use_saved_data(callback: types.CallbackQuery):
         if not product:
             continue
         product_name = product["name"]
-        price = (product["price_per_kg"] * weight) / 1000
+        if option_id and option_price is not None:
+            price = float(option_price)
+        else:
+            price = (product["price_per_kg"] * weight) / 1000
         cursor.execute(
-            "INSERT INTO order_items (order_id, product_id, product_name, weight, price) VALUES (%s, %s, %s, %s, %s)",
-            (order_id, product_id, product_name, weight, price)
+            "INSERT INTO order_items (order_id, product_id, product_name, weight, price, option_id) VALUES (%s, %s, %s, %s, %s, %s)",
+            (order_id, product_id, product_name, weight, price, option_id)
         )
 
     cursor.execute(
