@@ -846,10 +846,11 @@ async def show_cart(callback: types.CallbackQuery):
             po.price,
             COUNT(*)
         FROM cart_items ci
+        JOIN products p ON p.id = ci.product_id
         LEFT JOIN product_options po ON po.id = ci.option_id
         WHERE ci.telegram_id = %s
-        GROUP BY ci.product_id, ci.option_id, ci.weight, po.label, po.price
-        ORDER BY MIN(ci.id) ASC
+        GROUP BY ci.product_id, ci.option_id, ci.weight, po.label, po.price, p.category_id, p.sort_order, p.id, po.sort_order
+        ORDER BY p.category_id ASC, p.sort_order ASC, p.id ASC, COALESCE(po.sort_order, ci.weight) ASC, ci.weight ASC
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
