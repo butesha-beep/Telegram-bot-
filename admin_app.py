@@ -1,7 +1,7 @@
 import os
 import html
 from fastapi import FastAPI, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import psycopg2
 
 app = FastAPI()
@@ -507,8 +507,18 @@ async def orders():
                 "done": "Готов",
                 "cancelled": "Отмена",
             }
+            status_actions = {
+                "pending": ("paid", "preparing", "done", "cancelled"),
+                "awaiting_payment": ("paid", "preparing", "done", "cancelled"),
+                "payment_reported": ("paid", "preparing", "done", "cancelled"),
+                "cash_on_delivery": ("paid", "preparing", "done", "cancelled"),
+                "paid": ("preparing", "done", "cancelled"),
+                "preparing": ("done", "cancelled"),
+                "done": (),
+                "cancelled": (),
+            }
             actions = [f"<a class=\"button\" href=\"/orders/{order_id}\">Открыть</a>"]
-            for s in ("paid", "preparing", "done", "cancelled"):
+            for s in status_actions.get(str(status or ""), ()):
                 actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{status_labels[s]}</button></form>")
             actions_html = f"<div class=\"action-group\">{' '.join(actions)}</div>"
             html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method or '-'}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
@@ -526,7 +536,32 @@ async def update_order_status(order_id: str, status: str):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        cursor.execute("UPDATE orders SET status = %s WHERE order_id = %s", (status, order_id))
+        cursor.execute("SELECT status FROM orders WHERE order_id = %s", (order_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return RedirectResponse("/orders", status_code=303)
+
+        current_status = str(row[0] or "")
+        allowed_transitions = {
+            "pending": {"paid", "preparing", "done", "cancelled"},
+            "awaiting_payment": {"paid", "preparing", "done", "cancelled"},
+            "payment_reported": {"paid", "preparing", "done", "cancelled"},
+            "cash_on_delivery": {"paid", "preparing", "done", "cancelled"},
+            "paid": {"preparing", "done", "cancelled"},
+            "preparing": {"done", "cancelled"},
+            "done": set(),
+            "cancelled": set(),
+        }
+        if status not in allowed_transitions.get(current_status, set()):
+            print(f"INVALID ORDER STATUS TRANSITION: {order_id} {current_status} -> {status}")
+            conn.close()
+            return RedirectResponse("/orders", status_code=303)
+
+        cursor.execute(
+            "UPDATE orders SET status = %s, updated_at = NOW() WHERE order_id = %s",
+            (status, order_id)
+        )
         conn.commit()
         conn.close()
         return admin_layout(
