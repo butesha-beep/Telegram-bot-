@@ -26,6 +26,19 @@ if not DATABASE_URL:
     available_vars = [key for key in os.environ.keys() if "DATABASE" in key or key.startswith("PG")]
     raise ValueError(f"DATABASE_URL is not set. Available DB vars: {available_vars}")
 pending_orders = {}
+MAX_CART_ITEM_QUANTITY = 10
+CALLBACK_COOLDOWN_SECONDS = 1.0
+callback_locks = {}
+
+
+def is_callback_locked(callback, cooldown=CALLBACK_COOLDOWN_SECONDS):
+    now = asyncio.get_event_loop().time()
+    key = (callback.from_user.id, callback.data)
+    last_seen = callback_locks.get(key, 0)
+    if now - last_seen < cooldown:
+        return True
+    callback_locks[key] = now
+    return False
 
 def load_json(filename):
     with open(filename, "r", encoding="utf-8") as file:
@@ -638,6 +651,10 @@ async def choose_weight(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("cart_add_option_"))
 async def add_option_to_cart(callback: types.CallbackQuery):
+    if is_callback_locked(callback):
+        await callback.answer("Подождите секунду", show_alert=False)
+        return
+
     option_id = int(callback.data.split("_")[3])
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -660,6 +677,16 @@ async def add_option_to_cart(callback: types.CallbackQuery):
         return
 
     product_id, weight, price, label = option
+    cursor.execute(
+        "SELECT COUNT(*) FROM cart_items WHERE telegram_id = %s AND option_id = %s",
+        (callback.from_user.id, option_id)
+    )
+    quantity = cursor.fetchone()[0]
+    if quantity >= MAX_CART_ITEM_QUANTITY:
+        conn.close()
+        await callback.answer("Максимум 10 шт одного варианта", show_alert=True)
+        return
+
     cursor.execute("""
         INSERT INTO cart_items (
             telegram_id,
@@ -724,6 +751,23 @@ async def add_to_cart(callback: types.CallbackQuery):
 
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM cart_items
+        WHERE telegram_id = %s
+          AND product_id = %s
+          AND weight = %s
+          AND option_id IS NULL
+        """,
+        (callback.from_user.id, product_id, weight)
+    )
+    quantity = cursor.fetchone()[0]
+    if quantity >= MAX_CART_ITEM_QUANTITY:
+        conn.close()
+        await callback.answer("Максимум 10 шт одного варианта", show_alert=True)
+        return
 
     cursor.execute("""
         INSERT INTO cart_items (
@@ -985,6 +1029,10 @@ async def show_cart(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("cart_plus_option_"))
 async def cart_plus_option(callback: types.CallbackQuery):
+    if is_callback_locked(callback):
+        await callback.answer("Подождите секунду", show_alert=False)
+        return
+
     option_id = int(callback.data.split("_")[3])
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -994,7 +1042,7 @@ async def cart_plus_option(callback: types.CallbackQuery):
         (callback.from_user.id, option_id)
     )
     quantity = cursor.fetchone()[0]
-    if quantity >= 10:
+    if quantity >= MAX_CART_ITEM_QUANTITY:
         conn.close()
         await callback.answer("Максимум 10 шт одного варианта", show_alert=True)
         return
@@ -1034,6 +1082,10 @@ async def cart_plus_option(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("cart_plus_weight_"))
 async def cart_plus_weight(callback: types.CallbackQuery):
+    if is_callback_locked(callback):
+        await callback.answer("Подождите секунду", show_alert=False)
+        return
+
     _, _, _, product_id, weight = callback.data.split("_")
     product_id = int(product_id)
     weight = int(weight)
@@ -1052,7 +1104,7 @@ async def cart_plus_weight(callback: types.CallbackQuery):
         (callback.from_user.id, product_id, weight)
     )
     quantity = cursor.fetchone()[0]
-    if quantity >= 10:
+    if quantity >= MAX_CART_ITEM_QUANTITY:
         conn.close()
         await callback.answer("Максимум 10 шт одного варианта", show_alert=True)
         return
@@ -1075,6 +1127,10 @@ async def cart_plus_weight(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("remove_item_"))
 async def remove_item(callback: types.CallbackQuery):
+    if is_callback_locked(callback):
+        await callback.answer("Подождите секунду", show_alert=False)
+        return
+
     cart_item_id = int(callback.data.split("_")[2])
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -1092,6 +1148,10 @@ async def remove_item(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart(callback: types.CallbackQuery):
+    if is_callback_locked(callback):
+        await callback.answer("Подождите секунду", show_alert=False)
+        return
+
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
@@ -1405,6 +1465,10 @@ async def handle_order_data(message: types.Message):
 
 @dp.callback_query(F.data == "checkout")
 async def checkout(callback: types.CallbackQuery):
+    if is_callback_locked(callback):
+        await callback.answer("Подождите секунду", show_alert=False)
+        return
+
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
