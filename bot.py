@@ -655,7 +655,7 @@ async def add_option_to_cart(callback: types.CallbackQuery):
 
     if not option:
         conn.close()
-        await callback.message.answer("вќЊ Р’Р°СЂРёР°РЅС‚ РЅРµ РЅР°Р№РґРµРЅ.")
+        await callback.message.answer("❌ Вариант не найден.")
         await callback.answer()
         return
 
@@ -682,13 +682,13 @@ async def add_option_to_cart(callback: types.CallbackQuery):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="рџЏ  Р“Р»Р°РІРЅРѕРµ РјРµРЅСЋ",
+                    text="🏠 Главное меню",
                     callback_data="back_to_menu"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="рџ›’ РљРѕСЂР·РёРЅР°",
+                    text="🛒 Корзина",
                     callback_data="cart"
                 )
             ]
@@ -696,15 +696,26 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     )
 
     await callback.message.answer(
-        "рџ›’ РўРѕРІР°СЂ РґРѕР±Р°РІР»РµРЅ РІ РєРѕСЂР·РёРЅСѓ.\n\n"
-        "РњРѕР¶РµС€СЊ РІС‹Р±СЂР°С‚СЊ РµС‰С‘ С‚РѕРІР°СЂС‹ РёР»Рё РѕС‚РєСЂС‹С‚СЊ РєРѕСЂР·РёРЅСѓ.",
+        "🛒 Товар добавлен в корзину.\n\n"
+        "Можешь выбрать ещё товары или открыть корзину.",
         reply_markup=keyboard
     )
 
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("cart_add_"))
+def is_legacy_cart_add(callback: types.CallbackQuery):
+    parts = callback.data.split("_") if callback.data else []
+    return (
+        len(parts) == 4
+        and parts[0] == "cart"
+        and parts[1] == "add"
+        and parts[2].isdigit()
+        and parts[3].isdigit()
+    )
+
+
+@dp.callback_query(is_legacy_cart_add)
 async def add_to_cart(callback: types.CallbackQuery):
     _, _, product_id, weight = callback.data.split("_")
 
@@ -864,7 +875,7 @@ async def show_cart(callback: types.CallbackQuery):
         if not product:
             remove_buttons.append([
                 InlineKeyboardButton(
-                    text="❌ Remove item",
+                    text="❌ Удалить товар",
                     callback_data=f"remove_item_{cart_item_id}"
                 )
             ])
@@ -872,26 +883,26 @@ async def show_cart(callback: types.CallbackQuery):
 
         if option_id and option_label is not None and option_price is not None:
             price = float(option_price)
-            item_detail = f"  Р’Р°СЂРёР°РЅС‚: {option_label}\n"
+            item_detail = f"  Вариант: {option_label}\n"
         else:
             if option_id and option_price is not None:
                 price = float(option_price)
-                item_detail = f"  Р’Р°СЂРёР°РЅС‚: {option_label}\n"
+                item_detail = f"  Вариант: {option_label}\n"
             else:
                 price = product["price_per_kg"] * weight / 1000
-                item_detail = f"  Р’РµСЃ: {weight} Рі\n"
-            item_detail = f"  Р’РµСЃ: {weight} Рі\n"
+                item_detail = f"  Вес: {weight} г\n"
+            item_detail = f"  Вес: {weight} г\n"
         total += price
 
         if option_id and option_label is not None and option_price is not None:
             text += (
-                f"вЂў {product['name']}\n"
+                f"• {product['name']}\n"
                 f"{item_detail}"
-                f"  РЎСѓРјРјР°: {price:.2f} в‚¬\n\n"
+                f"  Сумма: {price:.2f} €\n\n"
             )
             remove_buttons.append([
                 InlineKeyboardButton(
-                    text=f"вќЊ {product['name']}",
+                    text=f"❌ {product['name']}",
                     callback_data=f"remove_item_{cart_item_id}"
                 )
             ])

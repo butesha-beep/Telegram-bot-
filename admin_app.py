@@ -529,6 +529,18 @@ async def order_detail(order_id: str):
         try:
             cursor.execute(
                 """
+                SELECT oi.product_name, oi.weight, oi.price, po.label
+                FROM order_items oi
+                LEFT JOIN product_options po ON po.id = oi.option_id
+                WHERE oi.order_id = %s
+                ORDER BY oi.id
+                """,
+                (order_id,),
+            )
+            items = cursor.fetchall()
+        except Exception:
+            cursor.execute(
+                """
                 SELECT product_name, weight, price
                 FROM order_items
                 WHERE order_id = %s
@@ -536,9 +548,7 @@ async def order_detail(order_id: str):
                 """,
                 (order_id,),
             )
-            items = cursor.fetchall()
-        except Exception:
-            items = []
+            items = [(product_name, weight, price, None) for product_name, weight, price in cursor.fetchall()]
         conn.close()
 
         html = f"<section class='admin-card'><h1>Заказ {order_id}</h1><div class='detail-grid'>"
@@ -551,14 +561,15 @@ async def order_detail(order_id: str):
         html += "</div></section>"
         if items:
             html += "<section class='admin-card dash-section'><h2>Товары</h2><div class='dash-table-wrap'><table>"
-            html += "<tr><th>Товар</th><th>Вес</th></tr>"
-            for product_name, weight, price in items:
-                html += f"<tr><td>{product_name}</td><td>{weight}</td></tr>"
+            html += "<tr><th>Товар</th><th>Вариант / вес</th><th>Итого</th></tr>"
+            for product_name, weight, price, option_label in items:
+                item_label = option_label if option_label else f"{weight} г"
+                html += f"<tr><td>{product_name}</td><td>{item_label}</td><td>{price:.2f} €</td></tr>"
             html += "</table></div>"
-            html += f"<p><strong>Итого: €{total:.2f}</strong></p></section>"
+            html += f"<p><strong>Итого: {total:.2f} €</strong></p></section>"
         else:
             html += "<section class='admin-card dash-section'><p>Товары не найдены.</p>"
-            html += f"<p><strong>Итого: €{total:.2f}</strong></p></section>"
+            html += f"<p><strong>Итого: {total:.2f} €</strong></p></section>"
         html += f"<p><a class='button button-link' href=\"/orders\">← К заказам</a></p>"
         return admin_layout(f"Заказ {order_id}", html)
     except Exception as e:
