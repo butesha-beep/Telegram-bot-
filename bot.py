@@ -2100,6 +2100,7 @@ async def payment_done(callback: types.CallbackQuery):
 async def main():
     init_db()
     seed_products_from_json()
+    asyncio.create_task(abandoned_cart_worker())
     await dp.start_polling(bot)
 
 
