@@ -2242,6 +2242,7 @@ async def main():
     init_db()
     seed_products_from_json()
     asyncio.create_task(abandoned_cart_worker())
+    asyncio.create_task(unpaid_order_worker())
     await dp.start_polling(bot)
 
 
