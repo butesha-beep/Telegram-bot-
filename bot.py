@@ -903,12 +903,21 @@ async def show_cart(callback: types.CallbackQuery):
                 remove_label = f"{weight} г"
             item_detail = f"  Вес: {weight} г\n"
         total += price
+        total_weight = weight * quantity if weight is not None else None
+        if total_weight is None:
+            total_weight_text = "-"
+        elif total_weight >= 1000:
+            kg = total_weight / 1000
+            total_weight_text = f"{kg:g} кг"
+        else:
+            total_weight_text = f"{total_weight} г"
 
         if option_id and option_label is not None and option_price is not None:
             text += (
                 f"• {product['name']}\n"
                 f"{item_detail}"
-                f"  Количество: {quantity}\n"
+                f"  Количество: {quantity} шт\n"
+                f"  Общий вес: {total_weight_text}\n"
                 f"  Сумма: {price:.2f} €\n\n"
             )
             remove_buttons.append([
@@ -926,7 +935,8 @@ async def show_cart(callback: types.CallbackQuery):
         text += (
             f"• {product['name']}\n"
             f"  Вес: {weight} г\n"
-            f"  Количество: {quantity}\n"
+            f"  Количество: {quantity} шт\n"
+            f"  Общий вес: {total_weight_text}\n"
             f"  Сумма: {price:.2f} €\n\n"
         )
         remove_buttons.append([
