@@ -913,11 +913,11 @@ async def show_cart(callback: types.CallbackQuery):
             )
             remove_buttons.append([
                 InlineKeyboardButton(
-                    text="➖ Убрать 1",
+                    text=f"➖ {remove_label}",
                     callback_data=f"remove_item_{cart_item_id}"
                 ),
                 InlineKeyboardButton(
-                    text="➕ Добавить 1",
+                    text=f"➕ {remove_label}",
                     callback_data=f"cart_plus_option_{option_id}"
                 )
             ])
@@ -931,11 +931,11 @@ async def show_cart(callback: types.CallbackQuery):
         )
         remove_buttons.append([
             InlineKeyboardButton(
-                text="➖ Убрать 1",
+                text=f"➖ {remove_label}",
                 callback_data=f"remove_item_{cart_item_id}"
             ),
             InlineKeyboardButton(
-                text="➕ Добавить 1",
+                text=f"➕ {remove_label}",
                 callback_data=f"cart_plus_weight_{product_id}_{weight}"
             )
         ])
