@@ -838,15 +838,18 @@ async def show_cart(callback: types.CallbackQuery):
 
     cursor.execute("""
         SELECT
-            ci.id,
+            MIN(ci.id),
             ci.product_id,
             ci.weight,
             ci.option_id,
             po.label,
-            po.price
+            po.price,
+            COUNT(*)
         FROM cart_items ci
         LEFT JOIN product_options po ON po.id = ci.option_id
         WHERE ci.telegram_id = %s
+        GROUP BY ci.product_id, ci.option_id, ci.weight, po.label, po.price
+        ORDER BY MIN(ci.id)
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
@@ -865,7 +868,7 @@ async def show_cart(callback: types.CallbackQuery):
     total = 0
     remove_buttons = []
 
-    for cart_item_id, product_id, weight, option_id, option_label, option_price in cart_items:
+    for cart_item_id, product_id, weight, option_id, option_label, option_price, quantity in cart_items:
 
         product = next(
             (p for p in products if p["id"] == product_id),
@@ -882,15 +885,21 @@ async def show_cart(callback: types.CallbackQuery):
             continue
 
         if option_id and option_label is not None and option_price is not None:
-            price = float(option_price)
+            unit_price = float(option_price)
+            price = unit_price * quantity
             item_detail = f"  Вариант: {option_label}\n"
+            remove_label = option_label
         else:
             if option_id and option_price is not None:
-                price = float(option_price)
+                unit_price = float(option_price)
+                price = unit_price * quantity
                 item_detail = f"  Вариант: {option_label}\n"
+                remove_label = option_label if option_label else f"{weight} г"
             else:
-                price = product["price_per_kg"] * weight / 1000
+                unit_price = product["price_per_kg"] * weight / 1000
+                price = unit_price * quantity
                 item_detail = f"  Вес: {weight} г\n"
+                remove_label = f"{weight} г"
             item_detail = f"  Вес: {weight} г\n"
         total += price
 
@@ -898,11 +907,12 @@ async def show_cart(callback: types.CallbackQuery):
             text += (
                 f"• {product['name']}\n"
                 f"{item_detail}"
+                f"  Количество: {quantity}\n"
                 f"  Сумма: {price:.2f} €\n\n"
             )
             remove_buttons.append([
                 InlineKeyboardButton(
-                    text=f"❌ {product['name']}",
+                    text=f"❌ Удалить 1 шт — {remove_label}",
                     callback_data=f"remove_item_{cart_item_id}"
                 )
             ])
@@ -911,11 +921,12 @@ async def show_cart(callback: types.CallbackQuery):
         text += (
             f"• {product['name']}\n"
             f"  Вес: {weight} г\n"
+            f"  Количество: {quantity}\n"
             f"  Сумма: {price:.2f} €\n\n"
         )
         remove_buttons.append([
             InlineKeyboardButton(
-                text=f"❌ {product['name']}",
+                text=f"❌ Удалить 1 шт — {remove_label}",
                 callback_data=f"remove_item_{cart_item_id}"
             )
         ])
