@@ -1537,9 +1537,11 @@ async def handle_order_data(message: types.Message):
                 phone,
                 address,
                 total,
-                status
+                status,
+                created_at,
+                updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
         """, (
             order_id,
             user_id,
@@ -1766,9 +1768,11 @@ async def use_saved_data(callback: types.CallbackQuery):
             phone,
             address,
             total,
-            status
+            status,
+            created_at,
+            updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     """, (
         order_id,
         user_id,
@@ -1846,7 +1850,9 @@ async def pay_iban(callback: types.CallbackQuery):
         """
         UPDATE orders
         SET payment_method = %s,
-            status = %s
+            status = %s,
+            updated_at = NOW(),
+            payment_selected_at = NOW()
         WHERE id = (
             SELECT id
             FROM orders
@@ -1900,7 +1906,9 @@ async def pay_paypal(callback: types.CallbackQuery):
         """
         UPDATE orders
         SET payment_method = %s,
-            status = %s
+            status = %s,
+            updated_at = NOW(),
+            payment_selected_at = NOW()
         WHERE id = (
             SELECT id
             FROM orders
@@ -1953,7 +1961,8 @@ async def pay_cash(callback: types.CallbackQuery):
         """
         UPDATE orders
         SET payment_method = %s,
-            status = %s
+            status = %s,
+            updated_at = NOW()
         WHERE id = (
             SELECT id
             FROM orders
@@ -2063,7 +2072,9 @@ async def payment_done(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET status = %s
+        SET status = %s,
+            updated_at = NOW(),
+            payment_reported_at = NOW()
         WHERE id = (
             SELECT id
             FROM orders
