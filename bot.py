@@ -28,6 +28,9 @@ if not DATABASE_URL:
 pending_orders = {}
 MAX_CART_ITEM_QUANTITY = 10
 CALLBACK_COOLDOWN_SECONDS = 1.0
+ABANDONED_CART_REMINDER_HOURS = 24
+ABANDONED_CART_DELETE_AFTER_REMINDER_HOURS = 24
+ABANDONED_CART_WORKER_SLEEP_SECONDS = 1800
 callback_locks = {}
 
 
@@ -39,6 +42,114 @@ def is_callback_locked(callback, cooldown=CALLBACK_COOLDOWN_SECONDS):
         return True
     callback_locks[key] = now
     return False
+
+
+def mark_cart_active(telegram_id):
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE cart_items
+        SET updated_at = NOW(),
+            reminded_at = NULL
+        WHERE telegram_id = %s
+        """,
+        (telegram_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def abandoned_cart_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Открыть корзину", callback_data="cart")]
+    ])
+
+
+async def send_abandoned_cart_reminders():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT telegram_id
+        FROM cart_items
+        GROUP BY telegram_id
+        HAVING MAX(updated_at) <= NOW() - (%s * INTERVAL '1 hour')
+           AND MAX(reminded_at) IS NULL
+        """,
+        (ABANDONED_CART_REMINDER_HOURS,)
+    )
+    telegram_ids = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    for telegram_id in telegram_ids:
+        try:
+            await bot.send_message(
+                chat_id=telegram_id,
+                text="🛒 Вы забыли товары в корзине.\n\nКорзина будет очищена через 24 часа, если заказ не будет оформлен.",
+                reply_markup=abandoned_cart_keyboard()
+            )
+
+            update_conn = psycopg2.connect(DATABASE_URL)
+            try:
+                update_cursor = update_conn.cursor()
+                update_cursor.execute(
+                    """
+                    UPDATE cart_items
+                    SET reminded_at = NOW()
+                    WHERE telegram_id = %s
+                      AND reminded_at IS NULL
+                    """,
+                    (telegram_id,)
+                )
+                update_conn.commit()
+            finally:
+                update_conn.close()
+        except Exception as e:
+            print(f"ABANDONED CART REMINDER ERROR for {telegram_id}:", e)
+
+
+async def clear_expired_abandoned_carts():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT telegram_id
+        FROM cart_items
+        GROUP BY telegram_id
+        HAVING MAX(reminded_at) <= NOW() - (%s * INTERVAL '1 hour')
+        """,
+        (ABANDONED_CART_DELETE_AFTER_REMINDER_HOURS,)
+    )
+    telegram_ids = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    for telegram_id in telegram_ids:
+        try:
+            delete_conn = psycopg2.connect(DATABASE_URL)
+            try:
+                delete_cursor = delete_conn.cursor()
+                delete_cursor.execute(
+                    "DELETE FROM cart_items WHERE telegram_id = %s",
+                    (telegram_id,)
+                )
+                delete_conn.commit()
+            finally:
+                delete_conn.close()
+        except Exception as e:
+            print(f"ABANDONED CART CLEANUP ERROR for {telegram_id}:", e)
+
+
+async def abandoned_cart_worker():
+    while True:
+        try:
+            await send_abandoned_cart_reminders()
+            await clear_expired_abandoned_carts()
+        except Exception as e:
+            print("ABANDONED CART WORKER ERROR:", e)
+
+        await asyncio.sleep(ABANDONED_CART_WORKER_SLEEP_SECONDS)
+
 
 def load_json(filename):
     with open(filename, "r", encoding="utf-8") as file:
@@ -707,6 +818,7 @@ async def add_option_to_cart(callback: types.CallbackQuery):
 
     conn.commit()
     conn.close()
+    mark_cart_active(callback.from_user.id)
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -787,6 +899,7 @@ async def add_to_cart(callback: types.CallbackQuery):
 
     conn.commit()
     conn.close()
+    mark_cart_active(callback.from_user.id)
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1080,6 +1193,7 @@ async def cart_plus_option(callback: types.CallbackQuery):
     )
     conn.commit()
     conn.close()
+    mark_cart_active(callback.from_user.id)
     await show_cart(callback)
 
 
@@ -1125,6 +1239,7 @@ async def cart_plus_weight(callback: types.CallbackQuery):
     )
     conn.commit()
     conn.close()
+    mark_cart_active(callback.from_user.id)
     await show_cart(callback)
 
 
@@ -1143,9 +1258,16 @@ async def remove_item(callback: types.CallbackQuery):
         "DELETE FROM cart_items WHERE id = %s AND telegram_id = %s",
         (cart_item_id, callback.from_user.id)
     )
+    cursor.execute(
+        "SELECT COUNT(*) FROM cart_items WHERE telegram_id = %s",
+        (callback.from_user.id,)
+    )
+    remaining_items = cursor.fetchone()[0]
 
     conn.commit()
     conn.close()
+    if remaining_items:
+        mark_cart_active(callback.from_user.id)
 
     await show_cart(callback)
 
