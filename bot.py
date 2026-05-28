@@ -326,6 +326,12 @@ def init_db():
     except:
         conn.rollback()
 
+    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
+    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
+    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_selected_at TIMESTAMPTZ")
+    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_reminded_at TIMESTAMPTZ")
+    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_reported_at TIMESTAMPTZ")
+
     conn.commit()
     conn.close()
 
