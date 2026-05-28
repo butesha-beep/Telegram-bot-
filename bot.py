@@ -912,8 +912,12 @@ async def show_cart(callback: types.CallbackQuery):
             )
             remove_buttons.append([
                 InlineKeyboardButton(
-                    text=f"❌ Удалить 1 шт — {remove_label}",
+                    text="➖ Убрать 1",
                     callback_data=f"remove_item_{cart_item_id}"
+                ),
+                InlineKeyboardButton(
+                    text="➕ Добавить 1",
+                    callback_data=f"cart_plus_option_{option_id}"
                 )
             ])
             continue
@@ -926,8 +930,12 @@ async def show_cart(callback: types.CallbackQuery):
         )
         remove_buttons.append([
             InlineKeyboardButton(
-                text=f"❌ Удалить 1 шт — {remove_label}",
+                text="➖ Убрать 1",
                 callback_data=f"remove_item_{cart_item_id}"
+            ),
+            InlineKeyboardButton(
+                text="➕ Добавить 1",
+                callback_data=f"cart_plus_weight_{product_id}_{weight}"
             )
         ])
 
@@ -962,6 +970,97 @@ async def show_cart(callback: types.CallbackQuery):
 )
 
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cart_plus_option_"))
+async def cart_plus_option(callback: types.CallbackQuery):
+    option_id = int(callback.data.split("_")[3])
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) FROM cart_items WHERE telegram_id = %s AND option_id = %s",
+        (callback.from_user.id, option_id)
+    )
+    quantity = cursor.fetchone()[0]
+    if quantity >= 10:
+        conn.close()
+        await callback.answer("Максимум 10 шт одного варианта", show_alert=True)
+        return
+
+    cursor.execute(
+        """
+        SELECT product_id, weight
+        FROM product_options
+        WHERE id = %s
+          AND is_active = TRUE
+        """,
+        (option_id,)
+    )
+    option = cursor.fetchone()
+    if not option:
+        conn.close()
+        await callback.answer("Вариант не найден", show_alert=True)
+        return
+
+    product_id, weight = option
+    cursor.execute(
+        """
+        INSERT INTO cart_items (
+            telegram_id,
+            product_id,
+            weight,
+            option_id
+        )
+        VALUES (%s, %s, %s, %s)
+        """,
+        (callback.from_user.id, product_id, weight, option_id)
+    )
+    conn.commit()
+    conn.close()
+    await show_cart(callback)
+
+
+@dp.callback_query(F.data.startswith("cart_plus_weight_"))
+async def cart_plus_weight(callback: types.CallbackQuery):
+    _, _, _, product_id, weight = callback.data.split("_")
+    product_id = int(product_id)
+    weight = int(weight)
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM cart_items
+        WHERE telegram_id = %s
+          AND product_id = %s
+          AND weight = %s
+          AND option_id IS NULL
+        """,
+        (callback.from_user.id, product_id, weight)
+    )
+    quantity = cursor.fetchone()[0]
+    if quantity >= 10:
+        conn.close()
+        await callback.answer("Максимум 10 шт одного варианта", show_alert=True)
+        return
+
+    cursor.execute(
+        """
+        INSERT INTO cart_items (
+            telegram_id,
+            product_id,
+            weight
+        )
+        VALUES (%s, %s, %s)
+        """,
+        (callback.from_user.id, product_id, weight)
+    )
+    conn.commit()
+    conn.close()
+    await show_cart(callback)
+
 
 @dp.callback_query(F.data.startswith("remove_item_"))
 async def remove_item(callback: types.CallbackQuery):
