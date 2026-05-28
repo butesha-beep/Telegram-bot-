@@ -849,7 +849,7 @@ async def show_cart(callback: types.CallbackQuery):
         LEFT JOIN product_options po ON po.id = ci.option_id
         WHERE ci.telegram_id = %s
         GROUP BY ci.product_id, ci.option_id, ci.weight, po.label, po.price
-        ORDER BY MIN(ci.id)
+        ORDER BY MIN(ci.id) ASC
     """, (callback.from_user.id,))
 
     cart_items = cursor.fetchall()
