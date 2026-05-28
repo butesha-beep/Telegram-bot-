@@ -28,9 +28,9 @@ if not DATABASE_URL:
 pending_orders = {}
 MAX_CART_ITEM_QUANTITY = 10
 CALLBACK_COOLDOWN_SECONDS = 1.0
-ABANDONED_CART_REMINDER_HOURS = 0.02
-ABANDONED_CART_DELETE_AFTER_REMINDER_HOURS = 0.02
-ABANDONED_CART_WORKER_SLEEP_SECONDS = 60
+ABANDONED_CART_REMINDER_HOURS = 0.5
+ABANDONED_CART_DELETE_AFTER_REMINDER_HOURS = 0.5
+ABANDONED_CART_WORKER_SLEEP_SECONDS = 300
 callback_locks = {}
 
 
@@ -86,7 +86,7 @@ async def send_abandoned_cart_reminders():
         try:
             await bot.send_message(
                 chat_id=telegram_id,
-                text="🛒 Вы забыли товары в корзине.\n\nКорзина будет очищена через 24 часа, если заказ не будет оформлен.",
+                text="🛒 Вы забыли товары в корзине.\n\nКорзина будет очищена через 30 минут, если заказ не будет оформлен.",
                 reply_markup=abandoned_cart_keyboard()
             )
 
