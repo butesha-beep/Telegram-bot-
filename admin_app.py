@@ -104,6 +104,31 @@ def admin_css():
     font-weight: 700;
     white-space: nowrap;
   }
+  .status.warning {
+    border-color: rgba(245, 158, 11, 0.45);
+    background: rgba(245, 158, 11, 0.14);
+    color: #fbbf24;
+  }
+  .status.info {
+    border-color: rgba(56, 189, 248, 0.45);
+    background: rgba(56, 189, 248, 0.12);
+    color: #38bdf8;
+  }
+  .status.success {
+    border-color: rgba(34, 197, 94, 0.45);
+    background: rgba(34, 197, 94, 0.12);
+    color: #4ade80;
+  }
+  .status.danger {
+    border-color: rgba(248, 113, 113, 0.45);
+    background: rgba(248, 113, 113, 0.12);
+    color: #f87171;
+  }
+  .status.neutral {
+    border-color: rgba(161, 161, 170, 0.35);
+    background: rgba(161, 161, 170, 0.12);
+    color: #d4d4d8;
+  }
   .action-group {
     display: flex;
     flex-wrap: wrap;
@@ -323,6 +348,31 @@ def admin_layout(title, content):
 </body>
 </html>"""
 
+
+def admin_status_badge(status):
+    status_key = str(status or "").strip()
+    labels = {
+        "pending": ("Ожидает выбора оплаты", "warning"),
+        "awaiting_payment": ("Ожидает оплаты", "warning"),
+        "payment_reported": ("Оплата заявлена", "info"),
+        "cash_on_delivery": ("Наличными", "neutral"),
+        "cancelled": ("Отменён", "danger"),
+        "paid": ("Оплачен", "success"),
+        "preparing": ("Готовится", "info"),
+        "done": ("Готов", "success"),
+    }
+    label, status_class = labels.get(status_key, (status_key or "-", "neutral"))
+    return f"<span class='status {status_class}'>{html.escape(label)}</span>"
+
+
+def format_admin_datetime(value):
+    if not value:
+        return "—"
+    if hasattr(value, "strftime"):
+        return html.escape(value.strftime("%d.%m.%Y %H:%M"))
+    return html.escape(str(value))
+
+
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 
 @app.get("/", response_class=HTMLResponse)
@@ -439,7 +489,7 @@ async def orders():
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, order_id, username, phone, address, total, status, payment_method
+            SELECT id, order_id, username, phone, address, total, status, payment_method, created_at
             FROM orders
             ORDER BY id DESC
             LIMIT 50
@@ -448,9 +498,9 @@ async def orders():
         conn.close()
         
         html = "<section class='admin-card'><h1>📦 Заказы</h1><div class='dash-table-wrap'><table>"
-        html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Действия</th></tr>"
+        html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th><th>Действия</th></tr>"
         for row in rows:
-            id_, order_id, username, phone, address, total, status, payment_method = row
+            id_, order_id, username, phone, address, total, status, payment_method, created_at = row
             status_labels = {
                 "paid": "Оплачен",
                 "preparing": "Готовится",
@@ -461,7 +511,7 @@ async def orders():
             for s in ("paid", "preparing", "done", "cancelled"):
                 actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{status_labels[s]}</button></form>")
             actions_html = f"<div class=\"action-group\">{' '.join(actions)}</div>"
-            html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td><span class='status'>{status}</span></td><td>{payment_method or '-'}</td><td>{actions_html}</td></tr>"
+            html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method or '-'}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("📦 Заказы", html)
     except Exception as e:
@@ -503,7 +553,20 @@ async def order_detail(order_id: str):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, order_id, username, phone, address, total, status, payment_method
+            SELECT
+                id,
+                order_id,
+                username,
+                phone,
+                address,
+                total,
+                status,
+                payment_method,
+                created_at,
+                updated_at,
+                payment_selected_at,
+                payment_reminded_at,
+                payment_reported_at
             FROM orders
             WHERE order_id = %s
             """,
@@ -525,7 +588,21 @@ async def order_detail(order_id: str):
                 """,
             )
 
-        id_, order_id, username, phone, address, total, status, payment_method = row
+        (
+            id_,
+            order_id,
+            username,
+            phone,
+            address,
+            total,
+            status,
+            payment_method,
+            created_at,
+            updated_at,
+            payment_selected_at,
+            payment_reminded_at,
+            payment_reported_at,
+        ) = row
         try:
             cursor.execute(
                 """
@@ -556,8 +633,15 @@ async def order_detail(order_id: str):
         html += f"<div class='detail-field'><strong>Клиент</strong>{username or '-'}</div>"
         html += f"<div class='detail-field'><strong>Телефон</strong>{phone or '-'}</div>"
         html += f"<div class='detail-field'><strong>Адрес</strong>{address or '-'}</div>"
-        html += f"<div class='detail-field'><strong>Статус</strong><span class='status'>{status}</span></div>"
+        html += f"<div class='detail-field'><strong>Статус</strong>{admin_status_badge(status)}</div>"
         html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method or '-'}</div>"
+        html += "</div></section>"
+        html += "<section class='admin-card dash-section'><h2>⏱️ История заказа</h2><div class='detail-grid'>"
+        html += f"<div class='detail-field'><strong>Создан</strong>{format_admin_datetime(created_at)}</div>"
+        html += f"<div class='detail-field'><strong>Обновлён</strong>{format_admin_datetime(updated_at)}</div>"
+        html += f"<div class='detail-field'><strong>Оплата выбрана</strong>{format_admin_datetime(payment_selected_at)}</div>"
+        html += f"<div class='detail-field'><strong>Напоминание отправлено</strong>{format_admin_datetime(payment_reminded_at)}</div>"
+        html += f"<div class='detail-field'><strong>Оплата заявлена</strong>{format_admin_datetime(payment_reported_at)}</div>"
         html += "</div></section>"
         if items:
             html += "<section class='admin-card dash-section'><h2>Товары</h2><div class='dash-table-wrap'><table>"
