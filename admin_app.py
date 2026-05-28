@@ -1,10 +1,16 @@
 import os
 import html
-from fastapi import FastAPI, Form
+import hmac
+import hashlib
+import secrets
+import time
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import psycopg2
 
 app = FastAPI()
+ADMIN_SESSION_COOKIE = "admin_session"
+ADMIN_SESSION_MAX_AGE = 86400
 
 PAGE_STYLE = """
 <style>
@@ -340,6 +346,7 @@ def admin_layout(title, content):
           <a href="/products">🛒 Товары</a>
           <a href="/categories">🗂 Категории</a>
           <a href="/clients">👥 Клиенты</a>
+          <a href="/logout">Выйти</a>
         </div>
       </nav>
     </header>
@@ -347,6 +354,120 @@ def admin_layout(title, content):
   </div>
 </body>
 </html>"""
+
+
+def admin_auth_configured():
+    return bool(os.getenv("ADMIN_PASSWORD") and os.getenv("ADMIN_SESSION_SECRET"))
+
+
+def sign_admin_session():
+    secret = os.getenv("ADMIN_SESSION_SECRET", "")
+    expires_at = int(time.time()) + ADMIN_SESSION_MAX_AGE
+    payload = f"admin:{expires_at}:{secrets.token_urlsafe(16)}"
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    return f"{payload}:{signature}"
+
+
+def verify_admin_session(value):
+    if not value or not admin_auth_configured():
+        return False
+    secret = os.getenv("ADMIN_SESSION_SECRET", "")
+    try:
+        payload, signature = value.rsplit(":", 1)
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return False
+        parts = payload.split(":")
+        if len(parts) < 3 or parts[0] != "admin":
+            return False
+        return int(parts[1]) >= int(time.time())
+    except Exception:
+        return False
+
+
+def is_admin_authenticated(request):
+    return verify_admin_session(request.cookies.get(ADMIN_SESSION_COOKIE))
+
+
+def login_page(message=""):
+    message_html = f"<p>{html.escape(message)}</p>" if message else ""
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход</title>
+  {admin_css()}
+</head>
+<body>
+  <main class="admin-container">
+    <section class="admin-card" style="max-width: 420px; margin: 8vh auto 0;">
+      <h1>Вход в админ-панель</h1>
+      {message_html}
+      <form class="admin-form" method="post" action="/login">
+        <label>Пароль
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <div class="form-actions">
+          <button type="submit">Войти</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
+@app.middleware("http")
+async def require_admin_login(request: Request, call_next):
+    public_paths = {"/login", "/health"}
+    if request.url.path in public_paths:
+        return await call_next(request)
+    if is_admin_authenticated(request):
+        return await call_next(request)
+    return RedirectResponse("/login", status_code=303)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_form():
+    if not admin_auth_configured():
+        return login_page("Admin auth is not configured.")
+    return login_page()
+
+
+@app.post("/login", response_class=HTMLResponse)
+async def login(password: str = Form(...)):
+    admin_password = os.getenv("ADMIN_PASSWORD", "")
+    if not admin_auth_configured():
+        return login_page("Admin auth is not configured.")
+    if not secrets.compare_digest(password, admin_password):
+        return login_page("Неверный пароль.")
+
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        sign_admin_session(),
+        max_age=ADMIN_SESSION_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/logout")
+async def logout():
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(ADMIN_SESSION_COOKIE)
+    return response
 
 
 def admin_status_badge(status):
