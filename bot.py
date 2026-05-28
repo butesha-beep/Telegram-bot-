@@ -31,6 +31,11 @@ CALLBACK_COOLDOWN_SECONDS = 1.0
 ABANDONED_CART_REMINDER_HOURS = 0.5
 ABANDONED_CART_DELETE_AFTER_REMINDER_HOURS = 0.5
 ABANDONED_CART_WORKER_SLEEP_SECONDS = 300
+PENDING_ORDER_REMINDER_MINUTES = 30
+PENDING_ORDER_CANCEL_HOURS = 2
+AWAITING_PAYMENT_REMINDER_MINUTES = 30
+AWAITING_PAYMENT_CANCEL_HOURS = 24
+UNPAID_ORDER_WORKER_SLEEP_SECONDS = 1800
 callback_locks = {}
 
 
@@ -149,6 +154,151 @@ async def abandoned_cart_worker():
             print("ABANDONED CART WORKER ERROR:", e)
 
         await asyncio.sleep(ABANDONED_CART_WORKER_SLEEP_SECONDS)
+
+
+def unpaid_order_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧾 Открыть заказы / оплату", callback_data="cart")]
+    ])
+
+
+async def send_pending_order_reminders():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT DISTINCT telegram_id
+        FROM orders
+        WHERE status = 'pending'
+          AND payment_method IS NULL
+          AND created_at <= NOW() - (%s * INTERVAL '1 minute')
+          AND payment_reminded_at IS NULL
+        """,
+        (PENDING_ORDER_REMINDER_MINUTES,)
+    )
+    telegram_ids = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    for telegram_id in telegram_ids:
+        try:
+            await bot.send_message(
+                chat_id=telegram_id,
+                text="🧾 У вас есть незавершённый заказ.\n\nВы ещё не выбрали способ оплаты. Если заказ уже не актуален, он будет отменён автоматически.",
+                reply_markup=unpaid_order_keyboard()
+            )
+
+            update_conn = psycopg2.connect(DATABASE_URL)
+            try:
+                update_cursor = update_conn.cursor()
+                update_cursor.execute(
+                    """
+                    UPDATE orders
+                    SET payment_reminded_at = NOW(),
+                        updated_at = NOW()
+                    WHERE telegram_id = %s
+                      AND status = 'pending'
+                      AND payment_reminded_at IS NULL
+                    """,
+                    (telegram_id,)
+                )
+                update_conn.commit()
+            finally:
+                update_conn.close()
+        except Exception as e:
+            print(f"PENDING ORDER REMINDER ERROR for {telegram_id}:", e)
+
+
+async def cancel_expired_pending_orders():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE orders
+        SET status = 'cancelled',
+            updated_at = NOW()
+        WHERE status = 'pending'
+          AND payment_method IS NULL
+          AND created_at <= NOW() - (%s * INTERVAL '1 hour')
+        """,
+        (PENDING_ORDER_CANCEL_HOURS,)
+    )
+    conn.commit()
+    conn.close()
+
+
+async def send_awaiting_payment_reminders():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT DISTINCT telegram_id
+        FROM orders
+        WHERE status = 'awaiting_payment'
+          AND payment_selected_at <= NOW() - (%s * INTERVAL '1 minute')
+          AND payment_reminded_at IS NULL
+        """,
+        (AWAITING_PAYMENT_REMINDER_MINUTES,)
+    )
+    telegram_ids = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    for telegram_id in telegram_ids:
+        try:
+            await bot.send_message(
+                chat_id=telegram_id,
+                text="💳 Вы выбрали оплату, но заказ ещё не отмечен как оплаченный.\n\nЕсли вы уже оплатили, нажмите «Я оплатил» в сообщении с оплатой или напишите администратору.",
+                reply_markup=unpaid_order_keyboard()
+            )
+
+            update_conn = psycopg2.connect(DATABASE_URL)
+            try:
+                update_cursor = update_conn.cursor()
+                update_cursor.execute(
+                    """
+                    UPDATE orders
+                    SET payment_reminded_at = NOW(),
+                        updated_at = NOW()
+                    WHERE telegram_id = %s
+                      AND status = 'awaiting_payment'
+                      AND payment_reminded_at IS NULL
+                    """,
+                    (telegram_id,)
+                )
+                update_conn.commit()
+            finally:
+                update_conn.close()
+        except Exception as e:
+            print(f"AWAITING PAYMENT REMINDER ERROR for {telegram_id}:", e)
+
+
+async def cancel_expired_awaiting_payment_orders():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE orders
+        SET status = 'cancelled',
+            updated_at = NOW()
+        WHERE status = 'awaiting_payment'
+          AND payment_selected_at <= NOW() - (%s * INTERVAL '1 hour')
+        """,
+        (AWAITING_PAYMENT_CANCEL_HOURS,)
+    )
+    conn.commit()
+    conn.close()
+
+
+async def unpaid_order_worker():
+    while True:
+        try:
+            await send_pending_order_reminders()
+            await cancel_expired_pending_orders()
+            await send_awaiting_payment_reminders()
+            await cancel_expired_awaiting_payment_orders()
+        except Exception as e:
+            print("UNPAID ORDER WORKER ERROR:", e)
+
+        await asyncio.sleep(UNPAID_ORDER_WORKER_SLEEP_SECONDS)
 
 
 def load_json(filename):
