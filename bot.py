@@ -112,6 +112,9 @@ def init_db():
         )
     """)
     cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS option_id INTEGER")
+    cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
+    cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
+    cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
