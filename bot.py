@@ -434,6 +434,19 @@ def init_db():
     """)
     cursor.execute("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS option_id INTEGER")
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_events (
+            id SERIAL PRIMARY KEY,
+            order_id BIGINT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_text TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_order_events_order_id_created_at
+        ON order_events (order_id, created_at)
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
