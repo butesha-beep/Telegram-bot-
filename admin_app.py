@@ -787,7 +787,7 @@ async def orders_export_csv(status_filter: str = "all", q: str = ""):
 
     output = io.StringIO()
     output.write("\ufeff")
-    writer = csv.writer(output)
+    writer = csv.writer(output, delimiter=';')
     writer.writerow([
         "id",
         "order_id",
