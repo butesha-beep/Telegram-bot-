@@ -1632,7 +1632,7 @@ async def products():
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name, p.stock_grams, p.is_out_of_stock
+            SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name, p.stock_grams, p.is_out_of_stock, p.low_stock_threshold_grams
             FROM products p
             LEFT JOIN categories c ON c.id = p.category_id
             ORDER BY p.sort_order, p.id
@@ -1664,7 +1664,7 @@ async def products():
         for category_label in category_order:
             html += f"<tr class='category-row' id='{category_anchors[category_label]}'><td colspan='9'>📁 {category_label}</td></tr>"
             for row in grouped_products[category_label]:
-                pid, name, price, image_url, is_active, category_name, stock_grams, is_out_of_stock = row
+                pid, name, price, image_url, is_active, category_name, stock_grams, is_out_of_stock, low_stock_threshold_grams = row
                 if image_url:
                     escaped_image_url = escape(str(image_url), quote=True)
                     img_html = f"<a href=\"{escaped_image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"product-thumb\" src=\"{escaped_image_url}\" referrerpolicy=\"no-referrer\"/></a>"
@@ -1698,6 +1698,7 @@ async def new_product_form():
         <label>Описание <input name="description"/></label>
         <label>Ссылка на фото <input name="image_url"/></label>
         <label>Остаток, г <input name="stock_grams" type="number" min="0" value="0"/></label>
+        <label>Минимальный остаток, г <input name="low_stock_threshold_grams" type="number" min="0" value="500"/></label>
         <label>Порядок сортировки <input name="sort_order" value="0"/><small>Меньше число = выше в списке</small></label>
         <label>Товар активен <input type="checkbox" name="is_active" value="1"/></label>
         <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true"/></label>
@@ -1718,12 +1719,17 @@ async def create_product(
     description: str = Form(''),
     image_url: str = Form(''),
     stock_grams: int = Form(0),
+    low_stock_threshold_grams: str = Form("500"),
     sort_order: int = Form(0),
     is_active: str = Form(None),
     is_out_of_stock: bool = Form(False),
 ):
     active = True if is_active else False
     stock_value = max(stock_grams, 0)
+    try:
+        low_stock_threshold_value = max(int(low_stock_threshold_grams or 0), 0)
+    except (TypeError, ValueError):
+        low_stock_threshold_value = 0
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -1739,11 +1745,12 @@ async def create_product(
     description,
     image_url,
     stock_grams,
+    low_stock_threshold_grams,
     is_out_of_stock,
     is_active,
     sort_order
 )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
     new_id,
@@ -1753,6 +1760,7 @@ async def create_product(
     description,
     image_url,
     stock_value,
+    low_stock_threshold_value,
     is_out_of_stock,
     active,
     sort_order
@@ -1784,7 +1792,7 @@ async def edit_product_form(product_id: int):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock
+            SELECT category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams
             FROM products
             WHERE id = %s
             """,
@@ -1817,7 +1825,7 @@ async def edit_product_form(product_id: int):
         options = cursor.fetchall()
         conn.close()
 
-        category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock = row
+        category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams = row
         checked = "checked" if is_active else ""
         out_of_stock_checked = "checked" if is_out_of_stock else ""
         image_url_value = escape(str(image_url or ""), quote=True)
@@ -1832,6 +1840,7 @@ async def edit_product_form(product_id: int):
             <label>Описание <input name="description" value="{description or ''}"/></label>
             <label>Ссылка на фото <input name="image_url" value="{image_url_value}"/></label>
             <label>Остаток, г <input name="stock_grams" type="number" min="0" value="{max(int(stock_grams or 0), 0)}"/></label>
+            <label>Минимальный остаток, г <input name="low_stock_threshold_grams" type="number" min="0" value="{max(int(low_stock_threshold_grams or 0), 0)}"/></label>
             <label>Порядок сортировки <input name="sort_order" value="{sort_order}"/><small>Меньше число = выше в списке</small></label>
             <label>Товар активен <input type="checkbox" name="is_active" value="1" {checked}/></label>
             <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true" {out_of_stock_checked}/></label>
@@ -2114,12 +2123,17 @@ async def update_product(
     description: str = Form(''),
     image_url: str = Form(''),
     stock_grams: int = Form(0),
+    low_stock_threshold_grams: str = Form("0"),
     sort_order: int = Form(0),
     is_active: str = Form(None),
     is_out_of_stock: bool = Form(False),
 ):
     active = True if is_active else False
     stock_value = max(stock_grams, 0)
+    try:
+        low_stock_threshold_value = max(int(low_stock_threshold_grams or 0), 0)
+    except (TypeError, ValueError):
+        low_stock_threshold_value = 0
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -2137,12 +2151,13 @@ async def update_product(
                 description = %s,
                 image_url = %s,
                 stock_grams = %s,
+                low_stock_threshold_grams = %s,
                 is_out_of_stock = %s,
                 sort_order = %s,
                 is_active = %s
             WHERE id = %s
             """,
-            (category_id, name, price_per_kg, description, saved_image_url, stock_value, is_out_of_stock, sort_order, active, product_id),
+            (category_id, name, price_per_kg, description, saved_image_url, stock_value, low_stock_threshold_value, is_out_of_stock, sort_order, active, product_id),
         )
         conn.commit()
         conn.close()
