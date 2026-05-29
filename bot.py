@@ -397,6 +397,7 @@ def init_db():
         )
     except:
         conn.rollback()
+    cursor.execute("ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_note TEXT")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS cart_items (
