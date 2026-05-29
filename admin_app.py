@@ -880,7 +880,11 @@ async def products():
             html += f"<tr class='category-row' id='{category_anchors[category_label]}'><td colspan='7'>📁 {category_label}</td></tr>"
             for row in grouped_products[category_label]:
                 pid, name, price, image_url, is_active, category_name = row
-                img_html = f"<img class=\"product-thumb\" src=\"{image_url}\"/>" if image_url else "-"
+                if image_url:
+                    escaped_image_url = html.escape(str(image_url), quote=True)
+                    img_html = f"<a href=\"{escaped_image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"product-thumb\" src=\"{escaped_image_url}\" referrerpolicy=\"no-referrer\"/></a>"
+                else:
+                    img_html = "-"
                 active_text = "Активен" if is_active else "Выключен"
                 status_class = "active" if is_active else "inactive"
                 actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Редактировать</a>"
