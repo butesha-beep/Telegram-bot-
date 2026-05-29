@@ -1,12 +1,14 @@
 import os
 import html
+import csv
+import io
 from html import escape
 import hmac
 import hashlib
 import secrets
 import time
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 import psycopg2
 
 app = FastAPI()
@@ -688,6 +690,7 @@ async def orders(status_filter: str = "all", q: str = ""):
             <div class="form-actions">
               <button type="submit">Показать</button>
               <a class="button button-link secondary" href="/orders">Сбросить</a>
+              <a class="button button-link secondary" href="/orders/export.csv?status_filter={escape(status_filter, quote=True)}&q={escape(search_query, quote=True)}">Экспорт CSV</a>
             </div>
           </form>
           <div class='dash-table-wrap'><table>
@@ -720,6 +723,96 @@ async def orders(status_filter: str = "all", q: str = ""):
         return admin_layout("📦 Заказы", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.get("/orders/export.csv")
+async def orders_export_csv(status_filter: str = "all", q: str = ""):
+    allowed_status_filters = {
+        "all",
+        "pending",
+        "awaiting_payment",
+        "payment_reported",
+        "cash_on_delivery",
+        "paid",
+        "preparing",
+        "done",
+        "cancelled",
+    }
+    if status_filter not in allowed_status_filters:
+        status_filter = "all"
+    search_query = q.strip()
+    where_clauses = []
+    params = []
+    if status_filter != "all":
+        where_clauses.append("status = %s")
+        params.append(status_filter)
+    if search_query:
+        search_value = f"%{search_query}%"
+        where_clauses.append(
+            """
+            (
+                CAST(order_id AS TEXT) ILIKE %s
+                OR username ILIKE %s
+                OR phone ILIKE %s
+                OR address ILIKE %s
+            )
+            """
+        )
+        params.extend([search_value, search_value, search_value, search_value])
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        SELECT
+            id,
+            order_id,
+            username,
+            phone,
+            address,
+            total,
+            status,
+            payment_method,
+            created_at,
+            updated_at,
+            payment_selected_at,
+            payment_reported_at,
+            inventory_deducted
+        FROM orders
+        {where_sql}
+        ORDER BY id DESC
+    """, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    output = io.StringIO()
+    output.write("\ufeff")
+    writer = csv.writer(output)
+    writer.writerow([
+        "id",
+        "order_id",
+        "username",
+        "phone",
+        "address",
+        "total",
+        "status",
+        "payment_method",
+        "created_at",
+        "updated_at",
+        "payment_selected_at",
+        "payment_reported_at",
+        "inventory_deducted",
+    ])
+    for row in rows:
+        writer.writerow(row)
+
+    output.seek(0)
+    headers = {"Content-Disposition": 'attachment; filename="orders.csv"'}
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers
+    )
 
 
 @app.post("/orders/{order_id}/status/{status}", response_class=HTMLResponse)
