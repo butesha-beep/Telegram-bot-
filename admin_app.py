@@ -554,6 +554,7 @@ async def root():
     worst_products = []
     best_customers = []
     repeat_customers = []
+    low_stock_products = []
     error_message = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -654,6 +655,25 @@ async def root():
             """
         )
         repeat_customers = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT
+                id,
+                name,
+                stock_grams,
+                low_stock_threshold_grams
+            FROM products
+            WHERE
+                is_active = TRUE
+                AND is_out_of_stock = FALSE
+                AND low_stock_threshold_grams > 0
+                AND stock_grams > 0
+                AND stock_grams <= low_stock_threshold_grams
+            ORDER BY stock_grams ASC
+            LIMIT 10
+            """
+        )
+        low_stock_products = cursor.fetchall()
         cursor.execute(
             """
             SELECT order_id, username, phone, address, total, status
@@ -802,6 +822,28 @@ async def root():
         </div>
         """
 
+    low_stock_rows = ""
+    for product_id, name, stock_grams, low_stock_threshold_grams in low_stock_products:
+        low_stock_rows += f"""
+        <tr>
+          <td><a class="view-link" href="/products/{product_id}/edit">{html.escape(str(name or '-'))}</a></td>
+          <td>{format_stock_grams(stock_grams)}</td>
+          <td>{format_stock_grams(low_stock_threshold_grams)}</td>
+        </tr>
+        """
+    low_stock_section = """
+        <p>Все товары имеют достаточный остаток.</p>
+    """
+    if low_stock_rows:
+        low_stock_section = f"""
+        <div class="dash-table-wrap">
+          <table>
+            <tr><th>Название товара</th><th>Остаток</th><th>Порог</th></tr>
+            {low_stock_rows}
+          </table>
+        </div>
+        """
+
     analytics_section = f"""
         <section class="admin-card dash-section">
           <h2>Аналитика продаж</h2>
@@ -845,6 +887,11 @@ async def root():
         </div>
 
         {stat_cards}
+
+        <section class="admin-card dash-section">
+          <h2>⚠️ Низкий остаток</h2>
+          {low_stock_section}
+        </section>
 
         <section class="admin-card dash-section">
           <h2>Последние заказы</h2>
