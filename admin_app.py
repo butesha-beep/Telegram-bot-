@@ -1965,6 +1965,24 @@ async def edit_product_form(product_id: int):
             (product_id,),
         )
         options = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT
+                movement_type,
+                quantity_grams,
+                stock_before,
+                stock_after,
+                order_id,
+                note,
+                created_at
+            FROM inventory_movements
+            WHERE product_id = %s
+            ORDER BY created_at DESC, id DESC
+            LIMIT 20
+            """,
+            (product_id,),
+        )
+        inventory_movements = cursor.fetchall()
         conn.close()
 
         category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams = row
@@ -1992,6 +2010,49 @@ async def edit_product_form(product_id: int):
           </form>
         </section>
         """
+        movement_rows = ""
+        for movement_type, quantity_grams, stock_before, stock_after, order_id, note, created_at in inventory_movements:
+            quantity_value = int(quantity_grams or 0)
+            if quantity_value > 0:
+                quantity_text = f"+{format_stock_grams(quantity_value)}"
+            elif quantity_value < 0:
+                quantity_text = f"-{format_stock_grams(abs(quantity_value))}"
+            else:
+                quantity_text = "0 г"
+            order_link = "-"
+            if order_id:
+                order_id_text = escape(str(order_id), quote=True)
+                order_link = f"<a class='view-link' href='/orders/{order_id_text}'>{order_id_text}</a>"
+            movement_rows += f"""
+            <tr>
+              <td>{format_admin_datetime(created_at)}</td>
+              <td>{escape(str(movement_type or '-'), quote=True)}</td>
+              <td>{quantity_text}</td>
+              <td>{format_stock_grams(stock_before)}</td>
+              <td>{format_stock_grams(stock_after)}</td>
+              <td>{order_link}</td>
+              <td>{escape(str(note or '-'), quote=True)}</td>
+            </tr>
+            """
+        if movement_rows:
+            html += f"""
+            <section class="admin-card dash-section">
+              <h2>История остатков</h2>
+              <div class="dash-table-wrap">
+                <table>
+                  <tr><th>Дата</th><th>Тип</th><th>Изменение</th><th>Было</th><th>Стало</th><th>Заказ</th><th>Комментарий</th></tr>
+                  {movement_rows}
+                </table>
+              </div>
+            </section>
+            """
+        else:
+            html += """
+            <section class="admin-card dash-section">
+              <h2>История остатков</h2>
+              <p>Пока нет истории остатков.</p>
+            </section>
+            """
         html += """
         <section class="admin-card dash-section">
           <h2>⚖️ Варианты продажи</h2>
