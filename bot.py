@@ -311,7 +311,7 @@ def get_products():
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, category_id, name, price_per_kg, description, image_url, is_active
+            SELECT id, category_id, name, price_per_kg, description, image_url, is_active, stock_grams, is_out_of_stock
             FROM products
             WHERE is_active = TRUE
             ORDER BY sort_order, id
@@ -322,7 +322,7 @@ def get_products():
         if rows:
             products = []
             for row in rows:
-                product_id, category_id, name, price_per_kg, description, image_url, is_active = row
+                product_id, category_id, name, price_per_kg, description, image_url, is_active, stock_grams, is_out_of_stock = row
                 products.append({
                     "id": product_id,
                     "category_id": category_id,
@@ -331,13 +331,47 @@ def get_products():
                     "description": description,
                     "image_url": image_url,
                     "photo": image_url,
-                    "is_active": is_active
+                    "is_active": is_active,
+                    "stock_grams": stock_grams,
+                    "is_out_of_stock": is_out_of_stock
                 })
             return products
     except Exception:
         pass
 
     return load_json("products.json")
+
+
+OUT_OF_STOCK_TEXT = (
+    "❌ Сейчас нет в наличии.\n"
+    "Напишите администратору — подберём замену или сообщим о поступлении."
+)
+
+
+def is_product_out_of_stock(product):
+    if product.get("is_out_of_stock"):
+        return True
+    stock_grams = product.get("stock_grams")
+    if stock_grams is None:
+        return False
+    return int(stock_grams or 0) <= 0
+
+
+def out_of_stock_keyboard(category_id=None):
+    config = load_json("config.json")
+    support_username = str(config.get("support_username", "")).strip().lstrip("@")
+    contact_button = InlineKeyboardButton(
+        text="💬 Написать администратору",
+        url=f"https://t.me/{support_username}"
+    ) if support_username else InlineKeyboardButton(
+        text="💬 Написать администратору",
+        callback_data="support"
+    )
+    back_callback = f"category_{category_id}" if category_id else "back_to_menu"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [contact_button],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]
+    ])
 
 def init_db():
     conn = psycopg2.connect(DATABASE_URL)
@@ -419,6 +453,8 @@ def init_db():
             sort_order INTEGER DEFAULT 0
         )
     """)
+    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_grams INTEGER DEFAULT 0")
+    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_out_of_stock BOOLEAN DEFAULT FALSE")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS product_options (
             id SERIAL PRIMARY KEY,
@@ -701,6 +737,24 @@ async def show_product(callback: types.CallbackQuery):
         f"⚖️ 100 г: {price_100g:.2f} €"
     )
 
+    if is_product_out_of_stock(product):
+        text = f"{text}\n\n{OUT_OF_STOCK_TEXT}"
+        keyboard = out_of_stock_keyboard(product["category_id"])
+        photo = product.get("photo") or product.get("image_url")
+        if photo:
+            try:
+                await callback.message.answer_photo(
+                    photo=photo,
+                    caption=text,
+                    reply_markup=keyboard
+                )
+            except Exception:
+                await callback.message.answer(text, reply_markup=keyboard)
+        else:
+            await callback.message.answer(text, reply_markup=keyboard)
+        await callback.answer()
+        return
+
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -839,6 +893,14 @@ async def choose_option(callback: types.CallbackQuery):
         await callback.answer()
         return
 
+    if is_product_out_of_stock(product):
+        await callback.message.answer(
+            OUT_OF_STOCK_TEXT,
+            reply_markup=out_of_stock_keyboard(product.get("category_id"))
+        )
+        await callback.answer()
+        return
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -931,10 +993,12 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT product_id, weight, price, label
-        FROM product_options
-        WHERE id = %s
-          AND is_active = TRUE
+        SELECT po.product_id, po.weight, po.price, po.label, p.category_id, p.stock_grams, p.is_out_of_stock
+        FROM product_options po
+        JOIN products p ON p.id = po.product_id
+        WHERE po.id = %s
+          AND po.is_active = TRUE
+          AND p.is_active = TRUE
         """,
         (option_id,)
     )
@@ -946,7 +1010,19 @@ async def add_option_to_cart(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    product_id, weight, price, label = option
+    product_id, weight, price, label, category_id, stock_grams, is_out_of_stock = option
+    if is_product_out_of_stock({
+        "stock_grams": stock_grams,
+        "is_out_of_stock": is_out_of_stock
+    }):
+        conn.close()
+        await callback.message.answer(
+            OUT_OF_STOCK_TEXT,
+            reply_markup=out_of_stock_keyboard(category_id)
+        )
+        await callback.answer()
+        return
+
     cursor.execute(
         "SELECT COUNT(*) FROM cart_items WHERE telegram_id = %s AND option_id = %s",
         (callback.from_user.id, option_id)
@@ -1022,6 +1098,34 @@ async def add_to_cart(callback: types.CallbackQuery):
 
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT category_id, stock_grams, is_out_of_stock
+        FROM products
+        WHERE id = %s
+          AND is_active = TRUE
+        """,
+        (product_id,)
+    )
+    product_row = cursor.fetchone()
+    if not product_row:
+        conn.close()
+        await callback.message.answer("❌ Товар не найден.")
+        await callback.answer()
+        return
+
+    category_id, stock_grams, is_out_of_stock = product_row
+    if is_product_out_of_stock({
+        "stock_grams": stock_grams,
+        "is_out_of_stock": is_out_of_stock
+    }):
+        conn.close()
+        await callback.message.answer(
+            OUT_OF_STOCK_TEXT,
+            reply_markup=out_of_stock_keyboard(category_id)
+        )
+        await callback.answer()
+        return
 
     cursor.execute(
         """
@@ -1321,10 +1425,12 @@ async def cart_plus_option(callback: types.CallbackQuery):
 
     cursor.execute(
         """
-        SELECT product_id, weight
-        FROM product_options
-        WHERE id = %s
-          AND is_active = TRUE
+        SELECT po.product_id, po.weight, p.category_id, p.stock_grams, p.is_out_of_stock
+        FROM product_options po
+        JOIN products p ON p.id = po.product_id
+        WHERE po.id = %s
+          AND po.is_active = TRUE
+          AND p.is_active = TRUE
         """,
         (option_id,)
     )
@@ -1334,7 +1440,19 @@ async def cart_plus_option(callback: types.CallbackQuery):
         await callback.answer("Вариант не найден", show_alert=True)
         return
 
-    product_id, weight = option
+    product_id, weight, category_id, stock_grams, is_out_of_stock = option
+    if is_product_out_of_stock({
+        "stock_grams": stock_grams,
+        "is_out_of_stock": is_out_of_stock
+    }):
+        conn.close()
+        await callback.message.answer(
+            OUT_OF_STOCK_TEXT,
+            reply_markup=out_of_stock_keyboard(category_id)
+        )
+        await callback.answer()
+        return
+
     cursor.execute(
         """
         INSERT INTO cart_items (
@@ -1365,6 +1483,34 @@ async def cart_plus_weight(callback: types.CallbackQuery):
 
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT category_id, stock_grams, is_out_of_stock
+        FROM products
+        WHERE id = %s
+          AND is_active = TRUE
+        """,
+        (product_id,)
+    )
+    product_row = cursor.fetchone()
+    if not product_row:
+        conn.close()
+        await callback.answer("Товар не найден", show_alert=True)
+        return
+
+    category_id, stock_grams, is_out_of_stock = product_row
+    if is_product_out_of_stock({
+        "stock_grams": stock_grams,
+        "is_out_of_stock": is_out_of_stock
+    }):
+        conn.close()
+        await callback.message.answer(
+            OUT_OF_STOCK_TEXT,
+            reply_markup=out_of_stock_keyboard(category_id)
+        )
+        await callback.answer()
+        return
+
     cursor.execute(
         """
         SELECT COUNT(*)
