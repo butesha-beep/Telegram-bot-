@@ -7,6 +7,8 @@ import hmac
 import hashlib
 import secrets
 import time
+import urllib.parse
+import urllib.request
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 import psycopg2
@@ -504,6 +506,33 @@ def format_stock_grams(stock_grams):
     return f"{stock} г"
 
 
+def send_order_status_notification(telegram_id, order_id, status):
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token or not telegram_id:
+        return
+
+    messages = {
+        "paid": f"✅ Ваш заказ №{order_id} подтверждён и оплачен.",
+        "preparing": f"👨‍🍳 Ваш заказ №{order_id} передан в работу и готовится.",
+        "done": f"📦 Ваш заказ №{order_id} готов.\nСпасибо за заказ!",
+        "cancelled": f"❌ Заказ №{order_id} отменён.\nЕсли произошла ошибка — свяжитесь с администратором.",
+    }
+    text = messages.get(status)
+    if not text:
+        return
+
+    data = urllib.parse.urlencode({
+        "chat_id": telegram_id,
+        "text": text,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=data,
+        method="POST"
+    )
+    urllib.request.urlopen(request, timeout=5).read()
+
+
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 
 @app.get("/", response_class=HTMLResponse)
@@ -879,7 +908,7 @@ async def update_order_status(order_id: str, status: str):
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT status, inventory_deducted FROM orders WHERE order_id = %s",
+            "SELECT status, inventory_deducted, telegram_id FROM orders WHERE order_id = %s",
             (order_id,)
         )
         row = cursor.fetchone()
@@ -889,6 +918,7 @@ async def update_order_status(order_id: str, status: str):
 
         current_status = str(row[0] or "")
         inventory_deducted = bool(row[1])
+        telegram_id = row[2]
         allowed_transitions = {
             "pending": {"paid", "preparing", "done", "cancelled"},
             "awaiting_payment": {"paid", "preparing", "done", "cancelled"},
@@ -948,6 +978,11 @@ async def update_order_status(order_id: str, status: str):
         )
         conn.commit()
         conn.close()
+        if current_status != status:
+            try:
+                send_order_status_notification(telegram_id, order_id, status)
+            except Exception as e:
+                print(f"ORDER STATUS NOTIFICATION ERROR: {order_id} {status}:", e)
         return admin_layout(
             "✅ Статус заказа обновлён",
             f"""
