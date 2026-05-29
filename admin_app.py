@@ -506,6 +506,17 @@ def format_stock_grams(stock_grams):
     return f"{stock} г"
 
 
+def log_order_event(cursor, order_id, event_type, event_text):
+    cursor.execute(
+        """
+        INSERT INTO order_events
+        (order_id, event_type, event_text)
+        VALUES (%s, %s, %s)
+        """,
+        (order_id, event_type, event_text)
+    )
+
+
 def send_order_status_notification(telegram_id, order_id, status):
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token or not telegram_id:
