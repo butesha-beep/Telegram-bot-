@@ -2279,9 +2279,10 @@ async def update_product(
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        cursor.execute("SELECT image_url FROM products WHERE id = %s", (product_id,))
+        cursor.execute("SELECT image_url, stock_grams FROM products WHERE id = %s", (product_id,))
         row = cursor.fetchone()
         existing_image_url = row[0] if row else ""
+        old_stock = int(row[1] or 0) if row else 0
         submitted_image_url = image_url.strip()
         saved_image_url = submitted_image_url if submitted_image_url else existing_image_url
         cursor.execute(
@@ -2301,6 +2302,17 @@ async def update_product(
             """,
             (category_id, name, price_per_kg, description, saved_image_url, stock_value, low_stock_threshold_value, is_out_of_stock, sort_order, active, product_id),
         )
+        if old_stock != stock_value:
+            log_inventory_movement(
+                cursor,
+                product_id,
+                "manual_set",
+                stock_value - old_stock,
+                old_stock,
+                stock_value,
+                None,
+                "Остаток изменён вручную в админке."
+            )
         conn.commit()
         conn.close()
         return admin_layout(
