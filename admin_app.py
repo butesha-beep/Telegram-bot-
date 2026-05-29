@@ -1274,20 +1274,48 @@ async def order_detail(order_id: str):
 
 
 @app.get("/clients", response_class=HTMLResponse)
-async def clients():
+async def clients(q: str = ""):
     try:
+        search_query = q.strip()[:100]
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT telegram_id, username, phone, address
-            FROM clients
-            ORDER BY telegram_id DESC
-            LIMIT 20
-        """)
+        if search_query:
+            search_param = f"%{search_query}%"
+            cursor.execute(
+                """
+                SELECT telegram_id, username, phone, address
+                FROM clients
+                WHERE
+                CAST(telegram_id AS TEXT) ILIKE %s
+                OR username ILIKE %s
+                OR phone ILIKE %s
+                ORDER BY telegram_id DESC
+                LIMIT 20
+                """,
+                (search_param, search_param, search_param),
+            )
+        else:
+            cursor.execute("""
+                SELECT telegram_id, username, phone, address
+                FROM clients
+                ORDER BY telegram_id DESC
+                LIMIT 20
+            """)
         rows = cursor.fetchall()
         conn.close()
         
-        html = "<section class='admin-card'><h1>👥 Клиенты</h1><div class='dash-table-wrap'><table>"
+        html = f"""
+        <section class='admin-card'>
+        <h1>👥 Клиенты</h1>
+        <form class="admin-form" method="get" action="/clients">
+          <label>Поиск <input name="q" value="{escape(search_query, quote=True)}" placeholder="Поиск по Telegram ID, username или телефону"/></label>
+          <div class="form-actions">
+            <button class="button" type="submit">Показать</button>
+            <a class="button button-link secondary" href="/clients">Сбросить</a>
+          </div>
+        </form>
+        <div class='dash-table-wrap'><table>
+        """
         html += "<tr><th>Telegram ID</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Действия</th></tr>"
         for row in rows:
             telegram_id, username, phone, address = row
