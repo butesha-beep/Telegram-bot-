@@ -1146,6 +1146,13 @@ async def update_order_status(order_id: str, status: str):
             "UPDATE orders SET status = %s, updated_at = NOW() WHERE order_id = %s",
             (status, order_id)
         )
+        if current_status != status:
+            log_order_event(
+                cursor,
+                order_id,
+                "status_changed",
+                f"Статус изменён: {current_status} → {status}"
+            )
         conn.commit()
         conn.close()
         if current_status != status:
