@@ -1269,7 +1269,7 @@ async def order_detail(order_id: str):
         for label, value in timeline_events:
             timeline_rows += f"""
             <tr>
-              <td>{html.escape(label)}</td>
+              <td>{escape(str(label), quote=True)}</td>
               <td>{format_admin_datetime(value)}</td>
             </tr>
             """
