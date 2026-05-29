@@ -1024,6 +1024,7 @@ async def edit_product_form(product_id: int):
 
         category_id, name, price_per_kg, description, image_url, sort_order, is_active = row
         checked = "checked" if is_active else ""
+        image_url_value = escape(str(image_url or ""), quote=True)
         html = f"""
         <section class="admin-card">
           <h1>✏️ Редактировать товар</h1>
@@ -1033,7 +1034,7 @@ async def edit_product_form(product_id: int):
             <label>Название товара <input name="name" value="{name}"/></label>
             <label>Цена за кг (€) <input name="price_per_kg" value="{price_per_kg}"/></label>
             <label>Описание <input name="description" value="{description or ''}"/></label>
-            <label>Ссылка на фото <input name="image_url" value="{image_url or ''}"/></label>
+            <label>Ссылка на фото <input name="image_url" value="{image_url_value}"/></label>
             <label>Порядок сортировки <input name="sort_order" value="{sort_order}"/><small>Меньше число = выше в списке</small></label>
             <label>Товар активен <input type="checkbox" name="is_active" value="1" {checked}/></label>
             <div class="form-actions">
@@ -1321,6 +1322,11 @@ async def update_product(
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
+        cursor.execute("SELECT image_url FROM products WHERE id = %s", (product_id,))
+        row = cursor.fetchone()
+        existing_image_url = row[0] if row else ""
+        submitted_image_url = image_url.strip()
+        saved_image_url = submitted_image_url if submitted_image_url else existing_image_url
         cursor.execute(
             """
             UPDATE products
@@ -1333,7 +1339,7 @@ async def update_product(
                 is_active = %s
             WHERE id = %s
             """,
-            (category_id, name, price_per_kg, description, image_url, sort_order, active, product_id),
+            (category_id, name, price_per_kg, description, saved_image_url, sort_order, active, product_id),
         )
         conn.commit()
         conn.close()
