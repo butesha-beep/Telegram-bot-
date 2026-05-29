@@ -1278,7 +1278,8 @@ async def order_detail(order_id: str):
                 payment_reminded_at,
                 payment_reported_at,
                 inventory_deducted,
-                inventory_deducted_at
+                inventory_deducted_at,
+                order_note
             FROM orders
             WHERE order_id = %s
             """,
@@ -1316,6 +1317,7 @@ async def order_detail(order_id: str):
             payment_reported_at,
             inventory_deducted,
             inventory_deducted_at,
+            order_note,
         ) = row
         try:
             cursor.execute(
@@ -1360,6 +1362,20 @@ async def order_detail(order_id: str):
         html += f"<div class='detail-field'><strong>Статус</strong>{admin_status_badge(status)}</div>"
         html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method or '-'}</div>"
         html += "</div></section>"
+        html += f"""
+        <section class='admin-card dash-section'>
+          <h2>Заметка администратора</h2>
+          <form class="admin-form" method="post" action="/orders/{order_id}/note">
+            <label>Заметка
+              <textarea name="order_note" rows="4">{escape(str(order_note or ""), quote=True)}</textarea>
+              <small>Видно только в админке.</small>
+            </label>
+            <div class="form-actions">
+              <button class="button" type="submit">Сохранить заметку</button>
+            </div>
+          </form>
+        </section>
+        """
         timeline_events = [
             ("Заказ создан", created_at),
             ("Выбран способ оплаты", payment_selected_at),
@@ -1430,6 +1446,33 @@ async def order_detail(order_id: str):
         return admin_layout(f"Заказ {order_id}", html)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.post("/orders/{order_id}/note")
+async def update_order_note(order_id: str, order_note: str = Form("")):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE orders
+            SET order_note = %s,
+                updated_at = NOW()
+            WHERE order_id = %s
+            """,
+            (order_note, order_id),
+        )
+        log_order_event(
+            cursor,
+            order_id,
+            "order_note_updated",
+            "Заметка администратора обновлена."
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"ORDER NOTE UPDATE ERROR: {order_id}:", e)
+    return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
 
 @app.get("/clients", response_class=HTMLResponse)
