@@ -1361,6 +1361,30 @@ async def client_detail(telegram_id: int):
             (telegram_id,),
         )
         order_rows = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT
+                oi.product_id,
+                COALESCE(p.name, oi.product_name) AS product_name,
+                COUNT(*) AS purchase_count,
+                COALESCE(SUM(oi.weight), 0) AS grams_purchased,
+                COALESCE(SUM(oi.price), 0) AS revenue
+            FROM order_items oi
+            JOIN orders o ON o.order_id = oi.order_id
+            LEFT JOIN products p ON p.id = oi.product_id
+            WHERE o.telegram_id = %s
+              AND o.status = 'done'
+            GROUP BY
+                oi.product_id,
+                COALESCE(p.name, oi.product_name)
+            ORDER BY
+                purchase_count DESC,
+                revenue DESC
+            LIMIT 5
+            """,
+            (telegram_id,),
+        )
+        favorite_products = cursor.fetchall()
         conn.close()
 
         client_id, username, first_name, phone, address = client
@@ -1397,6 +1421,33 @@ async def client_detail(telegram_id: int):
             </div>
             """
 
+        def format_client_weight(value):
+            grams = int(value or 0)
+            if grams >= 1000:
+                return f"{grams / 1000:.1f} кг"
+            return f"{grams} г"
+
+        favorite_products_html = "<p>Нет данных</p>"
+        if favorite_products:
+            favorite_rows = ""
+            for _, product_name, purchase_count, grams_purchased, revenue in favorite_products:
+                favorite_rows += f"""
+                <tr>
+                  <td>{html.escape(str(product_name or '-'))}</td>
+                  <td>{purchase_count}</td>
+                  <td>{format_client_weight(grams_purchased)}</td>
+                  <td>€{float(revenue or 0):.2f}</td>
+                </tr>
+                """
+            favorite_products_html = f"""
+            <div class="dash-table-wrap">
+              <table>
+                <tr><th>Товар</th><th>Покупок</th><th>Вес</th><th>Выручка</th></tr>
+                {favorite_rows}
+              </table>
+            </div>
+            """
+
         content = f"""
         <p><a class="button button-link" href="/clients">Назад к клиентам</a></p>
         <section class="admin-card">
@@ -1420,6 +1471,10 @@ async def client_detail(telegram_id: int):
             <div class="dash-card"><span>Первый заказ</span><strong>{format_admin_datetime(first_order_date)}</strong></div>
             <div class="dash-card"><span>Последний заказ</span><strong>{format_admin_datetime(last_order_date)}</strong></div>
           </div>
+        </section>
+        <section class="admin-card dash-section">
+          <h2>Любимые товары</h2>
+          {favorite_products_html}
         </section>
         <section class="admin-card dash-section">
           <h2>История заказов</h2>
