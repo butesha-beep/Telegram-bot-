@@ -1,5 +1,6 @@
 import os
 import html
+from html import escape
 import hmac
 import hashlib
 import secrets
@@ -881,7 +882,7 @@ async def products():
             for row in grouped_products[category_label]:
                 pid, name, price, image_url, is_active, category_name = row
                 if image_url:
-                    escaped_image_url = html.escape(str(image_url), quote=True)
+                    escaped_image_url = escape(str(image_url), quote=True)
                     img_html = f"<a href=\"{escaped_image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"product-thumb\" src=\"{escaped_image_url}\" referrerpolicy=\"no-referrer\"/></a>"
                 else:
                     img_html = "-"
