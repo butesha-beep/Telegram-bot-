@@ -803,7 +803,16 @@ async def orders_export_csv(status_filter: str = "all", q: str = ""):
         "payment_reported_at",
         "inventory_deducted",
     ])
+
+    def excel_text(value):
+        if value is None:
+            return ""
+        return f'="{str(value)}"'
+
     for row in rows:
+        row = list(row)
+        row[1] = excel_text(row[1])
+        row[3] = excel_text(row[3])
         writer.writerow(row)
 
     output.seek(0)
