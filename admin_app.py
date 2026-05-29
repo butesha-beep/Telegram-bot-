@@ -939,9 +939,9 @@ async def products():
                 status_class = "active" if is_active else "inactive"
                 actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Редактировать</a>"
                 if is_active:
-                    actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Скрыть</button></form>"
+                    actions_html += f" <form method=\"post\" action=\"/products/{pid}/deactivate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Отключить</button></form>"
                 else:
-                    actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Вернуть</button></form>"
+                    actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Включить</button></form>"
                 actions_html = f"<div class=\"action-group\">{actions_html}</div>"
                 availability_text = "Нет в наличии" if is_out_of_stock or int(stock_grams or 0) <= 0 else "В наличии"
                 availability_class = "inactive" if availability_text == "Нет в наличии" else "active"
