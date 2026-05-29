@@ -519,8 +519,17 @@ async def root():
             SELECT
                 COUNT(*),
                 COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'awaiting_payment' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'payment_reported' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'cash_on_delivery' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(total), 0)
+                COALESCE(SUM(CASE WHEN status = 'preparing' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN created_at::date = CURRENT_DATE THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'done' THEN total ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'done' AND created_at::date = CURRENT_DATE THEN total ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'done' AND date_trunc('month', created_at) = date_trunc('month', NOW()) THEN total ELSE 0 END), 0)
             FROM orders
             """
         )
@@ -539,13 +548,50 @@ async def root():
         error_message = str(e)
 
     if stats:
-        total_orders, pending_orders, paid_orders, revenue = stats
+        (
+            total_orders,
+            pending_orders,
+            awaiting_payment_orders,
+            payment_reported_orders,
+            cash_on_delivery_orders,
+            paid_orders,
+            preparing_orders,
+            done_orders,
+            cancelled_orders,
+            today_orders,
+            total_done_revenue,
+            today_done_revenue,
+            month_done_revenue,
+        ) = stats
+        awaiting_action = (
+            awaiting_payment_orders
+            + payment_reported_orders
+            + paid_orders
+            + preparing_orders
+        )
         stat_cards = f"""
+        <h2>Обзор</h2>
         <div class="dash-grid">
           <div class="dash-card"><span>Всего заказов</span><strong class="stat-value">{total_orders}</strong></div>
-          <div class="dash-card"><span>Ожидают оплаты</span><strong class="stat-value">{pending_orders}</strong></div>
-          <div class="dash-card"><span>Оплачены</span><strong class="stat-value">{paid_orders}</strong></div>
-          <div class="dash-card"><span>Выручка</span><strong class="stat-value">EUR {float(revenue):.2f}</strong></div>
+          <div class="dash-card"><span>Заказов сегодня</span><strong class="stat-value">{today_orders}</strong></div>
+          <div class="dash-card"><span>Требуют внимания</span><strong class="stat-value">{awaiting_action}</strong></div>
+        </div>
+        <h2>Выручка</h2>
+        <div class="dash-grid">
+          <div class="dash-card"><span>Всего завершённых</span><strong class="stat-value">EUR {float(total_done_revenue):.2f}</strong></div>
+          <div class="dash-card"><span>Сегодня</span><strong class="stat-value">EUR {float(today_done_revenue):.2f}</strong></div>
+          <div class="dash-card"><span>За месяц</span><strong class="stat-value">EUR {float(month_done_revenue):.2f}</strong></div>
+        </div>
+        <h2>Статусы</h2>
+        <div class="dash-grid">
+          <div class="dash-card"><span>Ожидает выбора оплаты</span><strong class="stat-value">{pending_orders}</strong></div>
+          <div class="dash-card"><span>Ожидает оплаты</span><strong class="stat-value">{awaiting_payment_orders}</strong></div>
+          <div class="dash-card"><span>Оплата заявлена</span><strong class="stat-value">{payment_reported_orders}</strong></div>
+          <div class="dash-card"><span>Наличными</span><strong class="stat-value">{cash_on_delivery_orders}</strong></div>
+          <div class="dash-card"><span>Оплачен</span><strong class="stat-value">{paid_orders}</strong></div>
+          <div class="dash-card"><span>Готовится</span><strong class="stat-value">{preparing_orders}</strong></div>
+          <div class="dash-card"><span>Готов</span><strong class="stat-value">{done_orders}</strong></div>
+          <div class="dash-card"><span>Отменён</span><strong class="stat-value">{cancelled_orders}</strong></div>
         </div>
         """
     else:
