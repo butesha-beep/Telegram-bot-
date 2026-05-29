@@ -495,6 +495,13 @@ def format_admin_datetime(value):
     return html.escape(str(value))
 
 
+def format_stock_grams(stock_grams):
+    stock = max(int(stock_grams or 0), 0)
+    if stock >= 1000:
+        return f"{stock / 1000:g} кг"
+    return f"{stock} г"
+
+
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 
 @app.get("/", response_class=HTMLResponse)
@@ -848,7 +855,7 @@ async def products():
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name
+            SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name, p.stock_grams, p.is_out_of_stock
             FROM products p
             LEFT JOIN categories c ON c.id = p.category_id
             ORDER BY p.sort_order, p.id
@@ -875,12 +882,12 @@ async def products():
         for category_label in category_order:
             html += f"<a href='#{category_anchors[category_label]}'>📁 {category_label}</a>"
         html += "</div><div class='dash-table-wrap'><table class='products-table'>"
-        html += "<tr><th>ID</th><th>Название</th><th>Цена</th><th>Фото</th><th>Статус</th><th>Категория</th><th>Действия</th></tr>"
+        html += "<tr><th>ID</th><th>Название</th><th>Цена</th><th>Фото</th><th>Статус</th><th>Категория</th><th>Остаток</th><th>Наличие</th><th>Действия</th></tr>"
 
         for category_label in category_order:
-            html += f"<tr class='category-row' id='{category_anchors[category_label]}'><td colspan='7'>📁 {category_label}</td></tr>"
+            html += f"<tr class='category-row' id='{category_anchors[category_label]}'><td colspan='9'>📁 {category_label}</td></tr>"
             for row in grouped_products[category_label]:
-                pid, name, price, image_url, is_active, category_name = row
+                pid, name, price, image_url, is_active, category_name, stock_grams, is_out_of_stock = row
                 if image_url:
                     escaped_image_url = escape(str(image_url), quote=True)
                     img_html = f"<a href=\"{escaped_image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"product-thumb\" src=\"{escaped_image_url}\" referrerpolicy=\"no-referrer\"/></a>"
@@ -894,7 +901,9 @@ async def products():
                 else:
                     actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Вернуть</button></form>"
                 actions_html = f"<div class=\"action-group\">{actions_html}</div>"
-                html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_label}</td><td>{actions_html}</td></tr>"
+                availability_text = "Нет в наличии" if is_out_of_stock or int(stock_grams or 0) <= 0 else "В наличии"
+                availability_class = "inactive" if availability_text == "Нет в наличии" else "active"
+                html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_label}</td><td>{format_stock_grams(stock_grams)}</td><td><span class='status {availability_class}'>{availability_text}</span></td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception as e:
@@ -911,8 +920,10 @@ async def new_product_form():
         <label>Цена за кг (€) <input name="price_per_kg"/></label>
         <label>Описание <input name="description"/></label>
         <label>Ссылка на фото <input name="image_url"/></label>
+        <label>Остаток, г <input name="stock_grams" type="number" min="0" value="0"/></label>
         <label>Порядок сортировки <input name="sort_order" value="0"/><small>Меньше число = выше в списке</small></label>
         <label>Товар активен <input type="checkbox" name="is_active" value="1"/></label>
+        <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true"/></label>
         <div class="form-actions">
           <input class="button" type="submit" value="Создать товар"/>
         </div>
@@ -929,10 +940,13 @@ async def create_product(
     price_per_kg: float = Form(...),
     description: str = Form(''),
     image_url: str = Form(''),
+    stock_grams: int = Form(0),
     sort_order: int = Form(0),
     is_active: str = Form(None),
+    is_out_of_stock: bool = Form(False),
 ):
     active = True if is_active else False
+    stock_value = max(stock_grams, 0)
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -947,10 +961,12 @@ async def create_product(
     price_per_kg,
     description,
     image_url,
+    stock_grams,
+    is_out_of_stock,
     is_active,
     sort_order
 )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
     new_id,
@@ -959,6 +975,8 @@ async def create_product(
     price_per_kg,
     description,
     image_url,
+    stock_value,
+    is_out_of_stock,
     active,
     sort_order
 ),
@@ -989,7 +1007,7 @@ async def edit_product_form(product_id: int):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT category_id, name, price_per_kg, description, image_url, sort_order, is_active
+            SELECT category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock
             FROM products
             WHERE id = %s
             """,
@@ -1022,8 +1040,9 @@ async def edit_product_form(product_id: int):
         options = cursor.fetchall()
         conn.close()
 
-        category_id, name, price_per_kg, description, image_url, sort_order, is_active = row
+        category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock = row
         checked = "checked" if is_active else ""
+        out_of_stock_checked = "checked" if is_out_of_stock else ""
         image_url_value = escape(str(image_url or ""), quote=True)
         html = f"""
         <section class="admin-card">
@@ -1035,8 +1054,10 @@ async def edit_product_form(product_id: int):
             <label>Цена за кг (€) <input name="price_per_kg" value="{price_per_kg}"/></label>
             <label>Описание <input name="description" value="{description or ''}"/></label>
             <label>Ссылка на фото <input name="image_url" value="{image_url_value}"/></label>
+            <label>Остаток, г <input name="stock_grams" type="number" min="0" value="{max(int(stock_grams or 0), 0)}"/></label>
             <label>Порядок сортировки <input name="sort_order" value="{sort_order}"/><small>Меньше число = выше в списке</small></label>
             <label>Товар активен <input type="checkbox" name="is_active" value="1" {checked}/></label>
+            <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true" {out_of_stock_checked}/></label>
             <div class="form-actions">
               <input class="button" type="submit" value="Сохранить изменения"/>
             </div>
@@ -1315,10 +1336,13 @@ async def update_product(
     price_per_kg: float = Form(...),
     description: str = Form(''),
     image_url: str = Form(''),
+    stock_grams: int = Form(0),
     sort_order: int = Form(0),
     is_active: str = Form(None),
+    is_out_of_stock: bool = Form(False),
 ):
     active = True if is_active else False
+    stock_value = max(stock_grams, 0)
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -1335,11 +1359,13 @@ async def update_product(
                 price_per_kg = %s,
                 description = %s,
                 image_url = %s,
+                stock_grams = %s,
+                is_out_of_stock = %s,
                 sort_order = %s,
                 is_active = %s
             WHERE id = %s
             """,
-            (category_id, name, price_per_kg, description, saved_image_url, sort_order, active, product_id),
+            (category_id, name, price_per_kg, description, saved_image_url, stock_value, is_out_of_stock, sort_order, active, product_id),
         )
         conn.commit()
         conn.close()
