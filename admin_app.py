@@ -1267,6 +1267,16 @@ async def order_detail(order_id: str):
                 (order_id,),
             )
             items = [(product_name, weight, price, None) for product_name, weight, price in cursor.fetchall()]
+        cursor.execute(
+            """
+            SELECT event_type, event_text, created_at
+            FROM order_events
+            WHERE order_id = %s
+            ORDER BY created_at ASC, id ASC
+            """,
+            (order_id,),
+        )
+        order_events = cursor.fetchall()
         conn.close()
 
         html = f"<section class='admin-card'><h1>Заказ {order_id}</h1><div class='detail-grid'>"
@@ -1307,6 +1317,27 @@ async def order_detail(order_id: str):
             <table>
               <tr><th>Событие</th><th>Время</th></tr>
               {timeline_rows}
+            </table>
+          </div>
+        </section>
+        """
+        event_rows = ""
+        for event_type, event_text, event_created_at in order_events:
+            event_rows += f"""
+            <tr>
+              <td>{format_admin_datetime(event_created_at)}</td>
+              <td>{escape(str(event_text or '-'), quote=True)}<br><span class="muted">{escape(str(event_type or '-'), quote=True)}</span></td>
+            </tr>
+            """
+        if not event_rows:
+            event_rows = "<tr><td colspan='2'>Пока нет записей журнала.</td></tr>"
+        html += f"""
+        <section class='admin-card dash-section'>
+          <h2>Журнал событий</h2>
+          <div class='dash-table-wrap'>
+            <table>
+              <tr><th>Время</th><th>Событие</th></tr>
+              {event_rows}
             </table>
           </div>
         </section>
