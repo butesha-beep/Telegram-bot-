@@ -1288,12 +1288,145 @@ async def clients():
         conn.close()
         
         html = "<section class='admin-card'><h1>👥 Клиенты</h1><div class='dash-table-wrap'><table>"
-        html += "<tr><th>Telegram ID</th><th>Клиент</th><th>Телефон</th><th>Адрес</th></tr>"
+        html += "<tr><th>Telegram ID</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Действия</th></tr>"
         for row in rows:
             telegram_id, username, phone, address = row
-            html += f"<tr><td>{telegram_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td></tr>"
+            telegram_id_text = escape(str(telegram_id), quote=True)
+            html += (
+                "<tr>"
+                f"<td>{telegram_id_text}</td>"
+                f"<td>{escape(str(username or '-'), quote=True)}</td>"
+                f"<td>{escape(str(phone or '-'), quote=True)}</td>"
+                f"<td>{escape(str(address or '-'), quote=True)}</td>"
+                f"<td><a class='button button-link' href='/clients/{telegram_id_text}'>Открыть</a></td>"
+                "</tr>"
+            )
         html += "</table></div></section>"
         return admin_layout("👥 Клиенты", html)
+    except Exception as e:
+        return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.get("/clients/{telegram_id}", response_class=HTMLResponse)
+async def client_detail(telegram_id: int):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT telegram_id, username, first_name, phone, address
+            FROM clients
+            WHERE telegram_id = %s
+            """,
+            (telegram_id,),
+        )
+        client = cursor.fetchone()
+        if not client:
+            conn.close()
+            return admin_layout(
+                "Клиент не найден",
+                """
+                <section class="admin-card">
+                  <h1>Клиент не найден</h1>
+                  <p>Такой клиент не найден.</p>
+                  <p><a class="button button-link" href="/clients">Назад к клиентам</a></p>
+                </section>
+                """,
+            )
+
+        cursor.execute(
+            """
+            SELECT
+              COUNT(*) AS total_orders,
+              COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS completed_orders,
+              COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_orders,
+              COALESCE(SUM(CASE WHEN status = 'done' THEN total ELSE 0 END), 0) AS total_spent,
+              COALESCE(AVG(CASE WHEN status = 'done' THEN total ELSE NULL END), 0) AS average_order_value,
+              MIN(created_at) AS first_order_date,
+              MAX(created_at) AS last_order_date
+            FROM orders
+            WHERE telegram_id = %s
+            """,
+            (telegram_id,),
+        )
+        stats = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT order_id, total, status, payment_method, created_at
+            FROM orders
+            WHERE telegram_id = %s
+            ORDER BY id DESC
+            LIMIT 20
+            """,
+            (telegram_id,),
+        )
+        order_rows = cursor.fetchall()
+        conn.close()
+
+        client_id, username, first_name, phone, address = client
+        (
+            total_orders,
+            completed_orders,
+            cancelled_orders,
+            total_spent,
+            average_order_value,
+            first_order_date,
+            last_order_date,
+        ) = stats
+
+        orders_html = "<p>Заказов пока нет.</p>"
+        if order_rows:
+            rows_html = ""
+            for order_id, total, status, payment_method, created_at in order_rows:
+                order_id_text = html.escape(str(order_id))
+                rows_html += f"""
+                <tr>
+                  <td><a class="view-link" href="/orders/{order_id_text}">{order_id_text}</a></td>
+                  <td>€{float(total or 0):.2f}</td>
+                  <td>{admin_status_badge(status)}</td>
+                  <td>{html.escape(str(payment_method or '-'))}</td>
+                  <td>{format_admin_datetime(created_at)}</td>
+                </tr>
+                """
+            orders_html = f"""
+            <div class="dash-table-wrap">
+              <table>
+                <tr><th>Заказ</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th></tr>
+                {rows_html}
+              </table>
+            </div>
+            """
+
+        content = f"""
+        <p><a class="button button-link" href="/clients">Назад к клиентам</a></p>
+        <section class="admin-card">
+          <h1>Клиент</h1>
+          <div class="detail-grid">
+            <div class="detail-field"><strong>Telegram ID</strong>{html.escape(str(client_id))}</div>
+            <div class="detail-field"><strong>Username</strong>{html.escape(str(username or '-'))}</div>
+            <div class="detail-field"><strong>Имя</strong>{html.escape(str(first_name or '-'))}</div>
+            <div class="detail-field"><strong>Телефон</strong>{html.escape(str(phone or '-'))}</div>
+            <div class="detail-field"><strong>Адрес</strong>{html.escape(str(address or '-'))}</div>
+          </div>
+        </section>
+        <section class="admin-card dash-section">
+          <h2>CRM статистика</h2>
+          <div class="dash-grid">
+            <div class="dash-card"><span>Всего заказов</span><strong class="stat-value">{total_orders}</strong></div>
+            <div class="dash-card"><span>Завершённых</span><strong class="stat-value">{completed_orders}</strong></div>
+            <div class="dash-card"><span>Отменённых</span><strong class="stat-value">{cancelled_orders}</strong></div>
+            <div class="dash-card"><span>Потрачено</span><strong class="stat-value">€{float(total_spent or 0):.2f}</strong></div>
+            <div class="dash-card"><span>Средний чек</span><strong class="stat-value">€{float(average_order_value or 0):.2f}</strong></div>
+            <div class="dash-card"><span>Первый заказ</span><strong>{format_admin_datetime(first_order_date)}</strong></div>
+            <div class="dash-card"><span>Последний заказ</span><strong>{format_admin_datetime(last_order_date)}</strong></div>
+          </div>
+        </section>
+        <section class="admin-card dash-section">
+          <h2>История заказов</h2>
+          {orders_html}
+        </section>
+        """
+        return admin_layout("Клиент", content)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
