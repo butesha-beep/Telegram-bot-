@@ -1179,7 +1179,9 @@ async def order_detail(order_id: str):
                 updated_at,
                 payment_selected_at,
                 payment_reminded_at,
-                payment_reported_at
+                payment_reported_at,
+                inventory_deducted,
+                inventory_deducted_at
             FROM orders
             WHERE order_id = %s
             """,
@@ -1215,6 +1217,8 @@ async def order_detail(order_id: str):
             payment_selected_at,
             payment_reminded_at,
             payment_reported_at,
+            inventory_deducted,
+            inventory_deducted_at,
         ) = row
         try:
             cursor.execute(
@@ -1249,13 +1253,40 @@ async def order_detail(order_id: str):
         html += f"<div class='detail-field'><strong>Статус</strong>{admin_status_badge(status)}</div>"
         html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method or '-'}</div>"
         html += "</div></section>"
-        html += "<section class='admin-card dash-section'><h2>⏱️ История заказа</h2><div class='detail-grid'>"
-        html += f"<div class='detail-field'><strong>Создан</strong>{format_admin_datetime(created_at)}</div>"
-        html += f"<div class='detail-field'><strong>Обновлён</strong>{format_admin_datetime(updated_at)}</div>"
-        html += f"<div class='detail-field'><strong>Оплата выбрана</strong>{format_admin_datetime(payment_selected_at)}</div>"
-        html += f"<div class='detail-field'><strong>Напоминание отправлено</strong>{format_admin_datetime(payment_reminded_at)}</div>"
-        html += f"<div class='detail-field'><strong>Оплата заявлена</strong>{format_admin_datetime(payment_reported_at)}</div>"
-        html += "</div></section>"
+        timeline_events = [
+            ("Заказ создан", created_at),
+            ("Выбран способ оплаты", payment_selected_at),
+            ("Отправлено напоминание об оплате", payment_reminded_at),
+            ("Клиент сообщил об оплате", payment_reported_at),
+            ("Склад списан", inventory_deducted_at if inventory_deducted else None),
+            ("Последнее обновление", updated_at),
+        ]
+        timeline_events = sorted(
+            [(label, value) for label, value in timeline_events if value],
+            key=lambda item: item[1],
+        )
+        timeline_rows = ""
+        for label, value in timeline_events:
+            timeline_rows += f"""
+            <tr>
+              <td>{html.escape(label)}</td>
+              <td>{format_admin_datetime(value)}</td>
+            </tr>
+            """
+        if not timeline_rows:
+            timeline_rows = "<tr><td colspan='2'>Нет данных</td></tr>"
+        html += f"""
+        <section class='admin-card dash-section'>
+          <h2>Таймлайн заказа</h2>
+          <p>Показаны системные отметки времени. Полный журнал действий будет добавлен позже.</p>
+          <div class='dash-table-wrap'>
+            <table>
+              <tr><th>Событие</th><th>Время</th></tr>
+              {timeline_rows}
+            </table>
+          </div>
+        </section>
+        """
         if items:
             html += "<section class='admin-card dash-section'><h2>Товары</h2><div class='dash-table-wrap'><table>"
             html += "<tr><th>Товар</th><th>Вариант / вес</th><th>Итого</th></tr>"
