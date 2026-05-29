@@ -482,6 +482,23 @@ def init_db():
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS inventory_movements (
+            id SERIAL PRIMARY KEY,
+            product_id INTEGER NOT NULL REFERENCES products(id),
+            order_id BIGINT,
+            movement_type TEXT NOT NULL,
+            quantity_grams INTEGER NOT NULL,
+            stock_before INTEGER,
+            stock_after INTEGER,
+            note TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_inventory_movements_product_created
+        ON inventory_movements (product_id, created_at DESC)
+    """)
+    cursor.execute("""
         INSERT INTO product_options (
             product_id,
             label,
