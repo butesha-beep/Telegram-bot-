@@ -1141,6 +1141,12 @@ async def update_order_status(order_id: str, status: str):
                 """,
                 (order_id,)
             )
+            log_order_event(
+                cursor,
+                order_id,
+                "inventory_deducted",
+                "Склад списан по заказу."
+            )
 
         cursor.execute(
             "UPDATE orders SET status = %s, updated_at = NOW() WHERE order_id = %s",
