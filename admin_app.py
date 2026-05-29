@@ -1164,8 +1164,34 @@ async def update_order_status(order_id: str, status: str):
         if current_status != status:
             try:
                 send_order_status_notification(telegram_id, order_id, status)
+                try:
+                    event_conn = psycopg2.connect(DATABASE_URL)
+                    event_cursor = event_conn.cursor()
+                    log_order_event(
+                        event_cursor,
+                        order_id,
+                        "notification_sent",
+                        f"Клиенту отправлено уведомление о статусе: {status}"
+                    )
+                    event_conn.commit()
+                    event_conn.close()
+                except Exception as e:
+                    print(f"ORDER EVENT LOG ERROR: {order_id} notification_sent:", e)
             except Exception as e:
                 print(f"ORDER STATUS NOTIFICATION ERROR: {order_id} {status}:", e)
+                try:
+                    event_conn = psycopg2.connect(DATABASE_URL)
+                    event_cursor = event_conn.cursor()
+                    log_order_event(
+                        event_cursor,
+                        order_id,
+                        "notification_failed",
+                        f"Не удалось отправить уведомление о статусе: {status}"
+                    )
+                    event_conn.commit()
+                    event_conn.close()
+                except Exception as log_error:
+                    print(f"ORDER EVENT LOG ERROR: {order_id} notification_failed:", log_error)
         return admin_layout(
             "✅ Статус заказа обновлён",
             f"""
