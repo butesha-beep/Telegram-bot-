@@ -665,13 +665,17 @@ async def update_order_status(order_id: str, status: str):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        cursor.execute("SELECT status FROM orders WHERE order_id = %s", (order_id,))
+        cursor.execute(
+            "SELECT status, inventory_deducted FROM orders WHERE order_id = %s",
+            (order_id,)
+        )
         row = cursor.fetchone()
         if not row:
             conn.close()
             return RedirectResponse("/orders", status_code=303)
 
         current_status = str(row[0] or "")
+        inventory_deducted = bool(row[1])
         allowed_transitions = {
             "pending": {"paid", "preparing", "done", "cancelled"},
             "awaiting_payment": {"paid", "preparing", "done", "cancelled"},
@@ -686,6 +690,44 @@ async def update_order_status(order_id: str, status: str):
             print(f"INVALID ORDER STATUS TRANSITION: {order_id} {current_status} -> {status}")
             conn.close()
             return RedirectResponse("/orders", status_code=303)
+
+        if status == "paid" and not inventory_deducted:
+            cursor.execute(
+                """
+                SELECT product_id, weight
+                FROM order_items
+                WHERE order_id = %s
+                """,
+                (order_id,)
+            )
+            order_items = cursor.fetchall()
+            for product_id, weight in order_items:
+                if not product_id or not weight:
+                    continue
+                cursor.execute(
+                    """
+                    UPDATE products
+                    SET stock_grams = GREATEST(stock_grams - %s, 0)
+                    WHERE id = %s
+                    """,
+                    (weight, product_id)
+                )
+            cursor.execute(
+                """
+                UPDATE products
+                SET is_out_of_stock = TRUE
+                WHERE stock_grams <= 0
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE orders
+                SET inventory_deducted = TRUE,
+                    inventory_deducted_at = NOW()
+                WHERE order_id = %s
+                """,
+                (order_id,)
+            )
 
         cursor.execute(
             "UPDATE orders SET status = %s, updated_at = NOW() WHERE order_id = %s",
