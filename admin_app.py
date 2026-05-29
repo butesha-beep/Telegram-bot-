@@ -539,6 +539,10 @@ DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 async def root():
     stats = None
     latest_orders = []
+    top_products = []
+    worst_products = []
+    best_customers = []
+    repeat_customers = []
     error_message = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -563,6 +567,82 @@ async def root():
             """
         )
         stats = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT
+                oi.product_id,
+                COALESCE(p.name, oi.product_name) AS product_name,
+                COALESCE(SUM(oi.weight), 0) AS grams_sold,
+                COALESCE(SUM(oi.price), 0) AS revenue
+            FROM order_items oi
+            JOIN orders o ON o.order_id = oi.order_id
+            LEFT JOIN products p ON p.id = oi.product_id
+            WHERE o.status = 'done'
+            GROUP BY oi.product_id, COALESCE(p.name, oi.product_name)
+            ORDER BY revenue DESC
+            LIMIT 5
+            """
+        )
+        top_products = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT
+                p.id,
+                p.name,
+                COALESCE(s.grams_sold, 0) AS grams_sold,
+                COALESCE(s.revenue, 0) AS revenue,
+                COALESCE(s.units_sold, 0) AS units_sold
+            FROM products p
+            LEFT JOIN (
+                SELECT
+                    oi.product_id,
+                    COUNT(*) AS units_sold,
+                    COALESCE(SUM(oi.weight), 0) AS grams_sold,
+                    COALESCE(SUM(oi.price), 0) AS revenue
+                FROM order_items oi
+                JOIN orders o ON o.order_id = oi.order_id
+                WHERE o.status = 'done'
+                GROUP BY oi.product_id
+            ) s ON s.product_id = p.id
+            WHERE p.is_active = TRUE
+            ORDER BY revenue ASC, units_sold ASC, p.name ASC
+            LIMIT 5
+            """
+        )
+        worst_products = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT
+                telegram_id,
+                COALESCE(MAX(username), '-') AS username,
+                COALESCE(MAX(phone), '-') AS phone,
+                COUNT(*) AS orders_count,
+                COALESCE(SUM(total), 0) AS total_spent
+            FROM orders
+            WHERE status = 'done'
+            GROUP BY telegram_id
+            ORDER BY total_spent DESC
+            LIMIT 5
+            """
+        )
+        best_customers = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT
+                telegram_id,
+                COALESCE(MAX(username), '-') AS username,
+                COALESCE(MAX(phone), '-') AS phone,
+                COUNT(*) AS completed_orders,
+                COALESCE(SUM(total), 0) AS total_spent
+            FROM orders
+            WHERE status = 'done'
+            GROUP BY telegram_id
+            HAVING COUNT(*) >= 2
+            ORDER BY completed_orders DESC, total_spent DESC
+            LIMIT 5
+            """
+        )
+        repeat_customers = cursor.fetchall()
         cursor.execute(
             """
             SELECT order_id, username, phone, address, total, status
@@ -658,6 +738,83 @@ async def root():
         </div>
         """
 
+    def format_analytics_weight(value):
+        grams = int(value or 0)
+        if grams >= 1000:
+            return f"{grams / 1000:.1f} кг"
+        return f"{grams} г"
+
+    def product_analytics_rows(rows, include_units=False):
+        if not rows:
+            return "<p>Нет данных</p>"
+        rendered = ""
+        for row in rows:
+            if include_units:
+                _, product_name, grams_sold, revenue, _ = row
+            else:
+                _, product_name, grams_sold, revenue = row
+            rendered += f"""
+            <tr>
+              <td>{html.escape(str(product_name or '-'))}</td>
+              <td>{format_analytics_weight(grams_sold)}</td>
+              <td>€{float(revenue or 0):.2f}</td>
+            </tr>
+            """
+        return f"""
+        <div class="dash-table-wrap">
+          <table>
+            <tr><th>Товар</th><th>Продано</th><th>Выручка</th></tr>
+            {rendered}
+          </table>
+        </div>
+        """
+
+    def customer_analytics_rows(rows, orders_label):
+        if not rows:
+            return "<p>Нет данных</p>"
+        rendered = ""
+        for _, username, phone, orders_count, total_spent in rows:
+            customer = username if username and username != "-" else phone
+            rendered += f"""
+            <tr>
+              <td>{html.escape(str(customer or '-'))}</td>
+              <td>{orders_count}</td>
+              <td>€{float(total_spent or 0):.2f}</td>
+            </tr>
+            """
+        return f"""
+        <div class="dash-table-wrap">
+          <table>
+            <tr><th>Клиент</th><th>{orders_label}</th><th>Сумма</th></tr>
+            {rendered}
+          </table>
+        </div>
+        """
+
+    analytics_section = f"""
+        <section class="admin-card dash-section">
+          <h2>Аналитика продаж</h2>
+          <div class="dash-grid">
+            <div class="dash-card">
+              <strong>Топ товары</strong>
+              {product_analytics_rows(top_products)}
+            </div>
+            <div class="dash-card">
+              <strong>Слабые товары</strong>
+              {product_analytics_rows(worst_products, include_units=True)}
+            </div>
+            <div class="dash-card">
+              <strong>Лучшие клиенты</strong>
+              {customer_analytics_rows(best_customers, "Заказов")}
+            </div>
+            <div class="dash-card">
+              <strong>Повторные клиенты</strong>
+              {customer_analytics_rows(repeat_customers, "Заказов")}
+            </div>
+          </div>
+        </section>
+    """
+
     return admin_layout(
         "Deal Market NL",
         f"""
@@ -682,6 +839,8 @@ async def root():
           <h2>Последние заказы</h2>
           {latest_section}
         </section>
+
+        {analytics_section}
         """,
     )
 
