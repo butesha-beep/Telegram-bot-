@@ -613,20 +613,85 @@ async def health():
     return {"status": "ok"}
 
 @app.get("/orders", response_class=HTMLResponse)
-async def orders():
+async def orders(status_filter: str = "all", q: str = ""):
     try:
+        allowed_status_filters = {
+            "all",
+            "pending",
+            "awaiting_payment",
+            "payment_reported",
+            "cash_on_delivery",
+            "paid",
+            "preparing",
+            "done",
+            "cancelled",
+        }
+        if status_filter not in allowed_status_filters:
+            status_filter = "all"
+        search_query = q.strip()
+        where_clauses = []
+        params = []
+        if status_filter != "all":
+            where_clauses.append("status = %s")
+            params.append(status_filter)
+        if search_query:
+            search_value = f"%{search_query}%"
+            where_clauses.append(
+                """
+                (
+                    CAST(order_id AS TEXT) ILIKE %s
+                    OR username ILIKE %s
+                    OR phone ILIKE %s
+                    OR address ILIKE %s
+                )
+                """
+            )
+            params.extend([search_value, search_value, search_value, search_value])
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT id, order_id, username, phone, address, total, status, payment_method, created_at
             FROM orders
+            {where_sql}
             ORDER BY id DESC
             LIMIT 50
-        """)
+        """, params)
         rows = cursor.fetchall()
         conn.close()
-        
-        html = "<section class='admin-card'><h1>📦 Заказы</h1><div class='dash-table-wrap'><table>"
+
+        status_options = {
+            "all": "Все",
+            "pending": "Ожидает выбора оплаты",
+            "awaiting_payment": "Ожидает оплаты",
+            "payment_reported": "Оплата заявлена",
+            "cash_on_delivery": "Наличными",
+            "paid": "Оплачен",
+            "preparing": "Готовится",
+            "done": "Готов",
+            "cancelled": "Отменён",
+        }
+        options_html = ""
+        for value, label in status_options.items():
+            selected = "selected" if value == status_filter else ""
+            options_html += f"<option value=\"{value}\" {selected}>{label}</option>"
+
+        html = f"""
+        <section class='admin-card'>
+          <h1>📦 Заказы</h1>
+          <form class="admin-form" method="get" action="/orders">
+            <label>Поиск <input name="q" value="{escape(search_query, quote=True)}" placeholder="№ заказа, клиент, телефон, адрес"/></label>
+            <label>Статус
+              <select name="status_filter">{options_html}</select>
+            </label>
+            <div class="form-actions">
+              <button type="submit">Показать</button>
+              <a class="button button-link secondary" href="/orders">Сбросить</a>
+            </div>
+          </form>
+          <div class='dash-table-wrap'><table>
+        """
         html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th><th>Действия</th></tr>"
         for row in rows:
             id_, order_id, username, phone, address, total, status, payment_method, created_at = row
