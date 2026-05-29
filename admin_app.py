@@ -517,6 +517,26 @@ def log_order_event(cursor, order_id, event_type, event_text):
     )
 
 
+def log_inventory_movement(
+    cursor,
+    product_id,
+    movement_type,
+    quantity_grams,
+    stock_before=None,
+    stock_after=None,
+    order_id=None,
+    note=""
+):
+    cursor.execute(
+        """
+        INSERT INTO inventory_movements
+        (product_id, order_id, movement_type, quantity_grams, stock_before, stock_after, note)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (product_id, order_id, movement_type, quantity_grams, stock_before, stock_after, note),
+    )
+
+
 def send_order_status_notification(telegram_id, order_id, status):
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token or not telegram_id:
@@ -1544,7 +1564,7 @@ async def client_detail(telegram_id: int):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT telegram_id, username, first_name, phone, address
+            SELECT telegram_id, username, first_name, phone, address, client_note
             FROM clients
             WHERE telegram_id = %s
             """,
@@ -1617,7 +1637,7 @@ async def client_detail(telegram_id: int):
         favorite_products = cursor.fetchall()
         conn.close()
 
-        client_id, username, first_name, phone, address = client
+        client_id, username, first_name, phone, address, client_note = client
         (
             total_orders,
             completed_orders,
@@ -1691,6 +1711,18 @@ async def client_detail(telegram_id: int):
           </div>
         </section>
         <section class="admin-card dash-section">
+          <h2>Заметка администратора</h2>
+          <form class="admin-form" method="post" action="/clients/{telegram_id}/note">
+            <label>Заметка
+              <textarea name="client_note" rows="4">{html.escape(str(client_note or ""))}</textarea>
+              <small>Видно только в админке.</small>
+            </label>
+            <div class="form-actions">
+              <button class="button" type="submit">Сохранить заметку</button>
+            </div>
+          </form>
+        </section>
+        <section class="admin-card dash-section">
           <h2>CRM статистика</h2>
           <div class="dash-grid">
             <div class="dash-card"><span>Всего заказов</span><strong class="stat-value">{total_orders}</strong></div>
@@ -1714,6 +1746,26 @@ async def client_detail(telegram_id: int):
         return admin_layout("Клиент", content)
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
+
+
+@app.post("/clients/{telegram_id}/note")
+async def update_client_note(telegram_id: int, client_note: str = Form("")):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE clients
+            SET client_note = %s
+            WHERE telegram_id = %s
+            """,
+            (client_note, telegram_id),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"CLIENT NOTE UPDATE ERROR: {telegram_id}:", e)
+    return RedirectResponse(f"/clients/{telegram_id}", status_code=303)
 
 
 @app.get("/products", response_class=HTMLResponse)
