@@ -189,6 +189,20 @@ def admin_css():
   .dash-card:hover { border-color: var(--accent); color: var(--text); }
   .dash-card strong { display: block; margin-bottom: 8px; font-size: 18px; }
   .dash-card span { color: var(--muted); font-size: 14px; }
+  .attention-banner {
+    margin: 16px 0;
+    padding: 14px 16px;
+    border: 1px solid rgba(245, 158, 11, 0.45);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.10);
+    color: var(--text);
+    font-weight: 700;
+  }
+  tr.attention-row td {
+    background: rgba(245, 158, 11, 0.08);
+    border-bottom-color: rgba(245, 158, 11, 0.24);
+  }
   .stat-value { display: block; margin-top: 10px; font-size: 28px; font-weight: 700; color: var(--text); }
   .dash-section { margin-top: 22px; }
   .dash-table-wrap { overflow-x: auto; }
@@ -755,10 +769,10 @@ async def root():
             month_done_revenue,
         ) = stats
         awaiting_action = (
-            awaiting_payment_orders
+            pending_orders
+            + awaiting_payment_orders
             + payment_reported_orders
-            + paid_orders
-            + preparing_orders
+            + cash_on_delivery_orders
         )
         stat_cards = f"""
         <h2>Обзор</h2>
@@ -1004,6 +1018,19 @@ async def orders(status_filter: str = "all", q: str = ""):
             LIMIT 50
         """, params)
         rows = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM orders
+            WHERE status IN (
+                'pending',
+                'awaiting_payment',
+                'payment_reported',
+                'cash_on_delivery'
+            )
+            """
+        )
+        attention_orders_count = cursor.fetchone()[0]
         conn.close()
 
         status_options = {
@@ -1036,6 +1063,7 @@ async def orders(status_filter: str = "all", q: str = ""):
               <a class="button button-link secondary" href="/orders/export.csv?status_filter={escape(status_filter, quote=True)}&q={escape(search_query, quote=True)}">Экспорт CSV</a>
             </div>
           </form>
+          <div class="attention-banner">⚠️ Требуют внимания: {attention_orders_count} заказов</div>
           <div class='dash-table-wrap'><table>
         """
         html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th><th>Действия</th></tr>"
@@ -1065,7 +1093,8 @@ async def orders(status_filter: str = "all", q: str = ""):
                     button_label = "Подтвердить оплату"
                 actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{button_label}</button></form>")
             actions_html = f"<div class=\"action-group\">{' '.join(actions)}</div>"
-            html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method or '-'}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
+            row_class = " class=\"attention-row\"" if status_key in {"pending", "awaiting_payment", "payment_reported", "cash_on_delivery"} else ""
+            html += f"<tr{row_class}><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method or '-'}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("📦 Заказы", html)
     except Exception as e:
