@@ -1186,11 +1186,35 @@ async def update_order_status(order_id: str, status: str):
                     continue
                 cursor.execute(
                     """
-                    UPDATE products
-                    SET stock_grams = GREATEST(stock_grams - %s, 0)
-                    WHERE id = %s
+                    WITH before_update AS (
+                        SELECT stock_grams AS stock_before
+                        FROM products
+                        WHERE id = %s
+                    ),
+                    updated AS (
+                        UPDATE products
+                        SET stock_grams = GREATEST(stock_grams - %s, 0)
+                        WHERE id = %s
+                        RETURNING stock_grams AS stock_after
+                    )
+                    SELECT before_update.stock_before, updated.stock_after
+                    FROM before_update, updated
                     """,
-                    (weight, product_id)
+                    (product_id, weight, product_id)
+                )
+                stock_row = cursor.fetchone()
+                if not stock_row:
+                    continue
+                stock_before, stock_after = stock_row
+                log_inventory_movement(
+                    cursor,
+                    product_id,
+                    "order_deducted",
+                    int(stock_after or 0) - int(stock_before or 0),
+                    stock_before,
+                    stock_after,
+                    order_id,
+                    "Склад списан по заказу."
                 )
             cursor.execute(
                 """
