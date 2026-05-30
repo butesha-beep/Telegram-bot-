@@ -1027,8 +1027,12 @@ async def orders(status_filter: str = "all", q: str = ""):
                 "cancelled": (),
             }
             actions = [f"<a class=\"button\" href=\"/orders/{order_id}\">Открыть</a>"]
-            for s in status_actions.get(str(status or ""), ()):
-                actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{status_labels[s]}</button></form>")
+            status_key = str(status or "")
+            for s in status_actions.get(status_key, ()):
+                button_label = status_labels[s]
+                if status_key == "payment_reported" and s == "paid":
+                    button_label = "Подтвердить оплату"
+                actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{button_label}</button></form>")
             actions_html = f"<div class=\"action-group\">{' '.join(actions)}</div>"
             html += f"<tr><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method or '-'}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
@@ -1406,6 +1410,30 @@ async def order_detail(order_id: str):
         html += f"<div class='detail-field'><strong>Статус</strong>{admin_status_badge(status)}</div>"
         html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method or '-'}</div>"
         html += "</div></section>"
+        payment_actions = ""
+        if str(status or "") == "payment_reported":
+            payment_actions = f"""
+            <div class="form-actions">
+              <form method="post" action="/orders/{order_id}/status/paid" style="display:inline; margin:0; padding:0;">
+                <button class="button" type="submit">Подтвердить оплату</button>
+              </form>
+              <form method="post" action="/orders/{order_id}/status/cancelled" style="display:inline; margin:0; padding:0;">
+                <button class="button secondary" type="submit">Отменить заказ</button>
+              </form>
+            </div>
+            """
+        html += f"""
+        <section class='admin-card dash-section'>
+          <h2>Проверка оплаты</h2>
+          <div class='detail-grid'>
+            <div class='detail-field'><strong>Способ оплаты</strong>{escape(str(payment_method or "-"), quote=True)}</div>
+            <div class='detail-field'><strong>Оплата выбрана</strong>{format_admin_datetime(payment_selected_at)}</div>
+            <div class='detail-field'><strong>Клиент сообщил об оплате</strong>{format_admin_datetime(payment_reported_at)}</div>
+            <div class='detail-field'><strong>Текущий статус</strong>{admin_status_badge(status)}</div>
+          </div>
+          {payment_actions}
+        </section>
+        """
         html += f"""
         <section class='admin-card dash-section'>
           <h2>Заметка администратора</h2>
