@@ -491,6 +491,20 @@ def admin_status_badge(status):
     return f"<span class='status {status_class}'>{html.escape(label)}</span>"
 
 
+def admin_status_label(status):
+    labels = {
+        "pending": "Ожидает выбора оплаты",
+        "awaiting_payment": "Ожидает оплаты",
+        "payment_reported": "Оплата заявлена",
+        "cash_on_delivery": "Наличными",
+        "paid": "Оплачен",
+        "preparing": "Готовится",
+        "done": "Готов",
+        "cancelled": "Отменён",
+    }
+    return labels.get(str(status or ""), str(status or "-"))
+
+
 def format_admin_datetime(value):
     if not value:
         return "—"
@@ -504,6 +518,23 @@ def format_stock_grams(stock_grams):
     if stock >= 1000:
         return f"{stock / 1000:g} кг"
     return f"{stock} г"
+
+
+def admin_event_type_label(event_type):
+    labels = {
+        "order_created": "Заказ создан",
+        "payment_selected": "Выбран способ оплаты",
+        "payment_reported": "Клиент сообщил об оплате",
+        "payment_confirmed": "Оплата подтверждена",
+        "status_changed": "Статус изменён",
+        "inventory_deducted": "Склад списан",
+        "notification_sent": "Уведомление отправлено",
+        "notification_failed": "Ошибка уведомления",
+        "order_note_updated": "Заметка обновлена",
+        "order_completed": "Заказ завершён",
+        "order_cancelled": "Заказ отменён",
+    }
+    return labels.get(str(event_type or ""), str(event_type or "-"))
 
 
 def log_order_event(cursor, order_id, event_type, event_text):
@@ -1252,7 +1283,7 @@ async def update_order_status(order_id: str, status: str):
                 cursor,
                 order_id,
                 "status_changed",
-                f"Статус изменён: {current_status} → {status}"
+                f"Статус изменён: {admin_status_label(current_status)} → {admin_status_label(status)}"
             )
         conn.commit()
         conn.close()
@@ -1487,7 +1518,7 @@ async def order_detail(order_id: str):
             event_rows += f"""
             <tr>
               <td>{format_admin_datetime(event_created_at)}</td>
-              <td>{escape(str(event_text or '-'), quote=True)}<br><span class="muted">{escape(str(event_type or '-'), quote=True)}</span></td>
+              <td>{escape(str(event_text or '-'), quote=True)}<br><span class="muted">{escape(admin_event_type_label(event_type), quote=True)}</span></td>
             </tr>
             """
         if not event_rows:
