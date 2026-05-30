@@ -1297,7 +1297,7 @@ async def update_order_status(order_id: str, status: str):
                         event_cursor,
                         order_id,
                         "notification_sent",
-                        f"Клиенту отправлено уведомление о статусе: {status}"
+                        f"Клиенту отправлено уведомление о статусе: {admin_status_label(status)}"
                     )
                     event_conn.commit()
                     event_conn.close()
@@ -1312,7 +1312,7 @@ async def update_order_status(order_id: str, status: str):
                         event_cursor,
                         order_id,
                         "notification_failed",
-                        f"Не удалось отправить уведомление о статусе: {status}"
+                        f"Не удалось отправить уведомление о статусе: {admin_status_label(status)}"
                     )
                     event_conn.commit()
                     event_conn.close()
