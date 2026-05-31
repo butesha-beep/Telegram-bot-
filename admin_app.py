@@ -542,6 +542,7 @@ def admin_event_type_label(event_type):
         "payment_confirmed": "Оплата подтверждена",
         "status_changed": "Статус изменён",
         "inventory_deducted": "Склад списан",
+        "stock_restored": "Склад восстановлен",
         "notification_sent": "Уведомление отправлено",
         "notification_failed": "Ошибка уведомления",
         "order_note_updated": "Заметка обновлена",
