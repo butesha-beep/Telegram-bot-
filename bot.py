@@ -2191,19 +2191,25 @@ async def pay_iban(callback: types.CallbackQuery):
             ORDER BY id DESC
             LIMIT 1
         )
+        RETURNING order_id
         """,
         ("IBAN", "awaiting_payment", callback.from_user.id)
     )
+    order_row = cursor.fetchone()
 
     conn.commit()
     conn.close()
+    if not order_row:
+        await callback.answer("Заказ не найден.", show_alert=True)
+        return
+    order_id = order_row[0]
 
     paid_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Я оплатил",
-                    callback_data="payment_done"
+                    callback_data=f"payment_done_{order_id}"
                 )
             ],
             [
@@ -2247,19 +2253,25 @@ async def pay_paypal(callback: types.CallbackQuery):
             ORDER BY id DESC
             LIMIT 1
         )
+        RETURNING order_id
         """,
         ("PayPal", "awaiting_payment", callback.from_user.id)
     )
+    order_row = cursor.fetchone()
 
     conn.commit()
     conn.close()
+    if not order_row:
+        await callback.answer("Заказ не найден.", show_alert=True)
+        return
+    order_id = order_row[0]
 
     paid_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Я оплатил",
-                    callback_data="payment_done"
+                    callback_data=f"payment_done_{order_id}"
                 )
             ],
             [
@@ -2368,6 +2380,67 @@ def payment_menu():
             ]
         ]
     )
+@dp.callback_query(F.data.startswith("payment_done_"))
+async def payment_done_for_order(callback: types.CallbackQuery):
+    raw_order_id = callback.data.replace("payment_done_", "", 1)
+    try:
+        order_id = int(raw_order_id)
+    except (TypeError, ValueError):
+        await callback.answer("Не удалось определить заказ.", show_alert=True)
+        return
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE orders
+        SET status = %s,
+            updated_at = NOW(),
+            payment_reported_at = NOW()
+        WHERE order_id = %s
+          AND telegram_id = %s
+          AND status = 'awaiting_payment'
+        """,
+        ("payment_reported", order_id, callback.from_user.id)
+    )
+
+    if cursor.rowcount == 0:
+        conn.rollback()
+        conn.close()
+        await callback.answer(
+            "Не удалось отметить оплату. Возможно, заказ уже обработан или отменён.",
+            show_alert=True
+        )
+        return
+
+    conn.commit()
+    conn.close()
+
+    config = load_json("config.json")
+
+    username = callback.from_user.username
+    if username:
+        user_text = f"@{username}"
+    else:
+        user_text = f"ID: {callback.from_user.id}"
+
+    await callback.message.answer(
+        "Спасибо! Мы проверим оплату и скоро подтвердим заказ."
+    )
+
+    await bot.send_message(
+        chat_id=config["admin_id"],
+        text=(
+            "💸 Клиент сообщил об оплате.\n\n"
+            f"Заказ: {order_id}\n"
+            f"Покупатель: {user_text}"
+        )
+    )
+
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "payment_done")
 async def payment_done(callback: types.CallbackQuery):
 
