@@ -551,6 +551,8 @@ def init_db():
     cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_reported_at TIMESTAMPTZ")
     cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_deducted BOOLEAN DEFAULT FALSE")
     cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_deducted_at TIMESTAMPTZ")
+    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_restored BOOLEAN DEFAULT FALSE")
+    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_restored_at TIMESTAMPTZ")
     cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_note TEXT")
 
     conn.commit()
