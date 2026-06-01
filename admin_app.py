@@ -636,6 +636,7 @@ async def root():
     best_customers = []
     repeat_customers = []
     low_stock_products = []
+    low_stock_count = 0
     error_message = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -757,6 +758,19 @@ async def root():
         low_stock_products = cursor.fetchall()
         cursor.execute(
             """
+            SELECT COUNT(*)
+            FROM products
+            WHERE
+                is_active = TRUE
+                AND is_out_of_stock = FALSE
+                AND low_stock_threshold_grams > 0
+                AND stock_grams > 0
+                AND stock_grams <= low_stock_threshold_grams
+            """
+        )
+        low_stock_count = cursor.fetchone()[0]
+        cursor.execute(
+            """
             SELECT order_id, username, phone, address, total, status
             FROM orders
             ORDER BY id DESC
@@ -796,6 +810,14 @@ async def root():
           <div class="dash-card"><span>Всего заказов</span><strong class="stat-value">{total_orders}</strong></div>
           <div class="dash-card"><span>Заказов сегодня</span><strong class="stat-value">{today_orders}</strong></div>
           <div class="dash-card"><span>Требуют внимания</span><strong class="stat-value">{awaiting_action}</strong></div>
+        </div>
+        <h2>Требуют внимания</h2>
+        <div class="dash-grid">
+          <a class="dash-card" href="/orders?status_filter=pending"><span>Новые заказы</span><strong class="stat-value">{pending_orders}</strong></a>
+          <a class="dash-card" href="/orders?status_filter=awaiting_payment"><span>Ожидают оплаты</span><strong class="stat-value">{awaiting_payment_orders}</strong></a>
+          <a class="dash-card" href="/orders?status_filter=payment_reported"><span>Проверить оплату</span><strong class="stat-value">{payment_reported_orders}</strong></a>
+          <a class="dash-card" href="/orders?status_filter=cash_on_delivery"><span>Наличными</span><strong class="stat-value">{cash_on_delivery_orders}</strong></a>
+          <a class="dash-card" href="/products"><span>Низкий остаток</span><strong class="stat-value">{low_stock_count}</strong></a>
         </div>
         <h2>Выручка</h2>
         <div class="dash-grid">
