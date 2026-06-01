@@ -1210,7 +1210,7 @@ async def update_order_status(order_id: str, status: str):
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT status, inventory_deducted, telegram_id FROM orders WHERE order_id = %s",
+            "SELECT status, inventory_deducted, inventory_restored, telegram_id FROM orders WHERE order_id = %s",
             (order_id,)
         )
         row = cursor.fetchone()
@@ -1220,7 +1220,8 @@ async def update_order_status(order_id: str, status: str):
 
         current_status = str(row[0] or "")
         inventory_deducted = bool(row[1])
-        telegram_id = row[2]
+        inventory_restored = bool(row[2])
+        telegram_id = row[3]
         allowed_transitions = {
             "pending": {"paid", "preparing", "done", "cancelled"},
             "awaiting_payment": {"paid", "preparing", "done", "cancelled"},
@@ -1302,6 +1303,75 @@ async def update_order_status(order_id: str, status: str):
                 order_id,
                 "inventory_deducted",
                 "Склад списан по заказу."
+            )
+
+        if status == "cancelled" and inventory_deducted and not inventory_restored:
+            cursor.execute(
+                """
+                SELECT product_id, COALESCE(SUM(weight), 0) AS restore_grams
+                FROM order_items
+                WHERE order_id = %s
+                GROUP BY product_id
+                """,
+                (order_id,)
+            )
+            restore_items = cursor.fetchall()
+            for product_id, restore_grams in restore_items:
+                if not product_id or not restore_grams or int(restore_grams or 0) <= 0:
+                    continue
+                cursor.execute(
+                    """
+                    WITH before_update AS (
+                        SELECT stock_grams AS stock_before
+                        FROM products
+                        WHERE id = %s
+                    ),
+                    updated AS (
+                        UPDATE products
+                        SET stock_grams = stock_grams + %s
+                        WHERE id = %s
+                        RETURNING stock_grams AS stock_after
+                    )
+                    SELECT before_update.stock_before, updated.stock_after
+                    FROM before_update, updated
+                    """,
+                    (product_id, restore_grams, product_id)
+                )
+                stock_row = cursor.fetchone()
+                if not stock_row:
+                    continue
+                stock_before, stock_after = stock_row
+                log_inventory_movement(
+                    cursor,
+                    product_id,
+                    "stock_restored",
+                    int(stock_after or 0) - int(stock_before or 0),
+                    stock_before,
+                    stock_after,
+                    order_id,
+                    "Остаток восстановлен после отмены заказа."
+                )
+            cursor.execute(
+                """
+                UPDATE products
+                SET is_out_of_stock = FALSE
+                WHERE stock_grams > 0
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE orders
+                SET inventory_restored = TRUE,
+                    inventory_restored_at = NOW()
+                WHERE order_id = %s
+                """,
+                (order_id,)
+            )
+            log_order_event(
+                cursor,
+                order_id,
+                "stock_restored",
+                "Остаток восстановлен после отмены заказа."
             )
 
         cursor.execute(
