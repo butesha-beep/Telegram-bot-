@@ -346,12 +346,16 @@ def admin_css():
 """
 
 
-def admin_layout(title, content):
+def admin_layout(title, content, refresh_seconds=None):
+    refresh_meta = ""
+    if refresh_seconds:
+        refresh_meta = f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
     return f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {refresh_meta}
   <title>{title}</title>
   {admin_css()}
 </head>
@@ -977,6 +981,7 @@ async def root():
 
         {analytics_section}
         """,
+        refresh_seconds=60,
     )
 
 @app.get("/health")
@@ -1108,7 +1113,7 @@ async def orders(status_filter: str = "all", q: str = ""):
             row_class = " class=\"attention-row\"" if status_key in {"pending", "awaiting_payment", "payment_reported", "cash_on_delivery"} else ""
             html += f"<tr{row_class}><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method or '-'}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
-        return admin_layout("📦 Заказы", html)
+        return admin_layout("📦 Заказы", html, refresh_seconds=60)
     except Exception as e:
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
