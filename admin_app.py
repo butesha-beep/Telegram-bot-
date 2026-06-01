@@ -375,6 +375,17 @@ def admin_layout(title, content):
 </html>"""
 
 
+def admin_error_page(title, message):
+    content = f"""
+    <section class="admin-card">
+      <h1>{html.escape(str(title))}</h1>
+      <p>{html.escape(str(message))}</p>
+      <p><a class="button button-link" href="/">На главную</a></p>
+    </section>
+    """
+    return admin_layout(title, content)
+
+
 def admin_auth_configured():
     return bool(os.getenv("ADMIN_PASSWORD") and os.getenv("ADMIN_SESSION_SECRET"))
 
@@ -1099,7 +1110,7 @@ async def orders(status_filter: str = "all", q: str = ""):
         html += "</table></div></section>"
         return admin_layout("📦 Заказы", html)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/orders/export.csv")
@@ -1205,7 +1216,7 @@ async def orders_export_csv(status_filter: str = "all", q: str = ""):
 async def update_order_status(order_id: str, status: str):
     allowed = {"paid", "preparing", "done", "cancelled"}
     if status not in allowed:
-        return f"<h1>Invalid status</h1><p>Allowed: {', '.join(sorted(allowed))}</p>"
+        return admin_error_page("Недопустимый статус", "Операция не может быть выполнена для этого заказа.")
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -1432,7 +1443,7 @@ async def update_order_status(order_id: str, status: str):
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/orders/{order_id}", response_class=HTMLResponse)
@@ -1648,7 +1659,7 @@ async def order_detail(order_id: str):
         html += f"<p><a class='button button-link' href=\"/orders\">← К заказам</a></p>"
         return admin_layout(f"Заказ {order_id}", html)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/orders/{order_id}/note")
@@ -1737,7 +1748,7 @@ async def clients(q: str = ""):
         html += "</table></div></section>"
         return admin_layout("👥 Клиенты", html)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/clients/{telegram_id}", response_class=HTMLResponse)
@@ -1928,7 +1939,7 @@ async def client_detail(telegram_id: int):
         """
         return admin_layout("Клиент", content)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/clients/{telegram_id}/note")
@@ -2009,7 +2020,7 @@ async def products():
         html += "</table></div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 @app.get("/products/new", response_class=HTMLResponse)
 async def new_product_form():
     html = """
@@ -2107,7 +2118,7 @@ async def create_product(
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/products/{product_id}/edit", response_class=HTMLResponse)
@@ -2266,7 +2277,7 @@ async def edit_product_form(product_id: int):
         """
         return admin_layout("✏️ Редактировать товар", html)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/products/{product_id}/options/new", response_class=HTMLResponse)
@@ -2336,7 +2347,7 @@ async def create_product_option(
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/options/{option_id}/edit", response_class=HTMLResponse)
@@ -2389,7 +2400,7 @@ async def edit_product_option_form(option_id: int):
         """
         return admin_layout("✏️ Редактировать вариант", html)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/options/{option_id}/edit", response_class=HTMLResponse)
@@ -2453,7 +2464,7 @@ async def update_product_option(
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/options/{option_id}/toggle", response_class=HTMLResponse)
@@ -2497,7 +2508,7 @@ async def toggle_product_option(option_id: int):
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/products/{product_id}/edit", response_class=HTMLResponse)
@@ -2573,7 +2584,7 @@ async def update_product(
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/products/{product_id}/deactivate", response_class=HTMLResponse)
@@ -2597,7 +2608,7 @@ async def deactivate_product(product_id: int):
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/products/{product_id}/activate", response_class=HTMLResponse)
@@ -2621,7 +2632,7 @@ async def activate_product(product_id: int):
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/categories", response_class=HTMLResponse)
@@ -2648,7 +2659,7 @@ async def categories():
         html += "</table></div></section>"
         return admin_layout("🗂 Категории", html)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/categories/new", response_class=HTMLResponse)
@@ -2703,7 +2714,7 @@ async def create_category(
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/categories/{category_id}/edit", response_class=HTMLResponse)
@@ -2753,7 +2764,7 @@ async def edit_category_form(category_id: int):
         """
         return admin_layout("✏️ Редактировать категорию", html)
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/categories/{category_id}/edit", response_class=HTMLResponse)
@@ -2793,9 +2804,10 @@ async def update_category(
             """,
         )
     except Exception as e:
-        return f"<h1>Error</h1><p>{str(e)}</p>"
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
