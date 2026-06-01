@@ -613,7 +613,7 @@ def seed_products_from_json():
                 product["name"],
                 product["price_per_kg"],
                 product.get("description"),
-                product.get("image_url"),
+                product.get("image_url") or product.get("photo"),
                 product.get("is_active", True),
                 product.get("sort_order", 0)
             )
