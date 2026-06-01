@@ -1108,7 +1108,7 @@ async def add_option_to_cart(callback: types.CallbackQuery):
 
     await callback.message.answer(
         "🛒 Товар добавлен в корзину.\n\n"
-        "Можешь выбрать ещё товары или открыть корзину.",
+        "Вы можете выбрать ещё товары или открыть корзину.",
         reply_markup=keyboard
     )
 
@@ -1217,7 +1217,7 @@ async def add_to_cart(callback: types.CallbackQuery):
 
     await callback.message.answer(
         "🛒 Товар добавлен в корзину.\n\n"
-        "Можешь выбрать ещё товары или открыть корзину.",
+        "Вы можете выбрать ещё товары или открыть корзину.",
         reply_markup=keyboard
     )
 
@@ -2224,11 +2224,11 @@ async def pay_iban(callback: types.CallbackQuery):
     )
 
     await callback.message.answer(
-        f"🏦 Оплата через IBAN / Bank Transfer\n\n"
+        f"🏦 Оплата банковским переводом / IBAN\n\n"
         f"IBAN: {config['iban']}\n"
         f"Получатель: {config['receiver_name']}\n\n"
-        f"В назначении платежа укажите номер заказа.\n"
-        f"После оплаты нажмите кнопку ниже.",
+        f"В назначении платежа обязательно укажите номер заказа: #{order_id}.\n"
+        f"После оплаты нажмите «Я оплатил», чтобы мы проверили платёж.",
         reply_markup=paid_keyboard
     )
 
@@ -2288,8 +2288,8 @@ async def pay_paypal(callback: types.CallbackQuery):
     await callback.message.answer(
         f"💬 Оплата через PayPal\n\n"
         f"PayPal: {config['paypal']}\n\n"
-        f"В комментарии укажите номер заказа.\n"
-        f"После оплаты нажмите кнопку ниже.",
+        f"В комментарии к платежу обязательно укажите номер заказа: #{order_id}.\n"
+        f"После оплаты нажмите «Я оплатил», чтобы мы проверили платёж.",
         reply_markup=paid_keyboard
     )
 
@@ -2330,14 +2330,14 @@ async def pay_cash(callback: types.CallbackQuery):
         user_text = f"ID: {callback.from_user.id}"
 
     await callback.message.answer(
-        "💵 Вы выбрали оплату наличкой при встрече.\n\n"
+        "💵 Вы выбрали оплату наличными при получении.\n\n"
         "Продавец свяжется с вами для подтверждения заказа."
     )
 
     await bot.send_message(
         chat_id=config["admin_id"],
         text=(
-            "💵 Клиент выбрал оплату наличкой.\n\n"
+            "💵 Клиент выбрал оплату наличными.\n\n"
             f"Покупатель: {user_text}"
         )
     )
@@ -2364,7 +2364,7 @@ def payment_menu():
             ],
             [
                 InlineKeyboardButton(
-                    text="💵 Оплата наличкой",
+                    text="💵 Оплата наличными",
                     callback_data="pay_cash"
                 )
             ],
@@ -2411,7 +2411,7 @@ async def payment_done_for_order(callback: types.CallbackQuery):
         conn.rollback()
         conn.close()
         await callback.answer(
-            "Не удалось отметить оплату. Возможно, заказ уже обработан или отменён.",
+            "Не удалось отметить оплату. Возможно, заказ уже подтверждён, отменён или ожидает другого действия.",
             show_alert=True
         )
         return
@@ -2428,7 +2428,7 @@ async def payment_done_for_order(callback: types.CallbackQuery):
         user_text = f"ID: {callback.from_user.id}"
 
     await callback.message.answer(
-        "Спасибо! Мы проверим оплату и скоро подтвердим заказ."
+        "Спасибо! Мы получили отметку об оплате. Проверим платёж и подтвердим заказ в ближайшее время."
     )
 
     await bot.send_message(
