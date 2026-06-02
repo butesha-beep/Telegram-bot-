@@ -637,6 +637,62 @@ def send_low_stock_alert(product_name, stock_grams, threshold_grams):
     urllib.request.urlopen(request, timeout=5).read()
 
 
+def sync_low_stock_alert_state(cursor, product_ids):
+    seen_product_ids = []
+    for product_id in product_ids or []:
+        if not product_id or product_id in seen_product_ids:
+            continue
+        seen_product_ids.append(product_id)
+
+    for product_id in seen_product_ids:
+        cursor.execute(
+            """
+            UPDATE products
+            SET low_stock_alert_sent = FALSE,
+                low_stock_alert_sent_at = NULL
+            WHERE id = %s
+              AND low_stock_alert_sent = TRUE
+              AND (
+                  low_stock_threshold_grams <= 0
+                  OR stock_grams > low_stock_threshold_grams
+              )
+            """,
+            (product_id,),
+        )
+        cursor.execute(
+            """
+            SELECT name, stock_grams, low_stock_threshold_grams
+            FROM products
+            WHERE id = %s
+              AND is_active = TRUE
+              AND is_out_of_stock = FALSE
+              AND stock_grams > 0
+              AND low_stock_threshold_grams > 0
+              AND stock_grams <= low_stock_threshold_grams
+              AND low_stock_alert_sent = FALSE
+            """,
+            (product_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            continue
+
+        name, stock_grams, threshold_grams = row
+        try:
+            send_low_stock_alert(name, stock_grams, threshold_grams)
+            cursor.execute(
+                """
+                UPDATE products
+                SET low_stock_alert_sent = TRUE,
+                    low_stock_alert_sent_at = NOW()
+                WHERE id = %s
+                """,
+                (product_id,),
+            )
+        except Exception as e:
+            print(f"LOW STOCK ALERT ERROR: product_id={product_id}:", e)
+
+
 def send_order_status_notification(telegram_id, order_id, status):
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token or not telegram_id:
@@ -1315,6 +1371,7 @@ async def update_order_status(order_id: str, status: str):
             return RedirectResponse("/orders", status_code=303)
 
         if status == "paid" and not inventory_deducted:
+            affected_product_ids = []
             cursor.execute(
                 """
                 SELECT product_id, weight
@@ -1348,6 +1405,7 @@ async def update_order_status(order_id: str, status: str):
                 stock_row = cursor.fetchone()
                 if not stock_row:
                     continue
+                affected_product_ids.append(product_id)
                 stock_before, stock_after = stock_row
                 log_inventory_movement(
                     cursor,
@@ -1366,6 +1424,7 @@ async def update_order_status(order_id: str, status: str):
                 WHERE stock_grams <= 0
                 """
             )
+            sync_low_stock_alert_state(cursor, affected_product_ids)
             cursor.execute(
                 """
                 UPDATE orders
@@ -1383,6 +1442,7 @@ async def update_order_status(order_id: str, status: str):
             )
 
         if status == "cancelled" and inventory_deducted and not inventory_restored:
+            affected_product_ids = []
             cursor.execute(
                 """
                 SELECT product_id, COALESCE(SUM(weight), 0) AS restore_grams
@@ -1417,6 +1477,7 @@ async def update_order_status(order_id: str, status: str):
                 stock_row = cursor.fetchone()
                 if not stock_row:
                     continue
+                affected_product_ids.append(product_id)
                 stock_before, stock_after = stock_row
                 log_inventory_movement(
                     cursor,
@@ -1435,6 +1496,7 @@ async def update_order_status(order_id: str, status: str):
                 WHERE stock_grams > 0
                 """
             )
+            sync_low_stock_alert_state(cursor, affected_product_ids)
             cursor.execute(
                 """
                 UPDATE orders
@@ -2168,6 +2230,7 @@ async def create_product(
     sort_order
 ),
         )
+        sync_low_stock_alert_state(cursor, [new_id])
         conn.commit()
         conn.close()
         return admin_layout(
@@ -2634,6 +2697,7 @@ async def update_product(
                 None,
                 "Остаток изменён вручную в админке."
             )
+        sync_low_stock_alert_state(cursor, [product_id])
         conn.commit()
         conn.close()
         return admin_layout(
