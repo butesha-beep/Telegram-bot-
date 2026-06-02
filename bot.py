@@ -470,6 +470,8 @@ def init_db():
     cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_grams INTEGER DEFAULT 0")
     cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_out_of_stock BOOLEAN DEFAULT FALSE")
     cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_threshold_grams INTEGER DEFAULT 500")
+    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_alert_sent BOOLEAN DEFAULT FALSE")
+    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_alert_sent_at TIMESTAMPTZ")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS product_options (
             id SERIAL PRIMARY KEY,
