@@ -1,4 +1,5 @@
 import os
+import json
 import html
 import csv
 import io
@@ -596,6 +597,44 @@ def log_inventory_movement(
         """,
         (product_id, order_id, movement_type, quantity_grams, stock_before, stock_after, note),
     )
+
+
+def get_admin_chat_id():
+    admin_id = os.getenv("ADMIN_ID")
+    if admin_id:
+        return admin_id
+
+    try:
+        with open("config.json", "r", encoding="utf-8") as file:
+            config = json.load(file)
+    except Exception:
+        return None
+
+    return config.get("admin_id")
+
+
+def send_low_stock_alert(product_name, stock_grams, threshold_grams):
+    bot_token = os.getenv("BOT_TOKEN")
+    admin_id = get_admin_chat_id()
+    if not bot_token or not admin_id:
+        return
+
+    text = (
+        "⚠️ Низкий остаток\n\n"
+        f"Товар: {product_name}\n"
+        f"Остаток: {stock_grams} г\n"
+        f"Порог: {threshold_grams} г"
+    )
+    data = urllib.parse.urlencode({
+        "chat_id": admin_id,
+        "text": text,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=data,
+        method="POST"
+    )
+    urllib.request.urlopen(request, timeout=5).read()
 
 
 def send_order_status_notification(telegram_id, order_id, status):
