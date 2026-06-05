@@ -759,6 +759,7 @@ async def root():
     repeat_customers = []
     low_stock_products = []
     low_stock_count = 0
+    funnel_rows = []
     error_message = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -891,6 +892,30 @@ async def root():
             """
         )
         low_stock_count = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            SELECT stage, label, COALESCE(users_count, 0) AS users_count
+            FROM (
+                VALUES
+                    (1, 'start', 'Стартовали бота'),
+                    (2, 'view_category', 'Открыли категорию'),
+                    (3, 'view_product', 'Открыли товар'),
+                    (4, 'add_to_cart', 'Добавили в корзину'),
+                    (5, 'checkout_started', 'Начали оформление'),
+                    (6, 'order_created', 'Создали заказ'),
+                    (7, 'payment_method_selected', 'Выбрали оплату'),
+                    (8, 'payment_reported', 'Сообщили об оплате')
+            ) AS funnel(sort_order, stage, label)
+            LEFT JOIN (
+                SELECT event_type, COUNT(DISTINCT telegram_id) AS users_count
+                FROM customer_events
+                WHERE created_at::date = CURRENT_DATE
+                GROUP BY event_type
+            ) events ON events.event_type = funnel.stage
+            ORDER BY sort_order
+            """
+        )
+        funnel_rows = cursor.fetchall()
         cursor.execute(
             """
             SELECT order_id, username, phone, address, total, status
@@ -1070,6 +1095,41 @@ async def root():
         </div>
         """
 
+    funnel_section = """
+        <section class="admin-card dash-section">
+          <h2>📊 Воронка сегодня</h2>
+          <p>Воронка пока недоступна.</p>
+        </section>
+    """
+    if funnel_rows:
+        funnel_table_rows = ""
+        previous_count = None
+        for _, label, users_count in funnel_rows:
+            users_value = int(users_count or 0)
+            if previous_count is None or previous_count <= 0:
+                conversion_text = "-"
+            else:
+                conversion_text = f"{round(users_value / previous_count * 100)}%"
+            funnel_table_rows += f"""
+            <tr>
+              <td>{html.escape(str(label or '-'))}</td>
+              <td>{users_value}</td>
+              <td>{conversion_text}</td>
+            </tr>
+            """
+            previous_count = users_value
+        funnel_section = f"""
+        <section class="admin-card dash-section">
+          <h2>📊 Воронка сегодня</h2>
+          <div class="dash-table-wrap">
+            <table>
+              <tr><th>Этап</th><th>Клиентов</th><th>Конверсия</th></tr>
+              {funnel_table_rows}
+            </table>
+          </div>
+        </section>
+        """
+
     analytics_section = f"""
         <section class="admin-card dash-section">
           <h2>Аналитика продаж</h2>
@@ -1113,6 +1173,8 @@ async def root():
         </div>
 
         {stat_cards}
+
+        {funnel_section}
 
         <section class="admin-card dash-section">
           <h2>⚠️ Низкий остаток</h2>
