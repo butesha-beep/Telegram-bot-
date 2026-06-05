@@ -448,6 +448,20 @@ def init_db():
         ON order_events (order_id, created_at)
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS error_logs (
+            id SERIAL PRIMARY KEY,
+            route TEXT,
+            action TEXT,
+            error_message TEXT,
+            traceback TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_error_logs_created_at
+        ON error_logs (created_at DESC)
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
