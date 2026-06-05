@@ -412,6 +412,23 @@ def init_db():
     cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
     cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ")
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS customer_events (
+            id SERIAL PRIMARY KEY,
+            telegram_id BIGINT NOT NULL,
+            event_type TEXT NOT NULL,
+            metadata JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_customer_events_telegram_created
+        ON customer_events (telegram_id, created_at DESC)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_customer_events_type_created
+        ON customer_events (event_type, created_at DESC)
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
             order_id BIGINT,
