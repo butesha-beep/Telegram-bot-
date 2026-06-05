@@ -371,6 +371,7 @@ def admin_layout(title, content, refresh_seconds=None):
           <a href="/products">🛒 Товары</a>
           <a href="/categories">🗂 Категории</a>
           <a href="/clients">👥 Клиенты</a>
+          <a href="/logs">🧾 Логи</a>
           <a href="/logout">Выйти</a>
         </div>
       </nav>
@@ -1131,6 +1132,102 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/logs", response_class=HTMLResponse)
+async def logs():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                id,
+                route,
+                action,
+                error_message,
+                created_at
+            FROM error_logs
+            ORDER BY created_at DESC
+            LIMIT 100
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        html_content = "<section class='admin-card'><h1>🧾 Логи ошибок</h1>"
+        if rows:
+            html_content += "<div class='dash-table-wrap'><table>"
+            html_content += "<tr><th>Дата</th><th>Route</th><th>Action</th><th>Ошибка</th><th></th></tr>"
+            for log_id, route, action, error_message, created_at in rows:
+                html_content += (
+                    "<tr>"
+                    f"<td>{format_admin_datetime(created_at)}</td>"
+                    f"<td>{html.escape(str(route or '-'))}</td>"
+                    f"<td>{html.escape(str(action or '-'))}</td>"
+                    f"<td>{html.escape(str(error_message or '-'))}</td>"
+                    f"<td><a class='button button-link' href='/logs/{int(log_id)}'>Открыть</a></td>"
+                    "</tr>"
+                )
+            html_content += "</table></div>"
+        else:
+            html_content += "<p>Логов пока нет.</p>"
+        html_content += "</section>"
+        return admin_layout("🧾 Логи ошибок", html_content)
+    except Exception as e:
+        log_admin_error("/logs", "list_error_logs", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.get("/logs/{log_id}", response_class=HTMLResponse)
+async def log_detail(log_id: int):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                id,
+                route,
+                action,
+                error_message,
+                traceback,
+                created_at
+            FROM error_logs
+            WHERE id = %s
+            """,
+            (log_id,),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if not row:
+            return admin_layout(
+                "Лог не найден",
+                "<section class='admin-card'><h1>Лог не найден</h1><p><a class='button button-link' href='/logs'>← К логам</a></p></section>",
+            )
+
+        _, route, action, error_message, traceback_text, created_at = row
+        content = f"""
+        <section class="admin-card">
+          <h1>🧾 Лог ошибки</h1>
+          <p><a class="button button-link" href="/logs">← К логам</a></p>
+          <div class="detail-grid">
+            <div class="detail-field"><strong>Дата</strong>{format_admin_datetime(created_at)}</div>
+            <div class="detail-field"><strong>Route</strong>{html.escape(str(route or '-'))}</div>
+            <div class="detail-field"><strong>Action</strong>{html.escape(str(action or '-'))}</div>
+            <div class="detail-field"><strong>Ошибка</strong>{html.escape(str(error_message or '-'))}</div>
+          </div>
+          <h2>Traceback</h2>
+          <pre>{html.escape(str(traceback_text or ''))}</pre>
+        </section>
+        """
+        return admin_layout("🧾 Лог ошибки", content)
+    except Exception as e:
+        log_admin_error("/logs/{id}", "error_log_detail", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
 
 @app.get("/orders", response_class=HTMLResponse)
 async def orders(status_filter: str = "all", q: str = ""):
