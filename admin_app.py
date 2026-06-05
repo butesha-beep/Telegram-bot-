@@ -8,6 +8,7 @@ import hmac
 import hashlib
 import secrets
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from fastapi import FastAPI, Form, Request
@@ -722,6 +723,31 @@ def send_order_status_notification(telegram_id, order_id, status):
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 
+
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def log_admin_error(route, action, error):
+    try:
+        tb = traceback.format_exc()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO error_logs
+            (route, action, error_message, traceback)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (route, action, str(error), tb),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as log_error:
+        print(f"Failed to write admin error log: {log_error}")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     stats = None
@@ -875,6 +901,7 @@ async def root():
         latest_orders = cursor.fetchall()
         conn.close()
     except Exception as e:
+        log_admin_error("/", "dashboard", e)
         error_message = str(e)
 
     if stats:
@@ -1232,6 +1259,7 @@ async def orders(status_filter: str = "all", q: str = ""):
         html += "</table></div></section>"
         return admin_layout("📦 Заказы", html, refresh_seconds=60)
     except Exception as e:
+        log_admin_error("/orders", "list_orders", e)
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -1571,6 +1599,7 @@ async def update_order_status(order_id: str, status: str):
             """,
         )
     except Exception as e:
+        log_admin_error("/orders/{order_id}/status/{status}", "update_order_status", e)
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -1787,6 +1816,7 @@ async def order_detail(order_id: str):
         html += f"<p><a class='button button-link' href=\"/orders\">← К заказам</a></p>"
         return admin_layout(f"Заказ {order_id}", html)
     except Exception as e:
+        log_admin_error("/orders/{order_id}", "order_detail", e)
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -2148,6 +2178,7 @@ async def products():
         html += "</table></div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception as e:
+        log_admin_error("/products", "list_products", e)
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 @app.get("/products/new", response_class=HTMLResponse)
 async def new_product_form():
@@ -2247,6 +2278,7 @@ async def create_product(
             """,
         )
     except Exception as e:
+        log_admin_error("/products/new", "create_product", e)
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -2714,6 +2746,7 @@ async def update_product(
             """,
         )
     except Exception as e:
+        log_admin_error("/products/{product_id}/edit", "update_product", e)
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
