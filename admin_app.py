@@ -2084,6 +2084,17 @@ async def client_detail(telegram_id: int):
             (telegram_id,),
         )
         favorite_products = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT event_type, metadata, created_at
+            FROM customer_events
+            WHERE telegram_id = %s
+            ORDER BY created_at DESC
+            LIMIT 20
+            """,
+            (telegram_id,),
+        )
+        activity_rows = cursor.fetchall()
         conn.close()
 
         client_id, username, first_name, phone, address, client_note = client
@@ -2147,6 +2158,57 @@ async def client_detail(telegram_id: int):
             </div>
             """
 
+        event_labels = {
+            "start": "Открыл бота",
+            "view_category": "Открыл категорию",
+            "view_product": "Открыл товар",
+            "add_to_cart": "Добавил в корзину",
+            "open_cart": "Открыл корзину",
+            "checkout_started": "Начал оформление",
+            "order_created": "Создал заказ",
+            "payment_method_selected": "Выбрал оплату",
+            "payment_reported": "Сообщил об оплате",
+        }
+
+        def format_activity_metadata(metadata):
+            if not isinstance(metadata, dict):
+                return "-"
+            details = []
+            if metadata.get("order_id") is not None:
+                details.append(f"#{html.escape(str(metadata.get('order_id')))}")
+            if metadata.get("product_id") is not None:
+                details.append(f"product_id: {html.escape(str(metadata.get('product_id')))}")
+            if metadata.get("category_id") is not None:
+                details.append(f"category_id: {html.escape(str(metadata.get('category_id')))}")
+            if metadata.get("payment_method") is not None:
+                details.append(html.escape(str(metadata.get("payment_method"))))
+            if metadata.get("option_id") is not None:
+                details.append(f"option_id: {html.escape(str(metadata.get('option_id')))}")
+            if metadata.get("weight") is not None:
+                details.append(f"{html.escape(str(metadata.get('weight')))} г")
+            return ", ".join(details) if details else "-"
+
+        activity_html = "<p>Пока нет активности.</p>"
+        if activity_rows:
+            activity_table_rows = ""
+            for event_type, metadata, created_at in activity_rows:
+                label = event_labels.get(str(event_type or ""), html.escape(str(event_type or "-")))
+                activity_table_rows += f"""
+                <tr>
+                  <td>{format_admin_datetime(created_at)}</td>
+                  <td>{html.escape(str(label))}</td>
+                  <td>{format_activity_metadata(metadata)}</td>
+                </tr>
+                """
+            activity_html = f"""
+            <div class="dash-table-wrap">
+              <table>
+                <tr><th>Дата</th><th>Событие</th><th>Детали</th></tr>
+                {activity_table_rows}
+              </table>
+            </div>
+            """
+
         content = f"""
         <p><a class="button button-link" href="/clients">Назад к клиентам</a></p>
         <section class="admin-card">
@@ -2186,6 +2248,10 @@ async def client_detail(telegram_id: int):
         <section class="admin-card dash-section">
           <h2>Любимые товары</h2>
           {favorite_products_html}
+        </section>
+        <section class="admin-card dash-section">
+          <h2>Активность клиента</h2>
+          {activity_html}
         </section>
         <section class="admin-card dash-section">
           <h2>История заказов</h2>
