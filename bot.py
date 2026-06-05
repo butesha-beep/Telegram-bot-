@@ -39,6 +39,36 @@ UNPAID_ORDER_WORKER_SLEEP_SECONDS = 1800
 callback_locks = {}
 
 
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def log_customer_event(telegram_id, event_type, metadata=None):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO customer_events
+            (telegram_id, event_type, metadata)
+            VALUES (%s, %s, %s)
+            """,
+            (
+                telegram_id,
+                event_type,
+                json.dumps(metadata or {})
+            )
+        )
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        print(f"Customer event logging failed: {e}")
+
+
 def is_callback_locked(callback, cooldown=CALLBACK_COOLDOWN_SECONDS):
     now = asyncio.get_event_loop().time()
     key = (callback.from_user.id, callback.data)
@@ -738,6 +768,11 @@ def main_menu():
 async def show_category(callback: types.CallbackQuery):
 
     category_id = int(callback.data.split("_")[1])
+    log_customer_event(
+        callback.from_user.id,
+        "view_category",
+        {"category_id": category_id}
+    )
 
     products = get_products()
 
@@ -797,6 +832,11 @@ async def show_product(callback: types.CallbackQuery):
         )
         await callback.answer()
         return
+    log_customer_event(
+        callback.from_user.id,
+        "view_product",
+        {"product_id": product_id}
+    )
 
     price_100g = product["price_per_kg"] / 10
 
@@ -1120,6 +1160,11 @@ async def add_option_to_cart(callback: types.CallbackQuery):
 
     conn.commit()
     conn.close()
+    log_customer_event(
+        callback.from_user.id,
+        "add_to_cart",
+        {"product_id": product_id, "option_id": option_id}
+    )
     mark_cart_active(callback.from_user.id)
 
     keyboard = InlineKeyboardMarkup(
@@ -1229,6 +1274,11 @@ async def add_to_cart(callback: types.CallbackQuery):
 
     conn.commit()
     conn.close()
+    log_customer_event(
+        callback.from_user.id,
+        "add_to_cart",
+        {"product_id": product_id, "weight": weight}
+    )
     mark_cart_active(callback.from_user.id)
 
     keyboard = InlineKeyboardMarkup(
@@ -1345,6 +1395,7 @@ async def show_cart(callback: types.CallbackQuery):
 
     cart_items = cursor.fetchall()
     conn.close()
+    log_customer_event(callback.from_user.id, "open_cart", {})
 
     if not cart_items:
         await callback.message.answer(
@@ -1676,6 +1727,7 @@ async def start(message: types.Message):
         del pending_orders[user_id]
     
     save_client(message.from_user)
+    log_customer_event(message.from_user.id, "start", {})
     
     config = load_json("config.json")
 
@@ -1941,6 +1993,7 @@ async def handle_order_data(message: types.Message):
         )
         conn.commit()
         conn.close()
+        log_customer_event(user_id, "order_created", {"order_id": order_id})
 
         # Send confirmation to customer
         await message.answer(
@@ -2018,6 +2071,7 @@ async def checkout(callback: types.CallbackQuery):
         )
         await callback.answer()
         return
+    log_customer_event(callback.from_user.id, "checkout_started", {})
 
     if client_contact and client_contact[0] and client_contact[1]:
         phone, address = client_contact
@@ -2172,6 +2226,7 @@ async def use_saved_data(callback: types.CallbackQuery):
     )
     conn.commit()
     conn.close()
+    log_customer_event(user_id, "order_created", {"order_id": order_id})
 
     await callback.message.answer(
         f"✅ Заказ оформлен!\n\n"
@@ -2238,6 +2293,11 @@ async def pay_iban(callback: types.CallbackQuery):
         await callback.answer("Заказ не найден.", show_alert=True)
         return
     order_id = order_row[0]
+    log_customer_event(
+        callback.from_user.id,
+        "payment_method_selected",
+        {"order_id": order_id, "payment_method": "IBAN"}
+    )
 
     paid_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -2300,6 +2360,11 @@ async def pay_paypal(callback: types.CallbackQuery):
         await callback.answer("Заказ не найден.", show_alert=True)
         return
     order_id = order_row[0]
+    log_customer_event(
+        callback.from_user.id,
+        "payment_method_selected",
+        {"order_id": order_id, "payment_method": "PayPal"}
+    )
 
     paid_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -2348,12 +2413,20 @@ async def pay_cash(callback: types.CallbackQuery):
             ORDER BY id DESC
             LIMIT 1
         )
+        RETURNING order_id
         """,
         ("Cash", "cash_on_delivery", callback.from_user.id)
     )
+    order_row = cursor.fetchone()
 
     conn.commit()
     conn.close()
+    if order_row:
+        log_customer_event(
+            callback.from_user.id,
+            "payment_method_selected",
+            {"order_id": order_row[0], "payment_method": "Cash"}
+        )
 
     username = callback.from_user.username
 
@@ -2451,6 +2524,11 @@ async def payment_done_for_order(callback: types.CallbackQuery):
 
     conn.commit()
     conn.close()
+    log_customer_event(
+        callback.from_user.id,
+        "payment_reported",
+        {"order_id": order_id}
+    )
 
     config = load_json("config.json")
 
