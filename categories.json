@@ -1,10 +1,26 @@
 [
   {
     "id": 1,
-    "name": "Рыбные снеки"
+    "name": "Рыбные снеки",
+    "sort_order": 1,
+    "is_active": true
   },
   {
     "id": 2,
-    "name": "Мясные снеки"
+    "name": "Мясные снеки",
+    "sort_order": 2,
+    "is_active": true
+  },
+  {
+    "id": 3,
+    "name": "Копчёная рыба",
+    "sort_order": 3,
+    "is_active": true
+  },
+  {
+    "id": 4,
+    "name": "Подарочные наборы",
+    "sort_order": 4,
+    "is_active": true
   }
 ]

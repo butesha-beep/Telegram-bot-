@@ -3,9 +3,80 @@
     "id": 1,
     "category_id": 1,
     "name": "Янтарная с перцем",
+    "description": "Пикантная рыбная закуска с перцем.",
     "price_per_kg": 35,
-    "photo": "https://ibb.co/S4HdV0J7",
-    "description": "Рыбная закуска с перцем",
-    "available": true
+    "image_url": "",
+    "sort_order": 1,
+    "is_active": true
+  },
+  {
+    "id": 2,
+    "category_id": 1,
+    "name": "Тунец сушёный",
+    "description": "Плотный рыбный снек с насыщенным вкусом.",
+    "price_per_kg": 42,
+    "image_url": "",
+    "sort_order": 2,
+    "is_active": true
+  },
+  {
+    "id": 3,
+    "category_id": 1,
+    "name": "Кальмар кольца",
+    "description": "Классический морской снек к пиву.",
+    "price_per_kg": 38,
+    "image_url": "",
+    "sort_order": 3,
+    "is_active": true
+  },
+  {
+    "id": 4,
+    "category_id": 2,
+    "name": "Говядина BBQ",
+    "description": "Вяленая говядина с лёгким дымным вкусом.",
+    "price_per_kg": 55,
+    "image_url": "",
+    "sort_order": 4,
+    "is_active": true
+  },
+  {
+    "id": 5,
+    "category_id": 2,
+    "name": "Куриные джерки",
+    "description": "Лёгкий мясной снек из куриного филе.",
+    "price_per_kg": 39,
+    "image_url": "",
+    "sort_order": 5,
+    "is_active": true
+  },
+  {
+    "id": 6,
+    "category_id": 3,
+    "name": "Скумбрия горячего копчения",
+    "description": "Ароматная копчёная рыба с насыщенным вкусом.",
+    "price_per_kg": 24,
+    "image_url": "",
+    "sort_order": 6,
+    "is_active": true
+  },
+  {
+    "id": 7,
+    "category_id": 3,
+    "name": "Лосось холодного копчения",
+    "description": "Премиальный продукт для закусок и праздничного стола.",
+    "price_per_kg": 68,
+    "image_url": "",
+    "sort_order": 7,
+    "is_active": true
+  },
+  {
+    "id": 8,
+    "category_id": 4,
+    "name": "Набор \"К пиву\"",
+    "description": "Микс рыбных и мясных снеков для компании.",
+    "price_per_kg": 45,
+    "image_url": "",
+    "sort_order": 8,
+    "is_active": true
   }
 ]
