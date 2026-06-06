@@ -378,6 +378,7 @@ def admin_layout(title, content, refresh_seconds=None):
           <a href="/products">🛒 Товары</a>
           <a href="/categories">🗂 Категории</a>
           <a href="/clients">👥 Клиенты</a>
+          <a href="/channel">📢 Канал</a>
           <a href="/logs">🧾 Логи</a>
           <a href="/logout">Выйти</a>
         </div>
@@ -766,6 +767,15 @@ def send_channel_post(message_text):
         return True, None
     except Exception as error:
         return False, str(error)
+
+
+def channel_post_status_label(status):
+    labels = {
+        "draft": "Черновик",
+        "sent": "Отправлено",
+        "failed": "Ошибка",
+    }
+    return html.escape(labels.get(str(status or ""), str(status or "-")))
 
 
 def log_admin_error(route, action, error):
@@ -1233,6 +1243,161 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/channel", response_class=HTMLResponse)
+async def channel_posts():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, message_text, status, error_message, created_at, sent_at
+            FROM channel_posts
+            ORDER BY created_at DESC
+            LIMIT 50
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        html_content = """
+        <section class="admin-card">
+          <h1>📢 Канал</h1>
+          <p><a class="button button-link" href="/channel/new">Новый пост</a></p>
+        """
+        if not rows:
+            html_content += "<p>Постов пока нет.</p>"
+        else:
+            html_content += "<div class='dash-table-wrap'><table>"
+            html_content += "<tr><th>Дата</th><th>Статус</th><th>Текст</th><th>Отправлено</th><th>Ошибка</th><th>Действия</th></tr>"
+            for post_id, message_text, status, error_message, created_at, sent_at in rows:
+                post_id_int = int(post_id)
+                message_html = html.escape(str(message_text or "-")).replace("\n", "<br>")
+                error_html = html.escape(str(error_message or "-"))
+                actions_html = "Отправлено"
+                if str(status or "") in {"draft", "failed"}:
+                    actions_html = (
+                        f'<form method="post" action="/channel/{post_id_int}/send" style="display:inline; margin:0; padding:0;">'
+                        '<button class="button secondary" type="submit">Отправить</button>'
+                        '</form>'
+                    )
+                html_content += f"""
+                <tr>
+                  <td>{format_admin_datetime(created_at)}</td>
+                  <td>{channel_post_status_label(status)}</td>
+                  <td>{message_html}</td>
+                  <td>{format_admin_datetime(sent_at)}</td>
+                  <td>{error_html}</td>
+                  <td>{actions_html}</td>
+                </tr>
+                """
+            html_content += "</table></div>"
+        html_content += "</section>"
+        return admin_layout("📢 Канал", html_content)
+    except Exception as e:
+        log_admin_error("/channel", "list_channel_posts", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.get("/channel/new", response_class=HTMLResponse)
+async def new_channel_post_form():
+    try:
+        content = """
+        <section class="admin-card">
+          <h1>Новый пост в канал</h1>
+          <p><a class="button button-link secondary" href="/channel">← К каналу</a></p>
+          <form class="admin-form" method="post" action="/channel/new">
+            <label>Текст сообщения
+              <textarea name="message_text" rows="8"></textarea>
+            </label>
+            <div class="form-actions">
+              <button class="button" type="submit">Сохранить черновик</button>
+            </div>
+          </form>
+        </section>
+        """
+        return admin_layout("Новый пост в канал", content)
+    except Exception as e:
+        log_admin_error("/channel/new", "new_channel_post_form", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.post("/channel/new", response_class=HTMLResponse)
+async def create_channel_post(message_text: str = Form("")):
+    try:
+        message_text = (message_text or "").strip()
+        if not message_text:
+            return admin_error_page("Ошибка", "Текст сообщения не может быть пустым.")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO channel_posts (message_text, status)
+            VALUES (%s, 'draft')
+            RETURNING id
+            """,
+            (message_text,),
+        )
+        cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return RedirectResponse("/channel", status_code=303)
+    except Exception as e:
+        log_admin_error("/channel/new", "create_channel_post", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.post("/channel/{post_id}/send", response_class=HTMLResponse)
+async def send_channel_post_route(post_id: int):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, message_text, status FROM channel_posts WHERE id = %s",
+            (post_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            conn.close()
+            return admin_error_page("Ошибка", "Пост не найден.")
+
+        _, message_text, status = row
+        if str(status or "") == "sent":
+            cursor.close()
+            conn.close()
+            return RedirectResponse("/channel", status_code=303)
+
+        success, error_message = send_channel_post(message_text)
+        if success:
+            cursor.execute(
+                """
+                UPDATE channel_posts
+                SET status = 'sent', error_message = NULL, sent_at = NOW()
+                WHERE id = %s
+                """,
+                (post_id,),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE channel_posts
+                SET status = 'failed', error_message = %s
+                WHERE id = %s
+                """,
+                (error_message, post_id),
+            )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return RedirectResponse("/channel", status_code=303)
+    except Exception as e:
+        log_admin_error("/channel/{id}/send", "send_channel_post", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/logs", response_class=HTMLResponse)
