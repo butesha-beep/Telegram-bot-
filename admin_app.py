@@ -378,6 +378,7 @@ def admin_layout(title, content, refresh_seconds=None):
           <a href="/products">🛒 Товары</a>
           <a href="/categories">🗂 Категории</a>
           <a href="/clients">👥 Клиенты</a>
+          <a href="/broadcasts">📨 Рассылка</a>
           <a href="/channel">📢 Канал</a>
           <a href="/logs">🧾 Логи</a>
           <a href="/logout">Выйти</a>
@@ -796,6 +797,16 @@ def send_broadcast_message(telegram_id, message_text):
 def channel_post_status_label(status):
     labels = {
         "draft": "Черновик",
+        "sent": "Отправлено",
+        "failed": "Ошибка",
+    }
+    return html.escape(labels.get(str(status or ""), str(status or "-")))
+
+
+def broadcast_status_label(status):
+    labels = {
+        "draft": "Черновик",
+        "sending": "Отправляется",
         "sent": "Отправлено",
         "failed": "Ошибка",
     }
@@ -1267,6 +1278,126 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/broadcasts", response_class=HTMLResponse)
+async def broadcasts():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                b.id,
+                b.message_text,
+                b.status,
+                b.created_at,
+                COUNT(br.id) AS total_recipients,
+                COUNT(*) FILTER (WHERE br.status = 'sent') AS sent_count,
+                COUNT(*) FILTER (WHERE br.status = 'pending') AS pending_count,
+                COUNT(*) FILTER (WHERE br.status = 'blocked') AS blocked_count,
+                COUNT(*) FILTER (WHERE br.status = 'failed') AS failed_count
+            FROM broadcasts b
+            LEFT JOIN broadcast_recipients br ON br.broadcast_id = b.id
+            GROUP BY b.id
+            ORDER BY b.created_at DESC
+            LIMIT 50
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        html_content = """
+        <section class="admin-card">
+          <h1>📨 Рассылка</h1>
+          <p><a class="button button-link" href="/broadcasts/new">Новая рассылка</a></p>
+        """
+        if not rows:
+            html_content += "<p>Рассылок пока нет.</p>"
+        else:
+            html_content += "<div class='dash-table-wrap'><table>"
+            html_content += "<tr><th>Дата</th><th>Статус</th><th>Текст</th><th>Получателей</th><th>Отправлено</th><th>Ожидает</th><th>Заблокировано</th><th>Ошибки</th></tr>"
+            for _, message_text, status, created_at, total_count, sent_count, pending_count, blocked_count, failed_count in rows:
+                message_html = html.escape(str(message_text or "-")).replace("\n", "<br>")
+                html_content += f"""
+                <tr>
+                  <td>{format_admin_datetime(created_at)}</td>
+                  <td>{broadcast_status_label(status)}</td>
+                  <td>{message_html}</td>
+                  <td>{int(total_count or 0)}</td>
+                  <td>{int(sent_count or 0)}</td>
+                  <td>{int(pending_count or 0)}</td>
+                  <td>{int(blocked_count or 0)}</td>
+                  <td>{int(failed_count or 0)}</td>
+                </tr>
+                """
+            html_content += "</table></div>"
+        html_content += "</section>"
+        return admin_layout("📨 Рассылка", html_content)
+    except Exception as e:
+        log_admin_error("/broadcasts", "list_broadcasts", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.get("/broadcasts/new", response_class=HTMLResponse)
+async def new_broadcast_form():
+    try:
+        content = """
+        <section class="admin-card">
+          <h1>Новая рассылка</h1>
+          <p><a class="button button-link secondary" href="/broadcasts">← К рассылкам</a></p>
+          <form class="admin-form" method="post" action="/broadcasts/new">
+            <label>Текст сообщения
+              <textarea name="message_text" rows="8"></textarea>
+            </label>
+            <div class="form-actions">
+              <button class="button" type="submit">Создать рассылку</button>
+            </div>
+          </form>
+        </section>
+        """
+        return admin_layout("Новая рассылка", content)
+    except Exception as e:
+        log_admin_error("/broadcasts/new", "new_broadcast_form", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.post("/broadcasts/new", response_class=HTMLResponse)
+async def create_broadcast(message_text: str = Form("")):
+    try:
+        message_text = (message_text or "").strip()
+        if not message_text:
+            return admin_error_page("Ошибка", "Текст сообщения не может быть пустым.")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO broadcasts (message_text, status)
+            VALUES (%s, 'draft')
+            RETURNING id
+            """,
+            (message_text,),
+        )
+        broadcast_id = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            INSERT INTO broadcast_recipients (broadcast_id, telegram_id)
+            SELECT %s, telegram_id
+            FROM clients
+            WHERE telegram_id IS NOT NULL
+            ON CONFLICT (broadcast_id, telegram_id) DO NOTHING
+            """,
+            (broadcast_id,),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return RedirectResponse("/broadcasts", status_code=303)
+    except Exception as e:
+        log_admin_error("/broadcasts/new", "create_broadcast", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/channel", response_class=HTMLResponse)
