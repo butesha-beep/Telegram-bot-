@@ -769,6 +769,30 @@ def send_channel_post(message_text):
         return False, str(error)
 
 
+def send_broadcast_message(telegram_id, message_text):
+    try:
+        bot_token = os.getenv("BOT_TOKEN")
+        if not bot_token or not telegram_id:
+            return False, "failed"
+
+        data = urllib.parse.urlencode({
+            "chat_id": telegram_id,
+            "text": message_text,
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            data=data,
+            method="POST"
+        )
+        urllib.request.urlopen(request, timeout=5).read()
+        return True, "sent"
+    except Exception as error:
+        error_text = str(error).lower()
+        if "403" in error_text or "forbidden" in error_text:
+            return False, "blocked"
+        return False, "failed"
+
+
 def channel_post_status_label(status):
     labels = {
         "draft": "Черновик",
