@@ -52,6 +52,10 @@ def init_db():
     cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
     cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ")
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cart_items_telegram_updated
+        ON cart_items (telegram_id, updated_at DESC)
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS customer_events (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT NOT NULL,
