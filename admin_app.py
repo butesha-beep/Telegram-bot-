@@ -814,6 +814,17 @@ def broadcast_status_label(status):
     return html.escape(labels.get(str(status or ""), str(status or "-")))
 
 
+def broadcast_target_label(target_type):
+    labels = {
+        "all_clients": "Все клиенты",
+        "clients_with_orders": "Клиенты с заказами",
+        "active_last_7_days": "Активные за 7 дней",
+        "active_last_30_days": "Активные за 30 дней",
+        "awaiting_payment": "Ожидают оплату",
+    }
+    return html.escape(labels.get(str(target_type or ""), str(target_type or "-")))
+
+
 def log_admin_error(route, action, error):
     try:
         tb = traceback.format_exc()
@@ -1292,6 +1303,7 @@ async def broadcasts():
                 b.id,
                 b.message_text,
                 b.status,
+                b.target_type,
                 b.created_at,
                 COUNT(br.id) AS total_recipients,
                 COUNT(*) FILTER (WHERE br.status = 'sent') AS sent_count,
@@ -1318,8 +1330,8 @@ async def broadcasts():
             html_content += "<p>Рассылок пока нет.</p>"
         else:
             html_content += "<div class='dash-table-wrap'><table>"
-            html_content += "<tr><th>Дата</th><th>Статус</th><th>Текст</th><th>Получателей</th><th>Отправлено</th><th>Ожидает</th><th>Заблокировано</th><th>Ошибки</th><th>Действия</th></tr>"
-            for broadcast_id, message_text, status, created_at, total_count, sent_count, pending_count, blocked_count, failed_count in rows:
+            html_content += "<tr><th>Дата</th><th>Статус</th><th>Кому</th><th>Текст</th><th>Получателей</th><th>Отправлено</th><th>Ожидает</th><th>Заблокировано</th><th>Ошибки</th><th>Действия</th></tr>"
+            for broadcast_id, message_text, status, target_type, created_at, total_count, sent_count, pending_count, blocked_count, failed_count in rows:
                 message_html = html.escape(str(message_text or "-")).replace("\n", "<br>")
                 pending_value = int(pending_count or 0)
                 action_html = ""
@@ -1341,6 +1353,7 @@ async def broadcasts():
                 <tr>
                   <td>{format_admin_datetime(created_at)}</td>
                   <td>{broadcast_status_label(status)}</td>
+                  <td>{broadcast_target_label(target_type)}</td>
                   <td>{message_html}</td>
                   <td>{int(total_count or 0)}</td>
                   <td>{int(sent_count or 0)}</td>
@@ -1366,6 +1379,15 @@ async def new_broadcast_form():
           <h1>Новая рассылка</h1>
           <p><a class="button button-link secondary" href="/broadcasts">← К рассылкам</a></p>
           <form class="admin-form" method="post" action="/broadcasts/new">
+            <label>Кому
+              <select name="target_type">
+                <option value="all_clients">Все клиенты</option>
+                <option value="clients_with_orders">Клиенты с заказами</option>
+                <option value="active_last_7_days">Активные за 7 дней</option>
+                <option value="active_last_30_days">Активные за 30 дней</option>
+                <option value="awaiting_payment">Ожидают оплату</option>
+              </select>
+            </label>
             <label>Текст сообщения
               <textarea name="message_text" rows="8"></textarea>
             </label>
@@ -1382,29 +1404,60 @@ async def new_broadcast_form():
 
 
 @app.post("/broadcasts/new", response_class=HTMLResponse)
-async def create_broadcast(message_text: str = Form("")):
+async def create_broadcast(message_text: str = Form(""), target_type: str = Form("all_clients")):
     try:
         message_text = (message_text or "").strip()
         if not message_text:
             return admin_error_page("Ошибка", "Текст сообщения не может быть пустым.")
+        target_type = str(target_type or "all_clients")
+        target_queries = {
+            "all_clients": """
+                SELECT DISTINCT telegram_id
+                FROM clients
+                WHERE telegram_id IS NOT NULL
+            """,
+            "clients_with_orders": """
+                SELECT DISTINCT telegram_id
+                FROM orders
+                WHERE telegram_id IS NOT NULL
+            """,
+            "active_last_7_days": """
+                SELECT DISTINCT telegram_id
+                FROM customer_events
+                WHERE created_at >= NOW() - INTERVAL '7 days'
+            """,
+            "active_last_30_days": """
+                SELECT DISTINCT telegram_id
+                FROM customer_events
+                WHERE created_at >= NOW() - INTERVAL '30 days'
+            """,
+            "awaiting_payment": """
+                SELECT DISTINCT telegram_id
+                FROM orders
+                WHERE telegram_id IS NOT NULL
+                  AND status = 'awaiting_payment'
+            """,
+        }
+        recipients_query = target_queries.get(target_type)
+        if not recipients_query:
+            return admin_error_page("Ошибка", "Неверный сегмент рассылки.")
 
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO broadcasts (message_text, status)
-            VALUES (%s, 'draft')
+            INSERT INTO broadcasts (message_text, status, target_type)
+            VALUES (%s, 'draft', %s)
             RETURNING id
             """,
-            (message_text,),
+            (message_text, target_type),
         )
         broadcast_id = cursor.fetchone()[0]
         cursor.execute(
-            """
+            f"""
             INSERT INTO broadcast_recipients (broadcast_id, telegram_id)
             SELECT %s, telegram_id
-            FROM clients
-            WHERE telegram_id IS NOT NULL
+            FROM ({recipients_query}) recipients
             ON CONFLICT (broadcast_id, telegram_id) DO NOTHING
             """,
             (broadcast_id,),
