@@ -133,6 +133,32 @@ def init_db():
         ON channel_posts (created_at DESC)
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS broadcasts (
+            id SERIAL PRIMARY KEY,
+            message_text TEXT NOT NULL,
+            status TEXT DEFAULT 'draft',
+            error_message TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            sent_at TIMESTAMPTZ
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS broadcast_recipients (
+            id SERIAL PRIMARY KEY,
+            broadcast_id INTEGER REFERENCES broadcasts(id),
+            telegram_id BIGINT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            error_message TEXT,
+            sent_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (broadcast_id, telegram_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_broadcast_recipients_broadcast
+        ON broadcast_recipients (broadcast_id)
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
