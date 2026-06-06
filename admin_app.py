@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 import psycopg2
 
 from db_schema import DATABASE_URL, get_db_connection, init_db
+from shop_settings import ADMIN_PANEL_TITLE, CURRENCY_SYMBOL
 
 app = FastAPI()
 ADMIN_SESSION_COOKIE = "admin_session"
@@ -1053,9 +1054,9 @@ async def root():
         </div>
         <h2>Выручка</h2>
         <div class="dash-grid">
-          <div class="dash-card"><span>Всего завершённых</span><strong class="stat-value">EUR {float(total_done_revenue):.2f}</strong></div>
-          <div class="dash-card"><span>Сегодня</span><strong class="stat-value">EUR {float(today_done_revenue):.2f}</strong></div>
-          <div class="dash-card"><span>За месяц</span><strong class="stat-value">EUR {float(month_done_revenue):.2f}</strong></div>
+          <div class="dash-card"><span>Всего завершённых</span><strong class="stat-value">{CURRENCY_SYMBOL}{float(total_done_revenue):.2f}</strong></div>
+          <div class="dash-card"><span>Сегодня</span><strong class="stat-value">{CURRENCY_SYMBOL}{float(today_done_revenue):.2f}</strong></div>
+          <div class="dash-card"><span>За месяц</span><strong class="stat-value">{CURRENCY_SYMBOL}{float(month_done_revenue):.2f}</strong></div>
         </div>
         <h2>Статусы</h2>
         <div class="dash-grid">
@@ -1239,12 +1240,12 @@ async def root():
     """
 
     return admin_layout(
-        "Deal Market NL",
+        ADMIN_PANEL_TITLE,
         f"""
         <section class="dash-hero">
           <div>
             <p class="dash-kicker">Панель управления</p>
-            <h1>Deal Market NL</h1>
+            <h1>{html.escape(ADMIN_PANEL_TITLE)}</h1>
             <p>Быстрый доступ к заказам, каталогу, категориям и клиентам.</p>
           </div>
         </section>
