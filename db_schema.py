@@ -146,6 +146,7 @@ def init_db():
             sent_at TIMESTAMPTZ
         )
     """)
+    cursor.execute("ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS target_type TEXT DEFAULT 'all_clients'")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS broadcast_recipients (
             id SERIAL PRIMARY KEY,
