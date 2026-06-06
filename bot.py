@@ -682,8 +682,74 @@ def seed_products_from_json():
             )
         )
 
+    cleanup_demo_catalog(cursor)
     conn.commit()
     conn.close()
+
+
+def cleanup_demo_catalog(cursor):
+    demo_product_ids = (1, 2, 3, 4, 5, 6, 7, 8)
+    demo_category_ids = (1, 2, 3, 4)
+
+    cursor.execute(
+        """
+        UPDATE products
+        SET is_active = FALSE
+        WHERE id NOT IN %s
+        """,
+        (demo_product_ids,)
+    )
+    cursor.execute(
+        """
+        UPDATE categories c
+        SET is_active = FALSE
+        WHERE c.id NOT IN %s
+          AND NOT EXISTS (
+              SELECT 1
+              FROM products p
+              WHERE p.category_id = c.id
+                AND p.is_active = TRUE
+          )
+        """,
+        (demo_category_ids,)
+    )
+    cursor.execute(
+        """
+        INSERT INTO product_options (
+            product_id,
+            label,
+            weight,
+            price,
+            sort_order,
+            is_active
+        )
+        SELECT
+            p.id,
+            option_data.label,
+            option_data.weight,
+            p.price_per_kg * option_data.weight / 1000,
+            option_data.weight,
+            TRUE
+        FROM products p
+        CROSS JOIN (
+            VALUES
+                ('50 г', 50),
+                ('100 г', 100),
+                ('200 г', 200),
+                ('500 г', 500)
+        ) AS option_data(label, weight)
+        WHERE p.id IN %s
+          AND p.is_active = TRUE
+          AND NOT EXISTS (
+              SELECT 1
+              FROM product_options po
+              WHERE po.product_id = p.id
+                AND po.is_active = TRUE
+          )
+        """,
+        (demo_product_ids,)
+    )
+    print("Demo catalog cleanup completed.")
 
 
 def save_client(user):
