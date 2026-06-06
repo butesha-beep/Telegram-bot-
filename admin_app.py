@@ -1283,6 +1283,11 @@ async def channel_posts():
                         '<button class="button secondary" type="submit">Отправить</button>'
                         '</form>'
                     )
+                actions_html += (
+                    f' <form method="post" action="/channel/{post_id_int}/delete" style="display:inline; margin:0; padding:0;">'
+                    '<button class="button secondary" type="submit">Удалить</button>'
+                    '</form>'
+                )
                 html_content += f"""
                 <tr>
                   <td>{format_admin_datetime(created_at)}</td>
@@ -1397,6 +1402,31 @@ async def send_channel_post_route(post_id: int):
         return RedirectResponse("/channel", status_code=303)
     except Exception as e:
         log_admin_error("/channel/{id}/send", "send_channel_post", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.post("/channel/{post_id}/delete", response_class=HTMLResponse)
+async def delete_channel_post(post_id: int):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM channel_posts WHERE id = %s",
+            (post_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            conn.close()
+            return admin_error_page("Ошибка", "Пост не найден.")
+
+        cursor.execute("DELETE FROM channel_posts WHERE id = %s", (post_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return RedirectResponse("/channel", status_code=303)
+    except Exception as e:
+        log_admin_error("/channel/{id}/delete", "delete_channel_post", e)
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
