@@ -269,7 +269,38 @@ async def send_pending_order_reminders():
                 update_conn.commit()
             finally:
                 update_conn.close()
+            log_customer_event(
+                telegram_id,
+                "pending_order_reminder_sent",
+                {}
+            )
         except Exception as e:
+            reason = "blocked" if is_telegram_blocked_error(e) else "failed"
+            try:
+                update_conn = psycopg2.connect(DATABASE_URL)
+                try:
+                    update_cursor = update_conn.cursor()
+                    update_cursor.execute(
+                        """
+                        UPDATE orders
+                        SET payment_reminded_at = NOW(),
+                            updated_at = NOW()
+                        WHERE telegram_id = %s
+                          AND status = 'pending'
+                          AND payment_reminded_at IS NULL
+                        """,
+                        (telegram_id,)
+                    )
+                    update_conn.commit()
+                finally:
+                    update_conn.close()
+            except Exception as update_error:
+                print(f"PENDING ORDER REMINDER MARK ERROR for {telegram_id}:", update_error)
+            log_customer_event(
+                telegram_id,
+                "pending_order_reminder_failed",
+                {"reason": reason}
+            )
             print(f"PENDING ORDER REMINDER ERROR for {telegram_id}:", e)
 
 
@@ -332,7 +363,38 @@ async def send_awaiting_payment_reminders():
                 update_conn.commit()
             finally:
                 update_conn.close()
+            log_customer_event(
+                telegram_id,
+                "awaiting_payment_reminder_sent",
+                {}
+            )
         except Exception as e:
+            reason = "blocked" if is_telegram_blocked_error(e) else "failed"
+            try:
+                update_conn = psycopg2.connect(DATABASE_URL)
+                try:
+                    update_cursor = update_conn.cursor()
+                    update_cursor.execute(
+                        """
+                        UPDATE orders
+                        SET payment_reminded_at = NOW(),
+                            updated_at = NOW()
+                        WHERE telegram_id = %s
+                          AND status = 'awaiting_payment'
+                          AND payment_reminded_at IS NULL
+                        """,
+                        (telegram_id,)
+                    )
+                    update_conn.commit()
+                finally:
+                    update_conn.close()
+            except Exception as update_error:
+                print(f"AWAITING PAYMENT REMINDER MARK ERROR for {telegram_id}:", update_error)
+            log_customer_event(
+                telegram_id,
+                "awaiting_payment_reminder_failed",
+                {"reason": reason}
+            )
             print(f"AWAITING PAYMENT REMINDER ERROR for {telegram_id}:", e)
 
 
