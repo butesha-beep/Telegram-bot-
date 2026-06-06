@@ -2157,6 +2157,42 @@ async def client_detail(telegram_id: int):
             (telegram_id,),
         )
         activity_rows = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT event_type, created_at
+            FROM customer_events
+            WHERE telegram_id = %s
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (telegram_id,),
+        )
+        latest_funnel_event = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT event_type, created_at
+            FROM customer_events
+            WHERE telegram_id = %s
+            ORDER BY
+            CASE event_type
+                WHEN 'payment_reported' THEN 9
+                WHEN 'payment_method_selected' THEN 8
+                WHEN 'order_created' THEN 7
+                WHEN 'checkout_started' THEN 6
+                WHEN 'open_cart' THEN 5
+                WHEN 'add_to_cart' THEN 4
+                WHEN 'view_product' THEN 3
+                WHEN 'view_category' THEN 2
+                WHEN 'start' THEN 1
+                ELSE 0
+            END DESC,
+            created_at DESC,
+            id DESC
+            LIMIT 1
+            """,
+            (telegram_id,),
+        )
+        highest_funnel_event = cursor.fetchone()
         conn.close()
 
         client_id, username, first_name, phone, address, client_note = client
@@ -2231,6 +2267,24 @@ async def client_detail(telegram_id: int):
             "payment_method_selected": "Выбрал оплату",
             "payment_reported": "Сообщил об оплате",
         }
+        funnel_stage_labels = {
+            "start": "Только открыл бота",
+            "view_category": "Смотрел категории",
+            "view_product": "Смотрел товары",
+            "add_to_cart": "Добавил в корзину",
+            "open_cart": "Открыл корзину",
+            "checkout_started": "Начал оформление",
+            "order_created": "Создал заказ",
+            "payment_method_selected": "Выбрал оплату",
+            "payment_reported": "Сообщил об оплате",
+        }
+
+        def format_funnel_event(row):
+            if not row:
+                return None
+            event_type, created_at = row
+            label = funnel_stage_labels.get(str(event_type or ""), html.escape(str(event_type or "-")))
+            return f"{html.escape(str(label))} / {format_admin_datetime(created_at)}"
 
         def format_activity_metadata(metadata):
             if not isinstance(metadata, dict):
@@ -2271,6 +2325,18 @@ async def client_detail(telegram_id: int):
             </div>
             """
 
+        latest_funnel_text = format_funnel_event(latest_funnel_event)
+        highest_funnel_text = format_funnel_event(highest_funnel_event)
+        if latest_funnel_text or highest_funnel_text:
+            funnel_path_html = f"""
+            <div class="detail-grid">
+              <div class="detail-field"><strong>Последнее действие</strong>{latest_funnel_text or '-'}</div>
+              <div class="detail-field"><strong>Самый дальний этап</strong>{highest_funnel_text or '-'}</div>
+            </div>
+            """
+        else:
+            funnel_path_html = "<p>Пока нет данных по действиям клиента.</p>"
+
         content = f"""
         <p><a class="button button-link" href="/clients">Назад к клиентам</a></p>
         <section class="admin-card">
@@ -2310,6 +2376,10 @@ async def client_detail(telegram_id: int):
         <section class="admin-card dash-section">
           <h2>Любимые товары</h2>
           {favorite_products_html}
+        </section>
+        <section class="admin-card dash-section">
+          <h2>Путь клиента</h2>
+          {funnel_path_html}
         </section>
         <section class="admin-card dash-section">
           <h2>Активность клиента</h2>
