@@ -1317,9 +1317,25 @@ async def broadcasts():
             html_content += "<p>Рассылок пока нет.</p>"
         else:
             html_content += "<div class='dash-table-wrap'><table>"
-            html_content += "<tr><th>Дата</th><th>Статус</th><th>Текст</th><th>Получателей</th><th>Отправлено</th><th>Ожидает</th><th>Заблокировано</th><th>Ошибки</th></tr>"
-            for _, message_text, status, created_at, total_count, sent_count, pending_count, blocked_count, failed_count in rows:
+            html_content += "<tr><th>Дата</th><th>Статус</th><th>Текст</th><th>Получателей</th><th>Отправлено</th><th>Ожидает</th><th>Заблокировано</th><th>Ошибки</th><th>Действия</th></tr>"
+            for broadcast_id, message_text, status, created_at, total_count, sent_count, pending_count, blocked_count, failed_count in rows:
                 message_html = html.escape(str(message_text or "-")).replace("\n", "<br>")
+                pending_value = int(pending_count or 0)
+                action_html = ""
+                if pending_value > 0:
+                    button_label = ""
+                    if str(status or "") == "draft":
+                        button_label = "Отправить"
+                    elif str(status or "") == "sending":
+                        button_label = "Продолжить"
+                    elif str(status or "") == "failed":
+                        button_label = "Повторить"
+                    if button_label:
+                        action_html = (
+                            f'<form method="post" action="/broadcasts/{int(broadcast_id)}/send" style="display:inline; margin:0; padding:0;">'
+                            f'<button class="button secondary" type="submit">{button_label}</button>'
+                            '</form>'
+                        )
                 html_content += f"""
                 <tr>
                   <td>{format_admin_datetime(created_at)}</td>
@@ -1327,9 +1343,10 @@ async def broadcasts():
                   <td>{message_html}</td>
                   <td>{int(total_count or 0)}</td>
                   <td>{int(sent_count or 0)}</td>
-                  <td>{int(pending_count or 0)}</td>
+                  <td>{pending_value}</td>
                   <td>{int(blocked_count or 0)}</td>
                   <td>{int(failed_count or 0)}</td>
+                  <td>{action_html or '-'}</td>
                 </tr>
                 """
             html_content += "</table></div>"
@@ -1397,6 +1414,113 @@ async def create_broadcast(message_text: str = Form("")):
         return RedirectResponse("/broadcasts", status_code=303)
     except Exception as e:
         log_admin_error("/broadcasts/new", "create_broadcast", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.post("/broadcasts/{broadcast_id}/send", response_class=HTMLResponse)
+async def send_broadcast_route(broadcast_id: int):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, message_text, status
+            FROM broadcasts
+            WHERE id = %s
+            """,
+            (broadcast_id,),
+        )
+        broadcast = cursor.fetchone()
+        if not broadcast:
+            cursor.close()
+            conn.close()
+            return admin_error_page("Ошибка", "Рассылка не найдена.")
+
+        _, message_text, status = broadcast
+        if str(status or "") == "sent":
+            cursor.close()
+            conn.close()
+            return RedirectResponse("/broadcasts", status_code=303)
+
+        cursor.execute(
+            "UPDATE broadcasts SET status = 'sending', error_message = NULL WHERE id = %s",
+            (broadcast_id,),
+        )
+        cursor.execute(
+            """
+            SELECT id, telegram_id
+            FROM broadcast_recipients
+            WHERE broadcast_id = %s
+              AND status = 'pending'
+            ORDER BY id
+            LIMIT 20
+            """,
+            (broadcast_id,),
+        )
+        recipients = cursor.fetchall()
+
+        for recipient_id, telegram_id in recipients:
+            success, result_status = send_broadcast_message(telegram_id, message_text)
+            if success:
+                cursor.execute(
+                    """
+                    UPDATE broadcast_recipients
+                    SET status = 'sent',
+                        error_message = NULL,
+                        sent_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (recipient_id,),
+                )
+            elif result_status == "blocked":
+                cursor.execute(
+                    """
+                    UPDATE broadcast_recipients
+                    SET status = 'blocked',
+                        error_message = %s
+                    WHERE id = %s
+                    """,
+                    ("blocked", recipient_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE broadcast_recipients
+                    SET status = 'failed',
+                        error_message = %s
+                    WHERE id = %s
+                    """,
+                    ("failed", recipient_id),
+                )
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM broadcast_recipients
+            WHERE broadcast_id = %s
+              AND status = 'pending'
+            """,
+            (broadcast_id,),
+        )
+        remaining_pending = cursor.fetchone()[0]
+        if int(remaining_pending or 0) == 0:
+            cursor.execute(
+                """
+                UPDATE broadcasts
+                SET status = 'sent',
+                    sent_at = NOW(),
+                    error_message = NULL
+                WHERE id = %s
+                """,
+                (broadcast_id,),
+            )
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return RedirectResponse("/broadcasts", status_code=303)
+    except Exception as e:
+        log_admin_error("/broadcasts/{id}/send", "send_broadcast", e)
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
