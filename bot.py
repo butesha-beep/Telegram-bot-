@@ -509,6 +509,20 @@ def init_db():
         ON error_logs (created_at DESC)
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channel_posts (
+            id SERIAL PRIMARY KEY,
+            message_text TEXT NOT NULL,
+            status TEXT DEFAULT 'draft',
+            error_message TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            sent_at TIMESTAMPTZ
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_channel_posts_created_at
+        ON channel_posts (created_at DESC)
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
