@@ -71,6 +71,15 @@ def is_callback_locked(callback, cooldown=CALLBACK_COOLDOWN_SECONDS):
     return False
 
 
+def is_telegram_blocked_error(error):
+    error_text = str(error).lower()
+    return (
+        "403" in error_text
+        or "forbidden" in error_text
+        or "bot was blocked" in error_text
+    )
+
+
 def mark_cart_active(telegram_id):
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -132,7 +141,36 @@ async def send_abandoned_cart_reminders():
                 update_conn.commit()
             finally:
                 update_conn.close()
+            log_customer_event(
+                telegram_id,
+                "abandoned_cart_reminder_sent",
+                {}
+            )
         except Exception as e:
+            reason = "blocked" if is_telegram_blocked_error(e) else "failed"
+            try:
+                update_conn = psycopg2.connect(DATABASE_URL)
+                try:
+                    update_cursor = update_conn.cursor()
+                    update_cursor.execute(
+                        """
+                        UPDATE cart_items
+                        SET reminded_at = NOW()
+                        WHERE telegram_id = %s
+                          AND reminded_at IS NULL
+                        """,
+                        (telegram_id,)
+                    )
+                    update_conn.commit()
+                finally:
+                    update_conn.close()
+            except Exception as update_error:
+                print(f"ABANDONED CART REMINDER MARK ERROR for {telegram_id}:", update_error)
+            log_customer_event(
+                telegram_id,
+                "abandoned_cart_reminder_failed",
+                {"reason": reason}
+            )
             print(f"ABANDONED CART REMINDER ERROR for {telegram_id}:", e)
 
 
@@ -161,6 +199,11 @@ async def clear_expired_abandoned_carts():
                     (telegram_id,)
                 )
                 delete_conn.commit()
+                log_customer_event(
+                    telegram_id,
+                    "abandoned_cart_cleared",
+                    {"reason": "expired_after_reminder"}
+                )
             finally:
                 delete_conn.close()
         except Exception as e:
