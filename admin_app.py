@@ -15,9 +15,16 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 import psycopg2
 
+from db_schema import DATABASE_URL, get_db_connection, init_db
+
 app = FastAPI()
 ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_MAX_AGE = 86400
+
+
+@app.on_event("startup")
+async def startup_db_init():
+    init_db()
 
 PAGE_STYLE = """
 <style>
@@ -537,6 +544,19 @@ def admin_status_label(status):
     return labels.get(str(status or ""), str(status or "-"))
 
 
+def order_status_actions_for(status):
+    return {
+        "pending": [("cancelled", "Отмена")],
+        "awaiting_payment": [("cancelled", "Отмена")],
+        "payment_reported": [("paid", "Подтвердить оплату"), ("cancelled", "Отмена")],
+        "cash_on_delivery": [("preparing", "Готовится"), ("done", "Готово"), ("cancelled", "Отмена")],
+        "paid": [("preparing", "Готовится"), ("done", "Готово"), ("cancelled", "Отмена")],
+        "preparing": [("done", "Готово"), ("cancelled", "Отмена")],
+        "done": [],
+        "cancelled": [],
+    }.get(str(status or ""), [])
+
+
 def format_admin_datetime(value):
     if not value:
         return "—"
@@ -720,13 +740,6 @@ def send_order_status_notification(telegram_id, order_id, status):
         method="POST"
     )
     urllib.request.urlopen(request, timeout=5).read()
-
-
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
-
-
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
 
 
 def log_admin_error(route, action, error):
@@ -1389,28 +1402,9 @@ async def orders(status_filter: str = "all", q: str = ""):
         html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th><th>Действия</th></tr>"
         for row in rows:
             id_, order_id, username, phone, address, total, status, payment_method, created_at = row
-            status_labels = {
-                "paid": "Оплачен",
-                "preparing": "Готовится",
-                "done": "Готов",
-                "cancelled": "Отмена",
-            }
-            status_actions = {
-                "pending": ("paid", "preparing", "done", "cancelled"),
-                "awaiting_payment": ("paid", "preparing", "done", "cancelled"),
-                "payment_reported": ("paid", "preparing", "done", "cancelled"),
-                "cash_on_delivery": ("paid", "preparing", "done", "cancelled"),
-                "paid": ("preparing", "done", "cancelled"),
-                "preparing": ("done", "cancelled"),
-                "done": (),
-                "cancelled": (),
-            }
             actions = [f"<a class=\"button\" href=\"/orders/{order_id}\">Открыть</a>"]
             status_key = str(status or "")
-            for s in status_actions.get(status_key, ()):
-                button_label = status_labels[s]
-                if status_key == "payment_reported" and s == "paid":
-                    button_label = "Подтвердить оплату"
+            for s, button_label in order_status_actions_for(status_key):
                 actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{button_label}</button></form>")
             actions_html = f"<div class=\"action-group\">{' '.join(actions)}</div>"
             row_class = " class=\"attention-row\"" if status_key in {"pending", "awaiting_payment", "payment_reported", "cash_on_delivery"} else ""
@@ -1868,18 +1862,15 @@ async def order_detail(order_id: str):
         html += f"<div class='detail-field'><strong>Статус</strong>{admin_status_badge(status)}</div>"
         html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method or '-'}</div>"
         html += "</div></section>"
-        payment_actions = ""
-        if str(status or "") == "payment_reported":
-            payment_actions = f"""
-            <div class="form-actions">
-              <form method="post" action="/orders/{order_id}/status/paid" style="display:inline; margin:0; padding:0;">
-                <button class="button" type="submit">Подтвердить оплату</button>
-              </form>
-              <form method="post" action="/orders/{order_id}/status/cancelled" style="display:inline; margin:0; padding:0;">
-                <button class="button secondary" type="submit">Отменить заказ</button>
-              </form>
-            </div>
-            """
+        status_action_buttons = ""
+        for target_status, button_label in order_status_actions_for(status):
+            status_action_buttons += (
+                f'<form method="post" action="/orders/{order_id}/status/{target_status}" '
+                'style="display:inline; margin:0; padding:0;">'
+                f'<button class="button secondary" type="submit">{button_label}</button>'
+                '</form>'
+            )
+        payment_actions = f'<div class="form-actions">{status_action_buttons}</div>' if status_action_buttons else ""
         html += f"""
         <section class='admin-card dash-section'>
           <h2>Проверка оплаты</h2>

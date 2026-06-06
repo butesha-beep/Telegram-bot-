@@ -6,6 +6,7 @@ import sqlite3
 import psycopg2
 import os
 
+from db_schema import DATABASE_URL, get_db_connection, init_db
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -20,11 +21,6 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
-
-if not DATABASE_URL:
-    available_vars = [key for key in os.environ.keys() if "DATABASE" in key or key.startswith("PG")]
-    raise ValueError(f"DATABASE_URL is not set. Available DB vars: {available_vars}")
 pending_orders = {}
 MAX_CART_ITEM_QUANTITY = 10
 CALLBACK_COOLDOWN_SECONDS = 1.0
@@ -37,10 +33,6 @@ AWAITING_PAYMENT_REMINDER_MINUTES = 30
 AWAITING_PAYMENT_CANCEL_HOURS = 24
 UNPAID_ORDER_WORKER_SLEEP_SECONDS = 1800
 callback_locks = {}
-
-
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
 
 
 def log_customer_event(telegram_id, event_type, metadata=None):
@@ -402,239 +394,6 @@ def out_of_stock_keyboard(category_id=None):
         [contact_button],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]
     ])
-
-def init_db():
-    conn = psycopg2.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS clients (
-            id SERIAL PRIMARY KEY,
-            telegram_id BIGINT UNIQUE,
-            username TEXT,
-            first_name TEXT
-        )
-    """)
-    try:
-        cursor.execute(
-            "ALTER TABLE clients ADD COLUMN phone TEXT"
-        )
-    except:
-        conn.rollback()
-
-    try:
-        cursor.execute(
-            "ALTER TABLE clients ADD COLUMN address TEXT"
-        )
-    except:
-        conn.rollback()
-    cursor.execute("ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_note TEXT")
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cart_items (
-            id SERIAL PRIMARY KEY,
-            telegram_id BIGINT,
-            product_id INTEGER,
-            weight INTEGER
-        )
-    """)
-    cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS option_id INTEGER")
-    cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
-    cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
-    cursor.execute("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS customer_events (
-            id SERIAL PRIMARY KEY,
-            telegram_id BIGINT NOT NULL,
-            event_type TEXT NOT NULL,
-            metadata JSONB DEFAULT '{}'::jsonb,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_customer_events_telegram_created
-        ON customer_events (telegram_id, created_at DESC)
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_customer_events_type_created
-        ON customer_events (event_type, created_at DESC)
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id SERIAL PRIMARY KEY,
-            order_id BIGINT,
-            telegram_id BIGINT,
-            username TEXT,
-            phone TEXT,
-            address TEXT,
-            total REAL,
-            status TEXT
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS order_items (
-            id SERIAL PRIMARY KEY,
-            order_id BIGINT NOT NULL,
-            product_id INTEGER,
-            product_name TEXT,
-            weight INTEGER,
-            price REAL
-        )
-    """)
-    cursor.execute("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS option_id INTEGER")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS order_events (
-            id SERIAL PRIMARY KEY,
-            order_id BIGINT NOT NULL,
-            event_type TEXT NOT NULL,
-            event_text TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_order_events_order_id_created_at
-        ON order_events (order_id, created_at)
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS error_logs (
-            id SERIAL PRIMARY KEY,
-            route TEXT,
-            action TEXT,
-            error_message TEXT,
-            traceback TEXT,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_error_logs_created_at
-        ON error_logs (created_at DESC)
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS channel_posts (
-            id SERIAL PRIMARY KEY,
-            message_text TEXT NOT NULL,
-            status TEXT DEFAULT 'draft',
-            error_message TEXT,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            sent_at TIMESTAMPTZ
-        )
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_channel_posts_created_at
-        ON channel_posts (created_at DESC)
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS categories (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            sort_order INTEGER DEFAULT 0,
-            is_active BOOLEAN DEFAULT TRUE
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY,
-            category_id INTEGER REFERENCES categories(id),
-            name TEXT NOT NULL,
-            price_per_kg REAL NOT NULL,
-            description TEXT,
-            image_url TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            sort_order INTEGER DEFAULT 0
-        )
-    """)
-    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_grams INTEGER DEFAULT 0")
-    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_out_of_stock BOOLEAN DEFAULT FALSE")
-    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_threshold_grams INTEGER DEFAULT 500")
-    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_alert_sent BOOLEAN DEFAULT FALSE")
-    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_alert_sent_at TIMESTAMPTZ")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS product_options (
-            id SERIAL PRIMARY KEY,
-            product_id INTEGER REFERENCES products(id),
-            label TEXT NOT NULL,
-            weight INTEGER,
-            price REAL NOT NULL,
-            sort_order INTEGER DEFAULT 0,
-            is_active BOOLEAN DEFAULT TRUE
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS inventory_movements (
-            id SERIAL PRIMARY KEY,
-            product_id INTEGER NOT NULL REFERENCES products(id),
-            order_id BIGINT,
-            movement_type TEXT NOT NULL,
-            quantity_grams INTEGER NOT NULL,
-            stock_before INTEGER,
-            stock_after INTEGER,
-            note TEXT,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_inventory_movements_product_created
-        ON inventory_movements (product_id, created_at DESC)
-    """)
-    cursor.execute("""
-        INSERT INTO product_options (
-            product_id,
-            label,
-            weight,
-            price,
-            sort_order,
-            is_active
-        )
-        SELECT
-            p.id,
-            option_data.label,
-            option_data.weight,
-            p.price_per_kg * option_data.weight / 1000,
-            option_data.weight,
-            TRUE
-        FROM products p
-        CROSS JOIN (
-            VALUES
-                ('50 г', 50),
-                ('100 г', 100),
-                ('200 г', 200),
-                ('500 г', 500)
-        ) AS option_data(label, weight)
-        WHERE p.is_active = TRUE
-          AND NOT EXISTS (
-              SELECT 1
-              FROM product_options po
-              WHERE po.product_id = p.id
-          )
-    """)
-    try:
-        cursor.execute("ALTER TABLE orders ALTER COLUMN order_id TYPE BIGINT")
-        cursor.execute("ALTER TABLE orders ALTER COLUMN telegram_id TYPE BIGINT")
-        conn.commit()
-    except Exception as e:
-        print("ORDERS BIGINT MIGRATION ERROR:", e)
-        conn.rollback()
-
-    try:
-        cursor.execute(
-            "ALTER TABLE orders ADD COLUMN payment_method TEXT"
-        )
-    except:
-        conn.rollback()
-
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_selected_at TIMESTAMPTZ")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_reminded_at TIMESTAMPTZ")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_reported_at TIMESTAMPTZ")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_deducted BOOLEAN DEFAULT FALSE")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_deducted_at TIMESTAMPTZ")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_restored BOOLEAN DEFAULT FALSE")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_restored_at TIMESTAMPTZ")
-    cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_note TEXT")
-
-    conn.commit()
-    conn.close()
-
 
 def seed_products_from_json():
     categories = load_json("categories.json")
