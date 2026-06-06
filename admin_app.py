@@ -742,6 +742,32 @@ def send_order_status_notification(telegram_id, order_id, status):
     urllib.request.urlopen(request, timeout=5).read()
 
 
+def get_channel_chat_id():
+    return os.getenv("TELEGRAM_CHANNEL_ID")
+
+
+def send_channel_post(message_text):
+    try:
+        bot_token = os.getenv("BOT_TOKEN")
+        channel_chat_id = get_channel_chat_id()
+        if not bot_token or not channel_chat_id:
+            return False, "BOT_TOKEN or TELEGRAM_CHANNEL_ID is missing"
+
+        data = urllib.parse.urlencode({
+            "chat_id": channel_chat_id,
+            "text": message_text,
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            data=data,
+            method="POST"
+        )
+        urllib.request.urlopen(request, timeout=5).read()
+        return True, None
+    except Exception as error:
+        return False, str(error)
+
+
 def log_admin_error(route, action, error):
     try:
         tb = traceback.format_exc()
