@@ -64,6 +64,98 @@ Report:
 - preserved logic
 ```
 
+Note:
+After `python -m py_compile`, check `git status`. If tracked `__pycache__` files changed, restore those generated cache changes before final report unless the user explicitly asked to keep them.
+
+## DOCUMENTATION ONLY PATCH
+
+```text
+SURGICAL PATCH ONLY. DOCUMENTATION ONLY.
+
+EDIT ONLY:
+- <markdown files>
+
+STRICT RULES:
+- Do NOT touch Python files.
+- Do NOT touch config.json.
+- Do NOT touch products.json/categories.json.
+- Documentation only.
+
+Goal:
+<describe documentation update>
+
+Tasks:
+1. <task>
+2. <task>
+
+Validation:
+Run only git diff review.
+
+Report:
+- docs updated
+- key sections added
+- no code/config/catalog files modified
+```
+
+## VALIDATION ONLY
+
+```text
+VALIDATION ONLY. DO NOT MODIFY FILES.
+
+Goal:
+Validate current project state.
+
+Run:
+- <specific validation commands>
+
+Rules:
+- Do NOT modify source files.
+- If validation generates tracked __pycache__ changes, restore those generated cache files.
+- Report commands run and results.
+```
+
+## STRICT READ ONLY FILE AUDIT
+
+```text
+CHECK ONLY. DO NOT MODIFY FILES.
+
+STRICT READ ONLY FILE AUDIT.
+
+Analyze only:
+- <exact file list>
+
+Need report:
+1. Whether files exist.
+2. What each file currently contains/does.
+3. Missing or outdated information.
+4. Risks.
+5. Recommended changes, but do not implement them.
+
+Rules:
+- Do NOT modify files.
+- Do NOT create files.
+- Do NOT run formatting or validation commands that write files.
+- AUDIT ONLY.
+```
+
+## PYCOMPILE CACHE CLEANUP NOTE
+
+```text
+When running:
+
+python -m py_compile <file.py>
+
+Then check:
+
+git status --short
+
+If tracked __pycache__ files changed, restore only those generated artifacts:
+
+git restore -- __pycache__/<file>.pyc
+
+Do not restore source files unless the user explicitly asks.
+```
+
 ## NEW SHOP CLONE PLAN
 
 ```text

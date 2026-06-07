@@ -32,8 +32,10 @@ For EUR shops, keep:
 
 ```json
 "currency": "EUR",
-"currency_symbol": "€"
+"currency_symbol": "EUR"
 ```
+
+Use `EUR` in docs if the euro symbol displays incorrectly in the terminal. The app can still use the euro symbol in `config.json` when the file is valid UTF-8.
 
 ### products.json
 
@@ -95,6 +97,17 @@ Required env:
 - `ADMIN_ID`
 - `TELEGRAM_CHANNEL_ID`
 
+Copyable env block:
+
+```env
+BOT_TOKEN=
+DATABASE_URL=
+ADMIN_PASSWORD=
+ADMIN_SESSION_SECRET=
+ADMIN_ID=
+TELEGRAM_CHANNEL_ID=
+```
+
 ## Telegram Bot Setup
 
 1. Open BotFather.
@@ -133,13 +146,19 @@ Recommended:
 
 Why:
 
-- `admin_app.py` runs `init_db()` and creates schema.
-- `bot.py` runs `init_db()` and seeds products/categories from JSON.
-- Catalog seeding currently happens from bot startup.
+- Admin creates/validates schema through `db_schema.py`.
+- `admin_app.py` runs `init_db()` on startup.
+- Bot also runs `init_db()`.
+- Bot starts and seeds catalog from `products.json` and `categories.json`.
+- Catalog seeding currently happens from bot startup, not admin startup.
 
 ## Clean DB Launch
 
 Use a fresh PostgreSQL database for every new shop demo.
+
+New shop clones should use a new PostgreSQL DB.
+
+Do not reuse a real-client DB for tests, demos, or broadcasts.
 
 Do not reuse a DB from another shop unless you intentionally want old:
 
@@ -150,6 +169,99 @@ Do not reuse a DB from another shop unless you intentionally want old:
 - customer events
 - products
 - categories
+
+## Seed Behavior Warning
+
+Product/category JSON seeding upserts data.
+
+It does not automatically fully wipe old DB state. Old products, categories, clients, orders, carts, broadcasts, and events can remain if a database is reused.
+
+Current demo cleanup assumes:
+
+- product IDs `1` through `8`
+- category IDs `1` through `4`
+
+Changing those IDs may require code changes.
+
+## Payment Methods Warning
+
+IBAN, PayPal, and Cash are still fixed in code.
+
+Payment details are configurable in `config.json`, but the available payment methods are not fully configurable yet.
+
+## Image URL Warning
+
+Use direct image links.
+
+Good:
+
+- `https://example.com/product.jpg`
+- `https://example.com/product.png`
+- `https://example.com/product.webp`
+
+Avoid image page URLs such as generic gallery/share pages. They may not render as product photos in Telegram.
+
+## Clone Time Estimate
+
+- Developer clone today: 1-3 hours.
+- After settings/catalog cleanup: 30-45 minutes.
+- Later, after full white-label cleanup: 10-15 minutes.
+
+## Troubleshooting
+
+### BOT_TOKEN missing
+
+Symptom:
+
+- Bot service crashes with `BOT_TOKEN is not set`.
+
+Fix:
+
+- Set `BOT_TOKEN` in the bot service env.
+- If admin sends Telegram notifications/posts, set `BOT_TOKEN` in admin service env too.
+
+### DATABASE_URL missing
+
+Symptom:
+
+- Bot/admin crashes with `DATABASE_URL is not set`.
+
+Fix:
+
+- Attach PostgreSQL service.
+- Set `DATABASE_URL` or `DATABASE_PUBLIC_URL` in both bot and admin services.
+
+### Channel send fails
+
+Likely causes:
+
+- `TELEGRAM_CHANNEL_ID` is missing or wrong.
+- Bot is not admin in the channel.
+- Bot lacks permission to post.
+- `BOT_TOKEN` is missing in admin service.
+
+### Admin login env missing
+
+Symptom:
+
+- Admin auth may be disabled or login fails.
+
+Fix:
+
+- Set `ADMIN_PASSWORD`.
+- Set `ADMIN_SESSION_SECRET`.
+
+### Catalog not seeded
+
+Symptom:
+
+- Admin loads, but products/categories are missing.
+
+Fix:
+
+- Start/restart bot service.
+- Bot startup runs catalog seed from `products.json` and `categories.json`.
+- Confirm bot and admin use the same database URL.
 
 ## Test Checklist After Deployment
 

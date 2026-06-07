@@ -65,7 +65,7 @@ Main responsibilities:
 
 ### shop_settings.py
 
-Small shop settings layer.
+Small shop settings layer. This is Phase 1 only.
 
 Main responsibilities:
 
@@ -73,6 +73,8 @@ Main responsibilities:
 - Caches config values.
 - Exposes brand/payment/currency/support constants.
 - Currently used only partially by `admin_app.py`.
+- `bot.py` does not fully use `shop_settings.py` yet.
+- Currency and many business texts are still read directly from `config.json` or hardcoded.
 
 ## PostgreSQL Tables
 
@@ -110,6 +112,7 @@ Main responsibilities:
 - Admin error logging and `/logs`.
 - Channel posting UI.
 - Broadcast draft/send UI.
+- Broadcast V1 is manual/batch send: admin creates a draft, then uses Send/Continue.
 - Broadcast target segments.
 - Abandoned cart reminders hardened against retry loops.
 - Payment reminders hardened against retry loops.
@@ -119,8 +122,9 @@ Main responsibilities:
 ## Partially Completed Features
 
 - White-label settings: started, but bot/admin still have hardcoded currency and text.
+- `shop_settings.py` is not yet the single source of truth for bot text/payment/currency.
 - Clone readiness: workable for a developer, not yet non-developer friendly.
-- Broadcasts: V1 works, but no opt-out/consent management or advanced segmentation.
+- Broadcasts: V1 works with manual/batch Send/Continue, but no opt-out/consent management or advanced segmentation.
 - Channel posts: V1 text-only send/delete.
 - Error logs: route errors logged, but no resolve/delete/filter UI.
 - Images: catalog supports `image_url`, but no upload/storage workflow.
@@ -129,8 +133,8 @@ Main responsibilities:
 
 ## Known Risks
 
-- Hardcoded EUR/euro display remains in bot and parts of admin.
-- Payment methods are hardcoded.
+- Currency is still mostly EUR/euro and hardcoded in bot and parts of admin.
+- Payment methods are fixed in code: IBAN, PayPal, and Cash.
 - Delivery/minimum-order texts are hardcoded.
 - Demo catalog cleanup assumes product IDs 1-8 and category IDs 1-4.
 - No CSRF protection in admin forms.
