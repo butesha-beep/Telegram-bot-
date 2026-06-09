@@ -2702,6 +2702,61 @@ async def client_detail(telegram_id: int):
             (telegram_id,),
         )
         activity_rows = cursor.fetchall()
+        product_ids = set()
+        category_ids = set()
+        option_ids = set()
+        order_ids = set()
+
+        def collect_metadata_id(metadata, key, target):
+            if not isinstance(metadata, dict):
+                return
+            value = metadata.get(key)
+            try:
+                if value is not None:
+                    target.add(int(value))
+            except (TypeError, ValueError):
+                pass
+
+        for _, metadata, _ in activity_rows:
+            collect_metadata_id(metadata, "product_id", product_ids)
+            collect_metadata_id(metadata, "category_id", category_ids)
+            collect_metadata_id(metadata, "option_id", option_ids)
+            collect_metadata_id(metadata, "order_id", order_ids)
+
+        product_lookup = {}
+        category_lookup = {}
+        option_lookup = {}
+        order_lookup = set()
+
+        if product_ids:
+            cursor.execute(
+                "SELECT id, name FROM products WHERE id = ANY(%s)",
+                (list(product_ids),),
+            )
+            product_lookup = {row[0]: row[1] for row in cursor.fetchall()}
+        if category_ids:
+            cursor.execute(
+                "SELECT id, name FROM categories WHERE id = ANY(%s)",
+                (list(category_ids),),
+            )
+            category_lookup = {row[0]: row[1] for row in cursor.fetchall()}
+        if option_ids:
+            cursor.execute(
+                "SELECT id, label, weight FROM product_options WHERE id = ANY(%s)",
+                (list(option_ids),),
+            )
+            option_lookup = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+        if order_ids:
+            cursor.execute(
+                """
+                SELECT order_id
+                FROM orders
+                WHERE telegram_id = %s
+                  AND order_id = ANY(%s)
+                """,
+                (telegram_id, list(order_ids)),
+            )
+            order_lookup = {row[0] for row in cursor.fetchall()}
         cursor.execute(
             """
             SELECT event_type, created_at
@@ -2836,17 +2891,54 @@ async def client_detail(telegram_id: int):
                 return "-"
             details = []
             if metadata.get("order_id") is not None:
-                details.append(f"#{html.escape(str(metadata.get('order_id')))}")
+                order_id = metadata.get("order_id")
+                order_text = f"#{html.escape(str(order_id))}"
+                try:
+                    order_exists = int(order_id) in order_lookup
+                except (TypeError, ValueError):
+                    order_exists = False
+                if not order_exists:
+                    order_text = f"order_id: {html.escape(str(order_id))}"
+                details.append(f"Order: {order_text}")
             if metadata.get("product_id") is not None:
-                details.append(f"product_id: {html.escape(str(metadata.get('product_id')))}")
+                product_id = metadata.get("product_id")
+                try:
+                    product_name = product_lookup.get(int(product_id))
+                except (TypeError, ValueError):
+                    product_name = None
+                details.append(
+                    f"Product: {html.escape(str(product_name))}"
+                    if product_name else f"product_id: {html.escape(str(product_id))}"
+                )
             if metadata.get("category_id") is not None:
-                details.append(f"category_id: {html.escape(str(metadata.get('category_id')))}")
+                category_id = metadata.get("category_id")
+                try:
+                    category_name = category_lookup.get(int(category_id))
+                except (TypeError, ValueError):
+                    category_name = None
+                details.append(
+                    f"Category: {html.escape(str(category_name))}"
+                    if category_name else f"category_id: {html.escape(str(category_id))}"
+                )
             if metadata.get("payment_method") is not None:
-                details.append(html.escape(str(metadata.get("payment_method"))))
+                details.append(f"Payment: {html.escape(str(metadata.get('payment_method')))}")
             if metadata.get("option_id") is not None:
-                details.append(f"option_id: {html.escape(str(metadata.get('option_id')))}")
+                option_id = metadata.get("option_id")
+                try:
+                    option = option_lookup.get(int(option_id))
+                except (TypeError, ValueError):
+                    option = None
+                if option:
+                    option_label, option_weight = option
+                    option_text = option_label or (f"{option_weight} г" if option_weight else None)
+                    if option_text:
+                        details.append(f"Option: {html.escape(str(option_text))}")
+                    else:
+                        details.append(f"option_id: {html.escape(str(option_id))}")
+                else:
+                    details.append(f"option_id: {html.escape(str(option_id))}")
             if metadata.get("weight") is not None:
-                details.append(f"{html.escape(str(metadata.get('weight')))} г")
+                details.append(f"Option: {html.escape(str(metadata.get('weight')))} г")
             return ", ".join(details) if details else "-"
 
         activity_html = "<p>Пока нет активности.</p>"
