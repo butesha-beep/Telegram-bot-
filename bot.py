@@ -627,6 +627,19 @@ def cleanup_demo_catalog(cursor):
         """,
         (demo_product_ids,)
     )
+    cursor.execute(
+        """
+        UPDATE product_options po
+        SET price = p.price_per_kg * po.weight / 1000
+        FROM products p
+        WHERE po.product_id = p.id
+          AND p.id IN %s
+          AND po.weight IS NOT NULL
+          AND po.is_active = TRUE
+          AND p.is_active = TRUE
+        """,
+        (demo_product_ids,)
+    )
     print("Demo catalog cleanup completed.")
 
 
