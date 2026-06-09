@@ -484,6 +484,19 @@ def is_product_out_of_stock(product):
     return int(stock_grams or 0) <= 0
 
 
+def navigation_rows(back_callback=None):
+    rows = []
+    if back_callback:
+        rows.append([
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)
+        ])
+    rows.append([
+        InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_menu"),
+        InlineKeyboardButton(text="🛒 Корзина", callback_data="cart")
+    ])
+    return rows
+
+
 def out_of_stock_keyboard(category_id=None):
     config = load_json("config.json")
     support_username = str(config.get("support_username", "")).strip().lstrip("@")
@@ -497,7 +510,7 @@ def out_of_stock_keyboard(category_id=None):
     back_callback = f"category_{category_id}" if category_id else "back_to_menu"
     return InlineKeyboardMarkup(inline_keyboard=[
         [contact_button],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]
+        *navigation_rows(back_callback)
     ])
 
 def seed_products_from_json():
@@ -756,12 +769,7 @@ async def show_category(callback: types.CallbackQuery):
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton(
-            text="⬅️ Назад",
-            callback_data="back_to_menu"
-        )
-    ])
+    keyboard.extend(navigation_rows("back_to_menu"))
 
     await callback.message.answer(
         "Выберите товар:",
@@ -855,12 +863,7 @@ async def show_product(callback: types.CallbackQuery):
                 option_row = []
         if option_row:
             option_rows.append(option_row)
-        option_rows.append([
-            InlineKeyboardButton(
-                text="⬅️ Назад",
-                callback_data=f"category_{product['category_id']}"
-            )
-        ])
+        option_rows.extend(navigation_rows(f"category_{product['category_id']}"))
         keyboard = InlineKeyboardMarkup(inline_keyboard=option_rows)
     else:
         keyboard = InlineKeyboardMarkup(
@@ -885,12 +888,7 @@ async def show_product(callback: types.CallbackQuery):
                         callback_data=f"weight_{product_id}_500"
                     )
                 ],
-                [
-                    InlineKeyboardButton(
-                        text="⬅️ Назад",
-                        callback_data=f"category_{product['category_id']}"
-                    )
-                ]
+                *navigation_rows(f"category_{product['category_id']}")
             ]
         )
 
@@ -976,12 +974,7 @@ async def choose_option(callback: types.CallbackQuery):
                     callback_data=f"cart_add_option_{option_id}"
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data=f"product_{product_id}"
-                )
-            ]
+            *navigation_rows(f"product_{product_id}")
         ]
     )
 
@@ -1028,12 +1021,7 @@ async def choose_weight(callback: types.CallbackQuery):
     callback_data=f"cart_add_{product_id}_{weight}"
 )
             ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data=f"product_{product_id}"
-                )
-            ]
+            *navigation_rows(f"product_{product_id}")
         ]
     )
 
