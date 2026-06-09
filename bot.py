@@ -497,6 +497,26 @@ def navigation_rows(back_callback=None):
     return rows
 
 
+def is_valid_phone(value):
+    text = str(value or "").strip()
+    if not text:
+        return False
+    allowed_chars = set("0123456789 +()-")
+    if any(char not in allowed_chars for char in text):
+        return False
+    digit_count = sum(1 for char in text if char.isdigit())
+    return 7 <= digit_count <= 15
+
+
+def is_valid_address(value):
+    text = str(value or "").strip()
+    if not 8 <= len(text) <= 300:
+        return False
+    has_letter = any(char.isalpha() for char in text)
+    has_digit = any(char.isdigit() for char in text)
+    return has_letter and has_digit
+
+
 def out_of_stock_keyboard(category_id=None):
     config = load_json("config.json")
     support_username = str(config.get("support_username", "")).strip().lstrip("@")
@@ -1807,7 +1827,14 @@ async def handle_order_data(message: types.Message):
     step = pending_orders[user_id]["step"]
 
     if step == "phone":
-        pending_orders[user_id]["phone"] = message.text
+        phone = (message.text or "").strip()
+        if not is_valid_phone(phone):
+            await message.answer(
+                "Будь ласка, введіть коректний номер телефону. Приклад: +31 6 12345678"
+            )
+            return
+
+        pending_orders[user_id]["phone"] = phone
         pending_orders[user_id]["step"] = "address"
 
         await message.answer(
@@ -1816,7 +1843,14 @@ async def handle_order_data(message: types.Message):
         return
 
     if step == "address":
-        pending_orders[user_id]["address"] = message.text
+        address = (message.text or "").strip()
+        if not is_valid_address(address):
+            await message.answer(
+                "Будь ласка, введіть повну адресу доставки: вулиця, номер будинку, місто."
+            )
+            return
+
+        pending_orders[user_id]["address"] = address
 
         cart_items = pending_orders[user_id]["cart_items"]
         phone = pending_orders[user_id]["phone"]
