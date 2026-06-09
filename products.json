@@ -2,81 +2,10 @@
   {
     "id": 1,
     "category_id": 1,
-    "name": "Крильця копчені 🐔",
-    "description": "Копчені курячі крильця, ціна за 1 кг.",
-    "price_per_kg": 14,
-    "image_url": "https://ibb.co/XgTDrTh",
-    "sort_order": 1,
-    "is_active": true
-  },
-  {
-    "id": 2,
-    "category_id": 1,
-    "name": "Окорочка копчені 🐔",
-    "description": "Соковиті копчені окорочка, ціна за 1 кг.",
-    "price_per_kg": 14,
-    "image_url": "https://ibb.co/DPTXtV2L",
-    "sort_order": 2,
-    "is_active": true
-  },
-  {
-    "id": 3,
-    "category_id": 1,
-    "name": "Курочка копчена ціла 🐔",
-    "description": "Домашня копчена курочка ціла, ціна за 1 кг.",
-    "price_per_kg": 20,
-    "image_url": "https://ibb.co/pjVwyw9Z",
-    "sort_order": 3,
-    "is_active": true
-  },
-  {
-    "id": 4,
-    "category_id": 1,
-    "name": "Філешка копчена 🐔",
-    "description": "Ніжна копчена куряча філешка, ціна за 1 кг.",
-    "price_per_kg": 23,
-    "image_url": "",
-    "sort_order": 4,
-    "is_active": true
-  },
-  {
-    "id": 5,
-    "category_id": 2,
-    "name": "Реберця копчені 🐷",
-    "description": "Ароматні копчені реберця, ціна за 1 кг.",
-    "price_per_kg": 20,
-    "image_url": "",
-    "sort_order": 1,
-    "is_active": true
-  },
-  {
-    "id": 6,
-    "category_id": 2,
-    "name": "Грудинка копчена 🐷",
-    "description": "Домашня копчена грудинка, ціна за 1 кг.",
-    "price_per_kg": 20,
-    "image_url": "",
-    "sort_order": 2,
-    "is_active": true
-  },
-  {
-    "id": 7,
-    "category_id": 3,
-    "name": "Краківська ковбаса 🐷🐮",
-    "description": "Класична домашня краківська ковбаса, ціна за 1 кг.",
-    "price_per_kg": 25,
-    "image_url": "",
-    "sort_order": 1,
-    "is_active": true
-  },
-  {
-    "id": 8,
-    "category_id": 4,
-    "name": "Лосось гарячого копчення 🦈",
-    "description": "Лосось гарячого копчення, ціна за 1 кг.",
-    "price_per_kg": 33,
-    "image_url": "https://ibb.co/MyXQLpvr",
-    "sort_order": 1,
-    "is_active": true
+    "name": "Янтарная с перцем",
+    "price_per_kg": 35,
+    "photo": "https://ibb.co/S4HdV0J7",
+    "description": "Рыбная закуска с перцем",
+    "available": true
   }
 ]
