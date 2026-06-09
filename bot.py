@@ -1676,8 +1676,9 @@ async def start(message: types.Message):
     config = load_json("config.json")
 
     await message.answer(
-        f"👋 Добро пожаловать в {config['brand_name']}!\n\n"
-        f"Выберите категорию товара ниже:",
+        f"👋 Вітаємо в {config['brand_name']}!\n\n"
+        "Домашні копченості, ковбаси, рибка та смаколики до столу — усе з душею та для своїх.\n\n"
+        "Оберіть категорію нижче 👇",
         reply_markup=main_menu()
     )
 
