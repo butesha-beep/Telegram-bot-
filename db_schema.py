@@ -244,6 +244,10 @@ def init_db():
         )
     """)
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_master_shop_snapshots_shop_seen
+        ON master_shop_snapshots (shop_key, last_seen_at DESC, id DESC)
+    """)
+    cursor.execute("""
         INSERT INTO product_options (
             product_id,
             label,

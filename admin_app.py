@@ -1018,6 +1018,59 @@ def seed_default_master_shop(cursor):
         )
 
 
+def create_current_master_snapshot(cursor):
+    cursor.execute(
+        """
+        SELECT
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN created_at::date = CURRENT_DATE THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status IN ('pending', 'awaiting_payment', 'payment_reported', 'cash_on_delivery') THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'done' AND date_trunc('month', created_at) = date_trunc('month', NOW()) THEN total ELSE 0 END), 0)
+        FROM orders
+        """
+    )
+    total_orders, today_orders, pending_orders, month_revenue = cursor.fetchone()
+    cursor.execute("SELECT COUNT(*) FROM clients")
+    total_clients = cursor.fetchone()[0]
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM products
+        WHERE
+            is_active = TRUE
+            AND is_out_of_stock = FALSE
+            AND low_stock_threshold_grams > 0
+            AND stock_grams > 0
+            AND stock_grams <= low_stock_threshold_grams
+        """
+    )
+    low_stock_count = cursor.fetchone()[0]
+    cursor.execute(
+        """
+        INSERT INTO master_shop_snapshots (
+            shop_key,
+            total_orders,
+            today_orders,
+            pending_orders,
+            month_revenue,
+            low_stock_count,
+            total_clients,
+            last_seen_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        """,
+        (
+            "current",
+            total_orders,
+            today_orders,
+            pending_orders,
+            month_revenue,
+            low_stock_count,
+            total_clients,
+        ),
+    )
+
+
 def master_snapshot_value(value):
     if value is None:
         return "-"
@@ -1058,57 +1111,43 @@ def master_shop_rows(rows):
             last_seen_at,
         ) = row
         shop_key_text = html.escape(str(shop_key or ""))
-        admin_link = "-"
+        admin_link = "<span>-</span>"
         if admin_url:
             safe_admin_url = html.escape(str(admin_url), quote=True)
-            admin_link = f'<a href="{safe_admin_url}">Open</a>'
-        landing_link = "-"
+            admin_link = f'<a class="button button-link" href="{safe_admin_url}">Open admin</a>'
+        landing_link = "<span>-</span>"
         if landing_url:
             safe_landing_url = html.escape(str(landing_url), quote=True)
-            landing_link = f'<a href="{safe_landing_url}">Open</a>'
+            landing_link = f'<a class="button button-link secondary" href="{safe_landing_url}">Open landing</a>'
         rendered += f"""
-        <tr>
-          <td><a class="view-link" href="/master/shops/{urllib.parse.quote(str(shop_key or ''))}">{shop_key_text}</a></td>
-          <td>{html.escape(str(brand_name or '-'))}</td>
-          <td>{html.escape(str(status or '-'))}</td>
-          <td>{html.escape(str(bot_username or '-'))}</td>
-          <td>{admin_link}</td>
-          <td>{landing_link}</td>
-          <td>{master_snapshot_value(total_orders)}</td>
-          <td>{master_snapshot_value(today_orders)}</td>
-          <td>{master_snapshot_value(pending_orders)}</td>
-          <td>{master_money_value(month_revenue)}</td>
-          <td>{master_snapshot_value(low_stock_count)}</td>
-          <td>{master_snapshot_value(total_clients)}</td>
-          <td>{master_snapshot_value(last_seen_at)}</td>
-          <td>{html.escape(str(notes or '-'))}</td>
-        </tr>
+        <article class="dash-card">
+          <strong><a class="view-link" href="/master/shops/{urllib.parse.quote(str(shop_key or ''), safe='')}">{html.escape(str(brand_name or '-'))}</a></strong>
+          <span>Shop key: {shop_key_text}</span><br>
+          <span>Status: {html.escape(str(status or '-'))}</span><br>
+          <span>Bot: {html.escape(str(bot_username or '-'))}</span>
+          <div class="detail-grid" style="margin-top: 16px;">
+            <div><span>Total orders</span><strong>{master_snapshot_value(total_orders)}</strong></div>
+            <div><span>Today</span><strong>{master_snapshot_value(today_orders)}</strong></div>
+            <div><span>Pending</span><strong>{master_snapshot_value(pending_orders)}</strong></div>
+            <div><span>Month revenue</span><strong>{master_money_value(month_revenue)}</strong></div>
+            <div><span>Low stock</span><strong>{master_snapshot_value(low_stock_count)}</strong></div>
+            <div><span>Clients</span><strong>{master_snapshot_value(total_clients)}</strong></div>
+          </div>
+          <p>Last seen: {master_snapshot_value(last_seen_at)}</p>
+          <p>{html.escape(str(notes or '-'))}</p>
+          <div class="form-actions">
+            {admin_link}
+            {landing_link}
+          </div>
+        </article>
         """
 
     return f"""
     <section class="admin-card">
       <h1>Master Dashboard</h1>
       <p>Read-only overview of registered shop deployments.</p>
-      <div class="dash-table-wrap">
-        <table>
-          <tr>
-            <th>Shop</th>
-            <th>Brand</th>
-            <th>Status</th>
-            <th>Bot</th>
-            <th>Admin</th>
-            <th>Landing</th>
-            <th>Total orders</th>
-            <th>Today</th>
-            <th>Pending</th>
-            <th>Month revenue</th>
-            <th>Low stock</th>
-            <th>Clients</th>
-            <th>Last seen</th>
-            <th>Notes</th>
-          </tr>
-          {rendered}
-        </table>
+      <div class="dash-grid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));">
+        {rendered}
       </div>
     </section>
     """
@@ -1120,6 +1159,7 @@ async def master_dashboard():
         conn = get_db_connection()
         cursor = conn.cursor()
         seed_default_master_shop(cursor)
+        create_current_master_snapshot(cursor)
         conn.commit()
         cursor.execute(
             """
