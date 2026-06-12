@@ -1001,20 +1001,75 @@ def log_admin_error(route, action, error):
 
 
 def seed_default_master_shop(cursor):
-    cursor.execute("SELECT COUNT(*) FROM master_shops")
-    if cursor.fetchone()[0] == 0:
+    seed_rows = [
+        (
+            "current",
+            ADMIN_PANEL_TITLE or "Current Shop",
+            None,
+            None,
+            None,
+            None,
+            "live",
+            "Current local shop deployment",
+        ),
+        (
+            "deal-market-nl",
+            "Deal Market NL",
+            "https://admin-production-1523.up.railway.app",
+            "DealMarketNL_bot",
+            None,
+            None,
+            "live",
+            "Main live Telegram shop project.",
+        ),
+        (
+            "koptilnya-demo",
+            "Koptilnya Demo",
+            None,
+            "zakaz_koptim_bot",
+            "https://t.me/zakaz_koptim_bot",
+            None,
+            "demo",
+            "Demo Telegram shop for smoked products.",
+        ),
+        (
+            "angelinix-automation",
+            "Angelinix Automation",
+            None,
+            None,
+            None,
+            "https://butesha-beep.github.io/AngelinixAutomation/",
+            "draft",
+            "Landing/demo funnel for automation services.",
+        ),
+        (
+            "irpin-installers",
+            "Irpin Installers",
+            None,
+            None,
+            None,
+            None,
+            "draft",
+            "Demo landing project for installer/repair services.",
+        ),
+    ]
+    for row in seed_rows:
         cursor.execute(
             """
-            INSERT INTO master_shops (shop_key, brand_name, status, notes)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO master_shops (
+                shop_key,
+                brand_name,
+                admin_url,
+                bot_username,
+                bot_url,
+                landing_url,
+                status,
+                notes
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (shop_key) DO NOTHING
             """,
-            (
-                "current",
-                ADMIN_PANEL_TITLE or "Current Shop",
-                "live",
-                "Current local shop deployment",
-            ),
+            row,
         )
 
 
@@ -1083,6 +1138,21 @@ def master_money_value(value):
     return f"{CURRENCY_SYMBOL}{float(value):.2f}"
 
 
+def master_project_status_badge(status):
+    status_key = str(status or "").strip().lower()
+    labels = {
+        "live": ("Live", "success"),
+        "demo": ("Demo", "info"),
+        "paused": ("Paused", "warning"),
+        "draft": ("Draft", "neutral"),
+        "error": ("Error", "danger"),
+    }
+    if status_key not in labels:
+        return html.escape(str(status or "-"))
+    label, status_class = labels[status_key]
+    return f"<span class='status {status_class}'>{label}</span>"
+
+
 def master_shop_rows(rows):
     if not rows:
         return """
@@ -1099,6 +1169,7 @@ def master_shop_rows(rows):
             brand_name,
             admin_url,
             bot_username,
+            bot_url,
             landing_url,
             status,
             notes,
@@ -1115,16 +1186,21 @@ def master_shop_rows(rows):
         if admin_url:
             safe_admin_url = html.escape(str(admin_url), quote=True)
             admin_link = f'<a class="button button-link" href="{safe_admin_url}">Open admin</a>'
+        bot_link = ""
+        if bot_url:
+            safe_bot_url = html.escape(str(bot_url), quote=True)
+            bot_link = f'<a class="button button-link secondary" href="{safe_bot_url}">Open bot</a>'
         landing_link = "<span>-</span>"
         if landing_url:
             safe_landing_url = html.escape(str(landing_url), quote=True)
             landing_link = f'<a class="button button-link secondary" href="{safe_landing_url}">Open landing</a>'
+        bot_username_text = html.escape(str(bot_username or "-"))
         rendered += f"""
         <article class="dash-card">
           <strong><a class="view-link" href="/master/shops/{urllib.parse.quote(str(shop_key or ''), safe='')}">{html.escape(str(brand_name or '-'))}</a></strong>
           <span>Shop key: {shop_key_text}</span><br>
-          <span>Status: {html.escape(str(status or '-'))}</span><br>
-          <span>Bot: {html.escape(str(bot_username or '-'))}</span>
+          <span>Status: {master_project_status_badge(status)}</span><br>
+          <span>Bot username: {bot_username_text}</span>
           <div class="detail-grid" style="margin-top: 16px;">
             <div><span>Total orders</span><strong>{master_snapshot_value(total_orders)}</strong></div>
             <div><span>Today</span><strong>{master_snapshot_value(today_orders)}</strong></div>
@@ -1136,6 +1212,7 @@ def master_shop_rows(rows):
           <p>Last seen: {master_snapshot_value(last_seen_at)}</p>
           <p>{html.escape(str(notes or '-'))}</p>
           <div class="form-actions">
+            {bot_link}
             {admin_link}
             {landing_link}
           </div>
@@ -1168,6 +1245,7 @@ async def master_dashboard():
                 s.brand_name,
                 s.admin_url,
                 s.bot_username,
+                s.bot_url,
                 s.landing_url,
                 s.status,
                 s.notes,
@@ -1212,6 +1290,7 @@ async def master_shop_detail(shop_key: str):
                 s.brand_name,
                 s.admin_url,
                 s.bot_username,
+                s.bot_url,
                 s.landing_url,
                 s.status,
                 s.notes,
@@ -1245,6 +1324,7 @@ async def master_shop_detail(shop_key: str):
             brand_name,
             admin_url,
             bot_username,
+            bot_url,
             landing_url,
             status,
             notes,
@@ -1260,6 +1340,10 @@ async def master_shop_detail(shop_key: str):
         if admin_url:
             safe_admin_url = html.escape(str(admin_url), quote=True)
             admin_link = f'<a href="{safe_admin_url}">{safe_admin_url}</a>'
+        bot_link = html.escape(str(bot_url or "-"))
+        if bot_url:
+            safe_bot_url = html.escape(str(bot_url), quote=True)
+            bot_link = f'<a href="{safe_bot_url}">{safe_bot_url}</a>'
         landing_link = html.escape(str(landing_url or "-"))
         if landing_url:
             safe_landing_url = html.escape(str(landing_url), quote=True)
@@ -1270,8 +1354,9 @@ async def master_shop_detail(shop_key: str):
           <h1>{html.escape(str(brand_name or shop_key_value or 'Shop'))}</h1>
           <div class="detail-grid">
             <div class="detail-field"><strong>Shop key</strong>{html.escape(str(shop_key_value or '-'))}</div>
-            <div class="detail-field"><strong>Status</strong>{html.escape(str(status or '-'))}</div>
+            <div class="detail-field"><strong>Status</strong>{master_project_status_badge(status)}</div>
             <div class="detail-field"><strong>Bot username</strong>{html.escape(str(bot_username or '-'))}</div>
+            <div class="detail-field"><strong>Bot URL</strong>{bot_link}</div>
             <div class="detail-field"><strong>Admin URL</strong>{admin_link}</div>
             <div class="detail-field"><strong>Landing URL</strong>{landing_link}</div>
             <div class="detail-field"><strong>Notes</strong>{html.escape(str(notes or '-'))}</div>

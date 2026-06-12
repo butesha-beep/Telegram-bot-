@@ -223,6 +223,7 @@ def init_db():
             brand_name TEXT NOT NULL,
             admin_url TEXT,
             bot_username TEXT,
+            bot_url TEXT,
             landing_url TEXT,
             status TEXT DEFAULT 'demo',
             notes TEXT,
@@ -230,6 +231,7 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("ALTER TABLE master_shops ADD COLUMN IF NOT EXISTS bot_url TEXT")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS master_shop_snapshots (
             id SERIAL PRIMARY KEY,
