@@ -217,6 +217,33 @@ def init_db():
         ON inventory_movements (product_id, created_at DESC)
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS master_shops (
+            id SERIAL PRIMARY KEY,
+            shop_key TEXT UNIQUE NOT NULL,
+            brand_name TEXT NOT NULL,
+            admin_url TEXT,
+            bot_username TEXT,
+            landing_url TEXT,
+            status TEXT DEFAULT 'demo',
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS master_shop_snapshots (
+            id SERIAL PRIMARY KEY,
+            shop_key TEXT NOT NULL,
+            total_orders INTEGER DEFAULT 0,
+            today_orders INTEGER DEFAULT 0,
+            pending_orders INTEGER DEFAULT 0,
+            month_revenue NUMERIC DEFAULT 0,
+            low_stock_count INTEGER DEFAULT 0,
+            total_clients INTEGER DEFAULT 0,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
         INSERT INTO product_options (
             product_id,
             label,
