@@ -21,6 +21,8 @@ from shop_settings import ADMIN_PANEL_TITLE, CURRENCY_SYMBOL
 app = FastAPI()
 ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_MAX_AGE = 86400
+MASTER_SESSION_COOKIE = "master_session"
+MASTER_SESSION_MAX_AGE = 86400
 
 
 @app.on_event("startup")
@@ -403,14 +405,71 @@ def admin_error_page(title, message):
     return admin_layout(title, content)
 
 
+def master_layout(title, content, refresh_seconds=None):
+    refresh_meta = ""
+    if refresh_seconds:
+        refresh_meta = f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {refresh_meta}
+  <title>{html.escape(str(title))}</title>
+  {admin_css()}
+</head>
+<body>
+  <div class="admin-shell">
+    <header class="admin-topbar">
+      <nav class="admin-nav">
+        <a class="admin-brand" href="/master">Master Admin</a>
+        <div class="admin-links">
+          <a href="/master">Shops</a>
+          <a href="/master/logout">Logout</a>
+        </div>
+      </nav>
+    </header>
+    <main class="admin-container">{content}</main>
+  </div>
+</body>
+</html>"""
+
+
+def master_error_page(title, message):
+    content = f"""
+    <section class="admin-card">
+      <h1>{html.escape(str(title))}</h1>
+      <p>{html.escape(str(message))}</p>
+      <p><a class="button button-link" href="/master">Back to Master Dashboard</a></p>
+    </section>
+    """
+    return master_layout(title, content)
+
+
 def admin_auth_configured():
     return bool(os.getenv("ADMIN_PASSWORD") and os.getenv("ADMIN_SESSION_SECRET"))
+
+
+def master_auth_configured():
+    return bool(os.getenv("MASTER_ADMIN_PASSWORD") and os.getenv("MASTER_ADMIN_SESSION_SECRET"))
 
 
 def sign_admin_session():
     secret = os.getenv("ADMIN_SESSION_SECRET", "")
     expires_at = int(time.time()) + ADMIN_SESSION_MAX_AGE
     payload = f"admin:{expires_at}:{secrets.token_urlsafe(16)}"
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    return f"{payload}:{signature}"
+
+
+def sign_master_session():
+    secret = os.getenv("MASTER_ADMIN_SESSION_SECRET", "")
+    expires_at = int(time.time()) + MASTER_SESSION_MAX_AGE
+    payload = f"master:{expires_at}:{secrets.token_urlsafe(16)}"
     signature = hmac.new(
         secret.encode("utf-8"),
         payload.encode("utf-8"),
@@ -440,8 +499,33 @@ def verify_admin_session(value):
         return False
 
 
+def verify_master_session(value):
+    if not value or not master_auth_configured():
+        return False
+    secret = os.getenv("MASTER_ADMIN_SESSION_SECRET", "")
+    try:
+        payload, signature = value.rsplit(":", 1)
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return False
+        parts = payload.split(":")
+        if len(parts) < 3 or parts[0] != "master":
+            return False
+        return int(parts[1]) >= int(time.time())
+    except Exception:
+        return False
+
+
 def is_admin_authenticated(request):
     return verify_admin_session(request.cookies.get(ADMIN_SESSION_COOKIE))
+
+
+def is_master_authenticated(request):
+    return verify_master_session(request.cookies.get(MASTER_SESSION_COOKIE))
 
 
 def login_page(message=""):
@@ -473,8 +557,45 @@ def login_page(message=""):
 </html>"""
 
 
+def master_login_page(message=""):
+    message_html = f"<p>{html.escape(message)}</p>" if message else ""
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Master Login</title>
+  {admin_css()}
+</head>
+<body>
+  <main class="admin-container">
+    <section class="admin-card" style="max-width: 420px; margin: 8vh auto 0;">
+      <h1>Master Admin Login</h1>
+      {message_html}
+      <form class="admin-form" method="post" action="/master/login">
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <div class="form-actions">
+          <button type="submit">Log in</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
 @app.middleware("http")
 async def require_admin_login(request: Request, call_next):
+    if request.url.path.startswith("/master"):
+        public_master_paths = {"/master/login", "/master/health"}
+        if request.url.path in public_master_paths:
+            return await call_next(request)
+        if is_master_authenticated(request):
+            return await call_next(request)
+        return RedirectResponse("/master/login", status_code=303)
+
     public_paths = {"/login", "/health"}
     if request.url.path in public_paths:
         return await call_next(request)
@@ -514,6 +635,40 @@ async def login(password: str = Form(...)):
 async def logout():
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(ADMIN_SESSION_COOKIE)
+    return response
+
+
+@app.get("/master/login", response_class=HTMLResponse)
+async def master_login_form():
+    if not master_auth_configured():
+        return master_login_page("Master admin auth is not configured.")
+    return master_login_page()
+
+
+@app.post("/master/login", response_class=HTMLResponse)
+async def master_login(password: str = Form(...)):
+    master_password = os.getenv("MASTER_ADMIN_PASSWORD", "")
+    if not master_auth_configured():
+        return master_login_page("Master admin auth is not configured.")
+    if not secrets.compare_digest(password, master_password):
+        return master_login_page("Invalid password.")
+
+    response = RedirectResponse("/master", status_code=303)
+    response.set_cookie(
+        MASTER_SESSION_COOKIE,
+        sign_master_session(),
+        max_age=MASTER_SESSION_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/master/logout")
+async def master_logout():
+    response = RedirectResponse("/master/login", status_code=303)
+    response.delete_cookie(MASTER_SESSION_COOKIE)
     return response
 
 
@@ -843,6 +998,262 @@ def log_admin_error(route, action, error):
         conn.close()
     except Exception as log_error:
         print(f"Failed to write admin error log: {log_error}")
+
+
+def seed_default_master_shop(cursor):
+    cursor.execute("SELECT COUNT(*) FROM master_shops")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute(
+            """
+            INSERT INTO master_shops (shop_key, brand_name, status, notes)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (shop_key) DO NOTHING
+            """,
+            (
+                "current",
+                ADMIN_PANEL_TITLE or "Current Shop",
+                "live",
+                "Current local shop deployment",
+            ),
+        )
+
+
+def master_snapshot_value(value):
+    if value is None:
+        return "-"
+    return html.escape(str(value))
+
+
+def master_money_value(value):
+    if value is None:
+        return "-"
+    return f"{CURRENCY_SYMBOL}{float(value):.2f}"
+
+
+def master_shop_rows(rows):
+    if not rows:
+        return """
+        <section class="admin-card">
+          <h1>Master Dashboard</h1>
+          <p>No shops are registered yet.</p>
+        </section>
+        """
+
+    rendered = ""
+    for row in rows:
+        (
+            shop_key,
+            brand_name,
+            admin_url,
+            bot_username,
+            landing_url,
+            status,
+            notes,
+            total_orders,
+            today_orders,
+            pending_orders,
+            month_revenue,
+            low_stock_count,
+            total_clients,
+            last_seen_at,
+        ) = row
+        shop_key_text = html.escape(str(shop_key or ""))
+        admin_link = "-"
+        if admin_url:
+            safe_admin_url = html.escape(str(admin_url), quote=True)
+            admin_link = f'<a href="{safe_admin_url}">Open</a>'
+        landing_link = "-"
+        if landing_url:
+            safe_landing_url = html.escape(str(landing_url), quote=True)
+            landing_link = f'<a href="{safe_landing_url}">Open</a>'
+        rendered += f"""
+        <tr>
+          <td><a class="view-link" href="/master/shops/{urllib.parse.quote(str(shop_key or ''))}">{shop_key_text}</a></td>
+          <td>{html.escape(str(brand_name or '-'))}</td>
+          <td>{html.escape(str(status or '-'))}</td>
+          <td>{html.escape(str(bot_username or '-'))}</td>
+          <td>{admin_link}</td>
+          <td>{landing_link}</td>
+          <td>{master_snapshot_value(total_orders)}</td>
+          <td>{master_snapshot_value(today_orders)}</td>
+          <td>{master_snapshot_value(pending_orders)}</td>
+          <td>{master_money_value(month_revenue)}</td>
+          <td>{master_snapshot_value(low_stock_count)}</td>
+          <td>{master_snapshot_value(total_clients)}</td>
+          <td>{master_snapshot_value(last_seen_at)}</td>
+          <td>{html.escape(str(notes or '-'))}</td>
+        </tr>
+        """
+
+    return f"""
+    <section class="admin-card">
+      <h1>Master Dashboard</h1>
+      <p>Read-only overview of registered shop deployments.</p>
+      <div class="dash-table-wrap">
+        <table>
+          <tr>
+            <th>Shop</th>
+            <th>Brand</th>
+            <th>Status</th>
+            <th>Bot</th>
+            <th>Admin</th>
+            <th>Landing</th>
+            <th>Total orders</th>
+            <th>Today</th>
+            <th>Pending</th>
+            <th>Month revenue</th>
+            <th>Low stock</th>
+            <th>Clients</th>
+            <th>Last seen</th>
+            <th>Notes</th>
+          </tr>
+          {rendered}
+        </table>
+      </div>
+    </section>
+    """
+
+
+@app.get("/master", response_class=HTMLResponse)
+async def master_dashboard():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        seed_default_master_shop(cursor)
+        conn.commit()
+        cursor.execute(
+            """
+            SELECT
+                s.shop_key,
+                s.brand_name,
+                s.admin_url,
+                s.bot_username,
+                s.landing_url,
+                s.status,
+                s.notes,
+                snap.total_orders,
+                snap.today_orders,
+                snap.pending_orders,
+                snap.month_revenue,
+                snap.low_stock_count,
+                snap.total_clients,
+                snap.last_seen_at
+            FROM master_shops s
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM master_shop_snapshots mss
+                WHERE mss.shop_key = s.shop_key
+                ORDER BY mss.last_seen_at DESC, mss.id DESC
+                LIMIT 1
+            ) snap ON TRUE
+            ORDER BY s.brand_name ASC, s.shop_key ASC
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return master_layout("Master Dashboard", master_shop_rows(rows))
+    except Exception as e:
+        log_admin_error("/master", "master_dashboard", e)
+        return master_error_page("Error", "Could not load Master Dashboard.")
+
+
+@app.get("/master/shops/{shop_key}", response_class=HTMLResponse)
+async def master_shop_detail(shop_key: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        seed_default_master_shop(cursor)
+        conn.commit()
+        cursor.execute(
+            """
+            SELECT
+                s.shop_key,
+                s.brand_name,
+                s.admin_url,
+                s.bot_username,
+                s.landing_url,
+                s.status,
+                s.notes,
+                snap.total_orders,
+                snap.today_orders,
+                snap.pending_orders,
+                snap.month_revenue,
+                snap.low_stock_count,
+                snap.total_clients,
+                snap.last_seen_at
+            FROM master_shops s
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM master_shop_snapshots mss
+                WHERE mss.shop_key = s.shop_key
+                ORDER BY mss.last_seen_at DESC, mss.id DESC
+                LIMIT 1
+            ) snap ON TRUE
+            WHERE s.shop_key = %s
+            """,
+            (shop_key,),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if not row:
+            return master_error_page("Shop not found", "This shop is not registered in Master Admin.")
+
+        (
+            shop_key_value,
+            brand_name,
+            admin_url,
+            bot_username,
+            landing_url,
+            status,
+            notes,
+            total_orders,
+            today_orders,
+            pending_orders,
+            month_revenue,
+            low_stock_count,
+            total_clients,
+            last_seen_at,
+        ) = row
+        admin_link = html.escape(str(admin_url or "-"))
+        if admin_url:
+            safe_admin_url = html.escape(str(admin_url), quote=True)
+            admin_link = f'<a href="{safe_admin_url}">{safe_admin_url}</a>'
+        landing_link = html.escape(str(landing_url or "-"))
+        if landing_url:
+            safe_landing_url = html.escape(str(landing_url), quote=True)
+            landing_link = f'<a href="{safe_landing_url}">{safe_landing_url}</a>'
+
+        content = f"""
+        <section class="admin-card">
+          <h1>{html.escape(str(brand_name or shop_key_value or 'Shop'))}</h1>
+          <div class="detail-grid">
+            <div class="detail-field"><strong>Shop key</strong>{html.escape(str(shop_key_value or '-'))}</div>
+            <div class="detail-field"><strong>Status</strong>{html.escape(str(status or '-'))}</div>
+            <div class="detail-field"><strong>Bot username</strong>{html.escape(str(bot_username or '-'))}</div>
+            <div class="detail-field"><strong>Admin URL</strong>{admin_link}</div>
+            <div class="detail-field"><strong>Landing URL</strong>{landing_link}</div>
+            <div class="detail-field"><strong>Notes</strong>{html.escape(str(notes or '-'))}</div>
+          </div>
+        </section>
+        <section class="admin-card dash-section">
+          <h2>Latest Snapshot</h2>
+          <div class="dash-grid">
+            <div class="dash-card"><span>Total orders</span><strong class="stat-value">{master_snapshot_value(total_orders)}</strong></div>
+            <div class="dash-card"><span>Today orders</span><strong class="stat-value">{master_snapshot_value(today_orders)}</strong></div>
+            <div class="dash-card"><span>Pending orders</span><strong class="stat-value">{master_snapshot_value(pending_orders)}</strong></div>
+            <div class="dash-card"><span>Month revenue</span><strong class="stat-value">{master_money_value(month_revenue)}</strong></div>
+            <div class="dash-card"><span>Low stock</span><strong class="stat-value">{master_snapshot_value(low_stock_count)}</strong></div>
+            <div class="dash-card"><span>Total clients</span><strong class="stat-value">{master_snapshot_value(total_clients)}</strong></div>
+            <div class="dash-card"><span>Last seen</span><strong class="stat-value">{master_snapshot_value(last_seen_at)}</strong></div>
+          </div>
+        </section>
+        """
+        return master_layout(f"Master Shop: {brand_name or shop_key_value}", content)
+    except Exception as e:
+        log_admin_error("/master/shops/{shop_key}", "master_shop_detail", e)
+        return master_error_page("Error", "Could not load shop details.")
 
 
 @app.get("/", response_class=HTMLResponse)
