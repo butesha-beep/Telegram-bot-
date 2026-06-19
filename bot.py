@@ -707,9 +707,22 @@ DEAL_MARKET_SUPPORT_MESSAGE = (
 
 
 EMPTY_CART_MESSAGE = (
-    "🛒 Ваша корзина пока пуста.\n\n"
-    "Добавьте товары из каталога и возвращайтесь для оформления заказа."
+    "🛒 Корзина пока пустая\n\n"
+    "🍻 Не уходите с пустыми руками!\n\n"
+    "В каталоге уже ждут:\n\n"
+    "🐟 Рыбные деликатесы\n"
+    "🥩 Мясные снеки\n"
+    "🔥 Копчёная рыба\n"
+    "🎁 Подарочные наборы\n\n"
+    "🚚 Доставка по Нидерландам и странам ЕС."
 )
+
+
+def empty_cart_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛍 Открыть каталог", callback_data="back_to_menu")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_menu")],
+    ])
 
 
 PAYMENT_PLACEHOLDER_VALUES = {
@@ -1458,7 +1471,8 @@ async def show_cart(callback: types.CallbackQuery):
 
     if not cart_items:
         await callback.message.answer(
-            EMPTY_CART_MESSAGE
+            EMPTY_CART_MESSAGE,
+            reply_markup=empty_cart_keyboard()
         )
         await callback.answer()
         return
@@ -2102,7 +2116,10 @@ async def checkout(callback: types.CallbackQuery):
     conn.close()
 
     if not cart_items:
-        await callback.message.answer(EMPTY_CART_MESSAGE)
+        await callback.message.answer(
+            EMPTY_CART_MESSAGE,
+            reply_markup=empty_cart_keyboard()
+        )
         await callback.answer()
         return
 
