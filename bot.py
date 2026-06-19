@@ -2539,8 +2539,10 @@ async def pay_cash(callback: types.CallbackQuery):
         user_text = f"ID: {callback.from_user.id}"
 
     await callback.message.answer(
-        "💵 Вы выбрали оплату наличными при получении.\n\n"
-        "Продавец свяжется с вами для подтверждения заказа."
+        "💵 Оплата наличными\n\n"
+        "Заказ принят в обработку.\n\n"
+        "📦 Наш менеджер свяжется с вами для подтверждения заказа, уточнения адреса и времени доставки.\n\n"
+        "Благодарим за выбор Deal Market NL."
     )
 
     await bot.send_message(
