@@ -666,10 +666,24 @@ DEAL_MARKET_CATEGORY_LABELS = {
 
 
 DEAL_MARKET_CATEGORY_INTROS = {
-    1: "🐟 Рыбные снеки\n\nПодборка популярных рыбных деликатесов и закусок.",
+    1: (
+        "🐟 Рыбные снеки\n\n"
+        "Любимые рыбные закуски к пиву и для уютного вечера.\n\n"
+        "🔥 Насыщенный вкус\n"
+        "📦 Удобные порции\n"
+        "🚚 Доставка по Нидерландам и ЕС\n\n"
+        "Выберите товар ниже:"
+    ),
     2: "🥩 Мясные снеки\n\nМясные закуски ручного приготовления для настоящих ценителей.",
     3: "🔥 Копчёная рыба\n\nТрадиционное копчение и насыщенный вкус.",
     4: "🎁 Подарочные наборы\n\nГотовые наборы для подарка, отдыха и дружеских встреч.",
+}
+
+
+DEAL_MARKET_PRODUCT_BUTTON_LABELS = {
+    "Янтарная с перцем": "🌶 Янтарная с перцем",
+    "Тунец сушёный": "🐟 Тунец сушёный",
+    "Кальмар кольца": "🦑 Кальмар кольца",
 }
 
 
@@ -837,14 +851,14 @@ async def show_category(callback: types.CallbackQuery):
     for product in category_products:
         keyboard.append([
             InlineKeyboardButton(
-                text=product["name"],
+                text=DEAL_MARKET_PRODUCT_BUTTON_LABELS.get(product["name"], product["name"]),
                 callback_data=f"product_{product['id']}"
             )
         ])
 
     keyboard.append([
         InlineKeyboardButton(
-            text="⬅️ Назад",
+            text="⬅️ Вернуться назад",
             callback_data="back_to_menu"
         )
     ])
