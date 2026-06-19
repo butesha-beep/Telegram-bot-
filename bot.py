@@ -662,6 +662,39 @@ DEAL_MARKET_CATEGORY_LABELS = {
 }
 
 
+DEAL_MARKET_CATEGORY_INTROS = {
+    1: "🐟 Рыбные снеки\n\nПодборка популярных рыбных деликатесов и закусок.",
+    2: "🥩 Мясные снеки\n\nМясные закуски ручного приготовления для настоящих ценителей.",
+    3: "🔥 Копчёная рыба\n\nТрадиционное копчение и насыщенный вкус.",
+    4: "🎁 Подарочные наборы\n\nГотовые наборы для подарка, отдыха и дружеских встреч.",
+}
+
+
+DEAL_MARKET_WELCOME_MESSAGE = (
+    "👋 Добро пожаловать в Deal Market NL\n\n"
+    "🛒 Рыбные и мясные снеки ручного отбора\n\n"
+    "🔥 Популярные закуски к пиву\n"
+    "🐟 Рыбные деликатесы\n"
+    "🥩 Мясные снеки\n"
+    "🎁 Подарочные наборы\n\n"
+    "🚚 Доставка по Нидерландам и странам ЕС\n\n"
+    "Выберите категорию ниже и оформите заказ прямо в Telegram."
+)
+
+
+DEAL_MARKET_SUPPORT_MESSAGE = (
+    "💬 Поддержка Deal Market NL\n\n"
+    "Если у вас возник вопрос по заказу, доставке или ассортименту — напишите нам.\n\n"
+    "Мы постараемся ответить максимально быстро."
+)
+
+
+EMPTY_CART_MESSAGE = (
+    "🛒 Ваша корзина пока пуста.\n\n"
+    "Добавьте товары из каталога и возвращайтесь для оформления заказа."
+)
+
+
 def main_menu():
     categories = []
 
@@ -759,7 +792,7 @@ async def show_category(callback: types.CallbackQuery):
     ])
 
     await callback.message.answer(
-        "Выберите товар:",
+        DEAL_MARKET_CATEGORY_INTROS.get(category_id, "Выберите товар:"),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=keyboard
         )
@@ -1315,10 +1348,8 @@ async def create_order(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "support")
 async def support(callback: types.CallbackQuery):
 
-    config = load_json("config.json")
-
     await callback.message.answer(
-        f"🛟 Поддержка: {config['support_username']}"
+        DEAL_MARKET_SUPPORT_MESSAGE
     )
 
     await callback.answer()
@@ -1351,7 +1382,7 @@ async def show_cart(callback: types.CallbackQuery):
 
     if not cart_items:
         await callback.message.answer(
-            "🛒 Корзина пустая."
+            EMPTY_CART_MESSAGE
         )
         await callback.answer()
         return
@@ -1681,18 +1712,8 @@ async def start(message: types.Message):
     save_client(message.from_user)
     log_customer_event(message.from_user.id, "start", {})
     
-    config = load_json("config.json")
-
     await message.answer(
-        f"👋 Добро пожаловать в {config['brand_name']}\n\n"
-        "🛒 Онлайн-магазин в Telegram\n\n"
-        "✅ Каталог товаров\n"
-        "✅ Автоматические заказы\n"
-        "✅ Корзина\n"
-        "✅ Напоминания клиентам\n"
-        "✅ Статусы заказов\n"
-        "✅ Поддержка клиентов\n\n"
-        "Выберите категорию ниже:",
+        DEAL_MARKET_WELCOME_MESSAGE,
         reply_markup=main_menu()
     )
 
@@ -2005,7 +2026,7 @@ async def checkout(callback: types.CallbackQuery):
     conn.close()
 
     if not cart_items:
-        await callback.message.answer("🛒 Корзина пустая.")
+        await callback.message.answer(EMPTY_CART_MESSAGE)
         await callback.answer()
         return
 
