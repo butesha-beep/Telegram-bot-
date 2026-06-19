@@ -707,7 +707,7 @@ def order_status_actions_for(status):
         "pending": [("cancelled", "Отмена")],
         "awaiting_payment": [("cancelled", "Отмена")],
         "payment_reported": [("paid", "Подтвердить оплату"), ("cancelled", "Отмена")],
-        "cash_on_delivery": [("preparing", "Готовится"), ("done", "Готово"), ("cancelled", "Отмена")],
+        "cash_on_delivery": [("paid", "Оплачено наличными"), ("cancelled", "Отмена")],
         "paid": [("preparing", "Готовится"), ("done", "Готово"), ("cancelled", "Отмена")],
         "preparing": [("done", "Готово"), ("cancelled", "Отмена")],
         "done": [],
@@ -2492,13 +2492,19 @@ async def orders(status_filter: str = "all", q: str = ""):
         html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th><th>Действия</th></tr>"
         for row in rows:
             id_, order_id, username, phone, address, total, status, payment_method, created_at = row
-            actions = [f"<a class=\"button\" href=\"/orders/{order_id}\">Открыть</a>"]
+            order_id_text = escape(str(order_id), quote=True)
+            order_id_path = urllib.parse.quote(str(order_id), safe="")
+            username_text = escape(str(username or "-"), quote=True)
+            phone_text = escape(str(phone or "-"), quote=True)
+            address_text = escape(str(address or "-"), quote=True)
+            payment_method_text = escape(str(payment_method or "-"), quote=True)
+            actions = [f"<a class=\"button\" href=\"/orders/{order_id_path}\">Открыть</a>"]
             status_key = str(status or "")
             for s, button_label in order_status_actions_for(status_key):
-                actions.append(f"<form method=\"post\" action=\"/orders/{order_id}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{button_label}</button></form>")
+                actions.append(f"<form method=\"post\" action=\"/orders/{order_id_path}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{button_label}</button></form>")
             actions_html = f"<div class=\"action-group\">{' '.join(actions)}</div>"
             row_class = " class=\"attention-row\"" if status_key in {"pending", "awaiting_payment", "payment_reported", "cash_on_delivery"} else ""
-            html += f"<tr{row_class}><td>{id_}</td><td>{order_id}</td><td>{username or '-'}</td><td>{phone or '-'}</td><td>{address or '-'}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method or '-'}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
+            html += f"<tr{row_class}><td>{id_}</td><td>{order_id_text}</td><td>{username_text}</td><td>{phone_text}</td><td>{address_text}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method_text}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("📦 Заказы", html, refresh_seconds=60)
     except Exception as e:
@@ -2630,7 +2636,7 @@ async def update_order_status(order_id: str, status: str):
             "pending": {"paid", "preparing", "done", "cancelled"},
             "awaiting_payment": {"paid", "preparing", "done", "cancelled"},
             "payment_reported": {"paid", "preparing", "done", "cancelled"},
-            "cash_on_delivery": {"paid", "preparing", "done", "cancelled"},
+            "cash_on_delivery": {"paid", "cancelled"},
             "paid": {"preparing", "done", "cancelled"},
             "preparing": {"done", "cancelled"},
             "done": set(),
@@ -2944,18 +2950,25 @@ async def order_detail(order_id: str):
         order_events = cursor.fetchall()
         conn.close()
 
-        html = f"<section class='admin-card'><h1>Заказ {order_id}</h1><div class='detail-grid'>"
-        html += f"<div class='detail-field'><strong>№ заказа</strong>{order_id}</div>"
-        html += f"<div class='detail-field'><strong>Клиент</strong>{username or '-'}</div>"
-        html += f"<div class='detail-field'><strong>Телефон</strong>{phone or '-'}</div>"
-        html += f"<div class='detail-field'><strong>Адрес</strong>{address or '-'}</div>"
+        order_id_text = escape(str(order_id), quote=True)
+        order_id_path = urllib.parse.quote(str(order_id), safe="")
+        username_text = escape(str(username or "-"), quote=True)
+        phone_text = escape(str(phone or "-"), quote=True)
+        address_text = escape(str(address or "-"), quote=True)
+        payment_method_text = escape(str(payment_method or "-"), quote=True)
+
+        html = f"<section class='admin-card'><h1>Заказ {order_id_text}</h1><div class='detail-grid'>"
+        html += f"<div class='detail-field'><strong>№ заказа</strong>{order_id_text}</div>"
+        html += f"<div class='detail-field'><strong>Клиент</strong>{username_text}</div>"
+        html += f"<div class='detail-field'><strong>Телефон</strong>{phone_text}</div>"
+        html += f"<div class='detail-field'><strong>Адрес</strong>{address_text}</div>"
         html += f"<div class='detail-field'><strong>Статус</strong>{admin_status_badge(status)}</div>"
-        html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method or '-'}</div>"
+        html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method_text}</div>"
         html += "</div></section>"
         status_action_buttons = ""
         for target_status, button_label in order_status_actions_for(status):
             status_action_buttons += (
-                f'<form method="post" action="/orders/{order_id}/status/{target_status}" '
+                f'<form method="post" action="/orders/{order_id_path}/status/{target_status}" '
                 'style="display:inline; margin:0; padding:0;">'
                 f'<button class="button secondary" type="submit">{button_label}</button>'
                 '</form>'
@@ -2965,7 +2978,7 @@ async def order_detail(order_id: str):
         <section class='admin-card dash-section'>
           <h2>Проверка оплаты</h2>
           <div class='detail-grid'>
-            <div class='detail-field'><strong>Способ оплаты</strong>{escape(str(payment_method or "-"), quote=True)}</div>
+            <div class='detail-field'><strong>Способ оплаты</strong>{payment_method_text}</div>
             <div class='detail-field'><strong>Оплата выбрана</strong>{format_admin_datetime(payment_selected_at)}</div>
             <div class='detail-field'><strong>Клиент сообщил об оплате</strong>{format_admin_datetime(payment_reported_at)}</div>
             <div class='detail-field'><strong>Текущий статус</strong>{admin_status_badge(status)}</div>
@@ -2976,7 +2989,7 @@ async def order_detail(order_id: str):
         html += f"""
         <section class='admin-card dash-section'>
           <h2>Заметка администратора</h2>
-          <form class="admin-form" method="post" action="/orders/{order_id}/note">
+          <form class="admin-form" method="post" action="/orders/{order_id_path}/note">
             <label>Заметка
               <textarea name="order_note" rows="4">{escape(str(order_note or ""), quote=True)}</textarea>
               <small>Видно только в админке.</small>
@@ -3047,7 +3060,9 @@ async def order_detail(order_id: str):
             html += "<tr><th>Товар</th><th>Вариант / вес</th><th>Итого</th></tr>"
             for product_name, weight, price, option_label in items:
                 item_label = option_label if option_label else f"{weight} г"
-                html += f"<tr><td>{product_name}</td><td>{item_label}</td><td>{price:.2f} €</td></tr>"
+                product_name_text = escape(str(product_name or "-"), quote=True)
+                item_label_text = escape(str(item_label or "-"), quote=True)
+                html += f"<tr><td>{product_name_text}</td><td>{item_label_text}</td><td>{price:.2f} €</td></tr>"
             html += "</table></div>"
             html += f"<p><strong>Итого: {total:.2f} €</strong></p></section>"
         else:

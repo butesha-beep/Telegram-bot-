@@ -223,7 +223,7 @@ async def abandoned_cart_worker():
 
 def unpaid_order_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧾 Открыть заказы / оплату", callback_data="cart")]
+        [InlineKeyboardButton(text="🧾 Открыть заказ / оплату", callback_data="resume_payment")]
     ])
 
 
@@ -478,6 +478,8 @@ OUT_OF_STOCK_TEXT = (
 def is_product_out_of_stock(product):
     if product.get("is_out_of_stock"):
         return True
+    if os.getenv("ENFORCE_STOCK") != "1":
+        return False
     stock_grams = product.get("stock_grams")
     if stock_grams is None:
         return False
@@ -560,7 +562,8 @@ def seed_products_from_json():
             )
         )
 
-    cleanup_demo_catalog(cursor)
+    if os.getenv("ENABLE_DEMO_CATALOG_CLEANUP") == "1":
+        cleanup_demo_catalog(cursor)
     conn.commit()
     conn.close()
 
@@ -693,6 +696,61 @@ EMPTY_CART_MESSAGE = (
     "🛒 Ваша корзина пока пуста.\n\n"
     "Добавьте товары из каталога и возвращайтесь для оформления заказа."
 )
+
+
+PAYMENT_PLACEHOLDER_VALUES = {
+    "nl00bank0000000000",
+    "your@email.com",
+    "todo",
+    "tbd",
+    "test",
+    "fake",
+    "placeholder",
+}
+
+
+def is_valid_live_value(value):
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return False
+    normalized = cleaned.lower()
+    if normalized in PAYMENT_PLACEHOLDER_VALUES:
+        return False
+    return not any(marker in normalized for marker in ("todo", "example", "fake"))
+
+
+def get_live_config_value(config, key, env_name):
+    value = os.getenv(env_name) or config.get(key, "")
+    value = str(value or "").strip()
+    return value if is_valid_live_value(value) else ""
+
+
+def get_payment_details(config=None):
+    config = config or load_json("config.json")
+    return {
+        "iban": get_live_config_value(config, "iban", "SHOP_IBAN"),
+        "receiver_name": get_live_config_value(config, "receiver_name", "SHOP_RECEIVER_NAME"),
+        "paypal": get_live_config_value(config, "paypal", "SHOP_PAYPAL"),
+    }
+
+
+def support_link_from_config(config=None):
+    config = config or load_json("config.json")
+    raw_support = str(config.get("support_username", "")).strip()
+    if not raw_support:
+        return ""
+    if raw_support.startswith(("http://", "https://")):
+        return raw_support
+    if raw_support.startswith("t.me/"):
+        return f"https://{raw_support}"
+    return f"https://t.me/{raw_support.lstrip('@')}"
+
+
+def support_message():
+    link = support_link_from_config()
+    if not link:
+        return DEAL_MARKET_SUPPORT_MESSAGE
+    return f"{DEAL_MARKET_SUPPORT_MESSAGE}\n\nНаписать нам: {link}"
 
 
 def main_menu():
@@ -1349,7 +1407,7 @@ async def create_order(callback: types.CallbackQuery):
 async def support(callback: types.CallbackQuery):
 
     await callback.message.answer(
-        DEAL_MARKET_SUPPORT_MESSAGE
+        support_message()
     )
 
     await callback.answer()
@@ -2099,6 +2157,44 @@ async def checkout(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "resume_payment")
+async def resume_payment(callback: types.CallbackQuery):
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT order_id, total, status
+        FROM orders
+        WHERE telegram_id = %s
+          AND status IN ('pending', 'awaiting_payment')
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (callback.from_user.id,)
+    )
+    order_row = cursor.fetchone()
+    conn.close()
+
+    if not order_row:
+        await callback.message.answer(
+            "Активный заказ для оплаты не найден.\n\n"
+            "Если нужна помощь, напишите нам.",
+            reply_markup=main_menu()
+        )
+        await callback.answer()
+        return
+
+    order_id, total, status = order_row
+    status_text = "ожидает выбора оплаты" if status == "pending" else "ожидает оплаты"
+    await callback.message.answer(
+        f"🧾 Заказ #{order_id} {status_text}.\n\n"
+        f"Сумма: {float(total or 0):.2f} €\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=payment_menu()
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "use_saved_data")
 async def use_saved_data(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -2244,6 +2340,18 @@ async def enter_new_data(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "pay_iban")
 async def pay_iban(callback: types.CallbackQuery):
     config = load_json("config.json")
+    payment_details = get_payment_details(config)
+    iban = payment_details["iban"]
+    receiver_name = payment_details["receiver_name"]
+    if not iban or not receiver_name:
+        await callback.message.answer(
+            "🏦 Оплата IBAN сейчас недоступна.\n\n"
+            "Выберите другой способ оплаты или напишите в поддержку.",
+            reply_markup=payment_menu()
+        )
+        await callback.answer()
+        return
+
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
@@ -2298,8 +2406,8 @@ async def pay_iban(callback: types.CallbackQuery):
 
     await callback.message.answer(
         f"🏦 Оплата банковским переводом / IBAN\n\n"
-        f"IBAN: {config['iban']}\n"
-        f"Получатель: {config['receiver_name']}\n\n"
+        f"IBAN: {iban}\n"
+        f"Получатель: {receiver_name}\n\n"
         f"В назначении платежа обязательно укажите номер заказа: #{order_id}.\n"
         f"После оплаты нажмите «Я оплатил», чтобы мы проверили платёж.",
         reply_markup=paid_keyboard
@@ -2311,6 +2419,17 @@ async def pay_iban(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "pay_paypal")
 async def pay_paypal(callback: types.CallbackQuery):
     config = load_json("config.json")
+    payment_details = get_payment_details(config)
+    paypal = payment_details["paypal"]
+    if not paypal:
+        await callback.message.answer(
+            "🅿️ Оплата PayPal сейчас недоступна.\n\n"
+            "Выберите другой способ оплаты или напишите в поддержку.",
+            reply_markup=payment_menu()
+        )
+        await callback.answer()
+        return
+
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
@@ -2365,7 +2484,7 @@ async def pay_paypal(callback: types.CallbackQuery):
 
     await callback.message.answer(
         f"💬 Оплата через PayPal\n\n"
-        f"PayPal: {config['paypal']}\n\n"
+        f"PayPal: {paypal}\n\n"
         f"В комментарии к платежу обязательно укажите номер заказа: #{order_id}.\n"
         f"После оплаты нажмите «Я оплатил», чтобы мы проверили платёж.",
         reply_markup=paid_keyboard
@@ -2401,6 +2520,10 @@ async def pay_cash(callback: types.CallbackQuery):
 
     conn.commit()
     conn.close()
+    if not order_row:
+        await callback.answer("Заказ не найден.", show_alert=True)
+        return
+
     if order_row:
         log_customer_event(
             callback.from_user.id,
@@ -2440,34 +2563,35 @@ async def back_to_menu(callback: types.CallbackQuery):
     await callback.answer()
 
 def payment_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🏦 Оплата IBAN",
-                    callback_data="pay_iban"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💵 Оплата наличными",
-                    callback_data="pay_cash"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🅿️ PayPal",
-                    callback_data="pay_paypal"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🏠 Главное меню",
-                    callback_data="back_to_menu"
-                )
-            ]
-        ]
-    )
+    payment_details = get_payment_details()
+    keyboard = []
+    if payment_details["iban"] and payment_details["receiver_name"]:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="🏦 Оплата IBAN",
+                callback_data="pay_iban"
+            )
+        ])
+    keyboard.append([
+        InlineKeyboardButton(
+            text="💵 Оплата наличными",
+            callback_data="pay_cash"
+        )
+    ])
+    if payment_details["paypal"]:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="🅿️ PayPal",
+                callback_data="pay_paypal"
+            )
+        ])
+    keyboard.append([
+        InlineKeyboardButton(
+            text="🏠 Главное меню",
+            callback_data="back_to_menu"
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 @dp.callback_query(F.data.startswith("payment_done_"))
 async def payment_done_for_order(callback: types.CallbackQuery):
     raw_order_id = callback.data.replace("payment_done_", "", 1)
