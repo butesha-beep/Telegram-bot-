@@ -654,6 +654,14 @@ def save_client(user):
     conn.close()
 
 
+DEAL_MARKET_CATEGORY_LABELS = {
+    1: "🐟 Рыбные снеки",
+    2: "🥩 Мясные снеки",
+    3: "🔥 Копчёная рыба",
+    4: "🎁 Подарочные наборы",
+}
+
+
 def main_menu():
     categories = []
 
@@ -685,14 +693,14 @@ def main_menu():
     for category in categories:
         keyboard.append([
             InlineKeyboardButton(
-                text=category["name"],
+                text=DEAL_MARKET_CATEGORY_LABELS.get(category["id"], category["name"]),
                 callback_data=f"category_{category['id']}"
             )
         ])
 
     keyboard.append([
         InlineKeyboardButton(
-            text="⚽️ Поддержка",
+            text="💬 Поддержка",
             callback_data="support"
         )
     ])
@@ -1676,8 +1684,15 @@ async def start(message: types.Message):
     config = load_json("config.json")
 
     await message.answer(
-        f"👋 Добро пожаловать в {config['brand_name']}!\n\n"
-        f"Выберите категорию товара ниже:",
+        f"👋 Добро пожаловать в {config['brand_name']}\n\n"
+        "🛒 Онлайн-магазин в Telegram\n\n"
+        "✅ Каталог товаров\n"
+        "✅ Автоматические заказы\n"
+        "✅ Корзина\n"
+        "✅ Напоминания клиентам\n"
+        "✅ Статусы заказов\n"
+        "✅ Поддержка клиентов\n\n"
+        "Выберите категорию ниже:",
         reply_markup=main_menu()
     )
 
@@ -2397,7 +2412,7 @@ async def pay_cash(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
     await callback.message.answer(
-        "Выберите категорию товара ниже:",
+        "Выберите категорию ниже:",
         reply_markup=main_menu()
     )
 
