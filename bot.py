@@ -669,7 +669,9 @@ DEAL_MARKET_CATEGORY_INTROS = {
     1: (
         "🐟 Рыбные снеки\n\n"
         "🌊 Подборка популярных рыбных деликатесов и закусок.\n\n"
-        "Идеально к пиву, фильму или вечернему отдыху.\n\n"
+        "🍺 Отлично подходят к пиву\n"
+        "🐟 Натуральный вкус\n"
+        "⭐️ Проверенные хиты продаж\n\n"
         "👇 Выберите товар ниже:"
     ),
     2: (
@@ -684,13 +686,17 @@ DEAL_MARKET_CATEGORY_INTROS = {
     3: (
         "🔥 Копчёная рыба\n\n"
         "Традиционное копчение и насыщенный вкус.\n\n"
-        "Отборная рыба, приготовленная с вниманием к каждой детали.\n\n"
+        "🐟 Отборная рыба\n"
+        "🔥 Аромат натурального копчения\n"
+        "🍺 Отличный выбор к пиву\n\n"
         "👇 Выберите товар ниже:"
     ),
     4: (
         "🎁 Подарочные наборы\n\n"
         "Готовые наборы для подарка, отдыха или праздничного стола.\n\n"
-        "Красиво оформлено и готово к вручению.\n\n"
+        "🎉 Для друзей и близких\n"
+        "🍺 Для компании\n"
+        "🎁 Уже готово к вручению\n\n"
         "👇 Выберите подходящий вариант:"
     ),
 }
@@ -700,6 +706,14 @@ DEAL_MARKET_PRODUCT_BUTTON_LABELS = {
     "Янтарная с перцем": "🌶 Янтарная с перцем",
     "Тунец сушёный": "🐟 Тунец сушёный",
     "Кальмар кольца": "🦑 Кальмар кольца",
+}
+
+
+DEAL_MARKET_PRODUCT_CARD_ICONS = {
+    1: "🐟",
+    2: "🥩",
+    3: "🔥",
+    4: "🎁",
 }
 
 
@@ -925,12 +939,17 @@ async def show_product(callback: types.CallbackQuery):
     )
 
     price_100g = product["price_per_kg"] / 10
+    product_icon = DEAL_MARKET_PRODUCT_CARD_ICONS.get(
+        product.get("category_id"),
+        "🛒"
+    )
 
     text = (
-        f"🛒 {product['name']}\n\n"
+        f"{product_icon} {product['name']}\n\n"
         f"{product['description']}\n\n"
-        f"💶 Цена: {product['price_per_kg']} €/кг\n"
-        f"⚖️ 100 г: {price_100g:.2f} €"
+        f"💰 Цена: {product['price_per_kg']} €/кг\n"
+        f"⚖️ 100 г: {price_100g:.2f} €\n\n"
+        f"👇 Выберите вес:"
     )
 
     if is_product_out_of_stock(product):
@@ -1271,10 +1290,10 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     )
 
     await callback.message.answer(
-        "✅ Товар добавлен в корзину!\n\n"
-        "Сейчас в корзине уже есть выбранные позиции.\n\n"
-        "🎁 Добавьте ещё несколько товаров и соберите свой идеальный набор.\n\n"
-        "🛒 Когда будете готовы — переходите к оформлению заказа.",
+        "✅ Отличный выбор!\n\n"
+        "🛒 Товар успешно добавлен в корзину.\n\n"
+        "🍺 Соберите свой идеальный набор или переходите к оформлению заказа.\n\n"
+        "👇 Выберите следующее действие:",
         reply_markup=keyboard
     )
 
@@ -1387,10 +1406,10 @@ async def add_to_cart(callback: types.CallbackQuery):
     )
 
     await callback.message.answer(
-        "✅ Товар добавлен в корзину!\n\n"
-        "Сейчас в корзине уже есть выбранные позиции.\n\n"
-        "🎁 Добавьте ещё несколько товаров и соберите свой идеальный набор.\n\n"
-        "🛒 Когда будете готовы — переходите к оформлению заказа.",
+        "✅ Отличный выбор!\n\n"
+        "🛒 Товар успешно добавлен в корзину.\n\n"
+        "🍺 Соберите свой идеальный набор или переходите к оформлению заказа.\n\n"
+        "👇 Выберите следующее действие:",
         reply_markup=keyboard
     )
 
@@ -1435,13 +1454,11 @@ async def create_order(callback: types.CallbackQuery):
     )
 
     await callback.message.answer(
-        f"✅ Заказ оформлен!\n\n"
-        f"Номер заказа: #{order_id}\n"
-        f"Товар: {product['name']}\n"
-        f"Вес: {weight} г\n"
-        f"Сумма: {price:.2f} €\n\n"
-        f"💳 Следующий шаг: оплата.\n"
-        f"Отправьте номер заказа продавцу."
+        f"✅ Заказ успешно оформлен!\n\n"
+        f"📦 Номер заказа: #{order_id}\n\n"
+        f"Спасибо за ваш заказ ❤️\n\n"
+        f"Мы получили заявку и приступим к обработке в ближайшее время.\n\n"
+        f"🍺 Deal Market NL"
     )
 
     await bot.send_message(
@@ -2083,10 +2100,11 @@ async def handle_order_data(message: types.Message):
 
         # Send confirmation to customer
         await message.answer(
-            f"✅ Заказ оформлен!\n\n"
-            f"Номер заказа: #{order_id}\n"
-            f"Сумма: {total:.2f} €\n\n"
-            f"💳 Выберите способ оплаты:",
+            f"✅ Заказ успешно оформлен!\n\n"
+            f"📦 Номер заказа: #{order_id}\n\n"
+            f"Спасибо за ваш заказ ❤️\n\n"
+            f"Мы получили заявку и приступим к обработке в ближайшее время.\n\n"
+            f"🍺 Deal Market NL",
             reply_markup=payment_menu()
         )
 
@@ -2356,10 +2374,11 @@ async def use_saved_data(callback: types.CallbackQuery):
     log_customer_event(user_id, "order_created", {"order_id": order_id})
 
     await callback.message.answer(
-        f"✅ Заказ оформлен!\n\n"
-        f"Номер заказа: #{order_id}\n"
-        f"Сумма: {total:.2f} €\n\n"
-        f"💳 Выберите способ оплаты:",
+        f"✅ Заказ успешно оформлен!\n\n"
+        f"📦 Номер заказа: #{order_id}\n\n"
+        f"Спасибо за ваш заказ ❤️\n\n"
+        f"Мы получили заявку и приступим к обработке в ближайшее время.\n\n"
+        f"🍺 Deal Market NL",
         reply_markup=payment_menu()
     )
 
