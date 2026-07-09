@@ -3111,14 +3111,21 @@ async def order_detail(order_id: str):
                 if weight is None:
                     price_per_kg_value = float(price_per_kg) if price_per_kg is not None else 0
                     preview_id = f"price_preview_{item_id}"
+                    photo_preview_id = f"photo_preview_{item_id}"
                     html += (
                         f"<tr><td>{product_name_text}</td><td>{item_label_text}</td><td>"
                         f'<form method="post" action="/orders/{order_id_path}/items/{item_id}/weigh" '
-                        'style="display:flex; gap:4px; align-items:center; margin:0;">'
+                        'enctype="multipart/form-data" '
+                        'style="display:flex; gap:4px; align-items:center; flex-wrap:wrap; margin:0;">'
                         f'<input type="number" name="final_weight_grams" placeholder="г" required style="width:70px;" '
                         f'data-price-per-kg="{price_per_kg_value}" '
                         f'oninput="document.getElementById(\'{preview_id}\').innerText = \'≈ \' + ((parseFloat(this.value || 0) / 1000) * parseFloat(this.dataset.pricePerKg || 0)).toFixed(2) + \' €\'"/>'
                         f'<span id="{preview_id}" style="min-width:70px; color:#6b7280;">≈ 0.00 €</span>'
+                        '<input type="file" name="photo" accept="image/*" capture="environment" style="max-width:110px;" '
+                        f'onchange="var img = document.getElementById(\'{photo_preview_id}\'); '
+                        'if (this.files && this.files[0]) { img.src = URL.createObjectURL(this.files[0]); img.style.display = \'inline-block\'; } '
+                        'else { img.style.display = \'none\'; }"/>'
+                        f'<img id="{photo_preview_id}" style="display:none; max-width:40px; max-height:40px; border-radius:4px; object-fit:cover;"/>'
                         '<button class="button secondary" type="submit">Подтвердить вес</button>'
                         '</form>'
                         '</td></tr>'
