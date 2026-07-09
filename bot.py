@@ -2259,10 +2259,11 @@ async def checkout(callback: types.CallbackQuery):
     products = get_products()
     config = load_json("config.json")
     minimum_order_amount = config.get("minimum_order_amount", 20)
-    
-    total, _ = price_cart_items(cart_items, products)
 
-    if total < minimum_order_amount:
+    total, _ = price_cart_items(cart_items, products)
+    has_pending_weighing = any(row[1] is None for row in cart_items)
+
+    if not has_pending_weighing and total < minimum_order_amount:
         missing = minimum_order_amount - total
         await callback.message.answer(
             f"🚚 Минимальная сумма заказа для доставки: {minimum_order_amount:.2f} €\n"
