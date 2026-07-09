@@ -4086,9 +4086,155 @@ async def edit_product_form(product_id: int):
         html += """
         </section>
         """
+        html += f"<p><a class='button button-link' href='/products/{product_id}/recommendations'>🎯 Рекомендации продаж</a></p>"
         return admin_layout("✏️ Редактировать товар", html)
     except Exception as e:
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.get("/products/{product_id}/recommendations", response_class=HTMLResponse)
+async def product_recommendations_form(product_id: int):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM products WHERE id = %s",
+            (product_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return admin_layout(
+                "⚠️ Товар не найден",
+                """
+                <section class="admin-card">
+                  <h1>⚠️ Товар не найден</h1>
+                  <p>Такой товар не найден.</p>
+                  <div class="form-actions">
+                    <a class="button button-link" href="/products">← К товарам</a>
+                  </div>
+                </section>
+                """,
+            )
+        product_name = row[0]
+
+        cursor.execute(
+            """
+            SELECT id, name
+            FROM products
+            WHERE is_active = TRUE AND id != %s
+            ORDER BY sort_order, id
+            """,
+            (product_id,),
+        )
+        other_products = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT recommended_product_id
+            FROM product_recommendations
+            WHERE product_id = %s
+              AND recommendation_type = 'frequently_bought_together'
+              AND is_active = TRUE
+            """,
+            (product_id,),
+        )
+        recommended_ids = {recommended_row[0] for recommended_row in cursor.fetchall()}
+        conn.close()
+
+        product_name_text = escape(str(product_name or "-"), quote=True)
+        checkbox_rows = ""
+        for other_id, other_name in other_products:
+            checked = "checked" if other_id in recommended_ids else ""
+            other_name_text = escape(str(other_name or "-"), quote=True)
+            checkbox_rows += (
+                "<label style='display:block; margin:4px 0;'>"
+                f"<input type='checkbox' name='recommended_product_id' value='{other_id}' {checked}/> "
+                f"{other_name_text}"
+                "</label>"
+            )
+        if not checkbox_rows:
+            checkbox_rows = "<p>Нет других активных товаров для рекомендаций.</p>"
+
+        html = f"""
+        <section class="admin-card">
+          <h1>🎯 Рекомендации продаж</h1>
+          <p>Товар: <strong>{product_name_text}</strong></p>
+          <p><a href="/products/{product_id}/edit">← Назад к товару</a></p>
+          <form class="admin-form" method="post" action="/products/{product_id}/recommendations">
+            <h2>Часто покупают вместе</h2>
+            {checkbox_rows}
+            <div class="form-actions">
+              <input class="button" type="submit" value="Сохранить"/>
+              <a class="button button-link secondary" href="/products/{product_id}/edit">← К товару</a>
+            </div>
+          </form>
+        </section>
+        """
+        return admin_layout("🎯 Рекомендации продаж", html)
+    except Exception as e:
+        log_admin_error("/products/{product_id}/recommendations", "product_recommendations_form", e)
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.post("/products/{product_id}/recommendations")
+async def update_product_recommendations(
+    product_id: int,
+    recommended_product_id: list[int] = Form([]),
+):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM products WHERE id = %s",
+            (product_id,),
+        )
+        if not cursor.fetchone():
+            conn.close()
+            return RedirectResponse("/products", status_code=303)
+
+        cursor.execute(
+            "SELECT id FROM products WHERE is_active = TRUE AND id != %s",
+            (product_id,),
+        )
+        valid_ids = {valid_row[0] for valid_row in cursor.fetchall()}
+
+        selected_ids = []
+        seen_ids = set()
+        for submitted_id in recommended_product_id:
+            if submitted_id in valid_ids and submitted_id not in seen_ids:
+                seen_ids.add(submitted_id)
+                selected_ids.append(submitted_id)
+
+        cursor.execute(
+            """
+            DELETE FROM product_recommendations
+            WHERE product_id = %s
+              AND recommendation_type = 'frequently_bought_together'
+            """,
+            (product_id,),
+        )
+
+        for sort_order, recommended_id in enumerate(selected_ids):
+            cursor.execute(
+                """
+                INSERT INTO product_recommendations (
+                    product_id,
+                    recommended_product_id,
+                    recommendation_type,
+                    sort_order,
+                    is_active
+                )
+                VALUES (%s, %s, 'frequently_bought_together', %s, TRUE)
+                """,
+                (product_id, recommended_id, sort_order),
+            )
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_admin_error("/products/{product_id}/recommendations", "update_product_recommendations", e)
+    return RedirectResponse(f"/products/{product_id}/edit", status_code=303)
 
 
 @app.get("/products/{product_id}/options/new", response_class=HTMLResponse)
