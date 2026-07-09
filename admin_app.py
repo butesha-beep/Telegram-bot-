@@ -903,20 +903,34 @@ def send_order_status_notification(telegram_id, order_id, status):
     urllib.request.urlopen(request, timeout=5).read()
 
 
-def send_weighing_complete_notification(telegram_id, order_id, total):
+def send_weighing_complete_notification(telegram_id, order_id, total, items):
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token or not telegram_id:
         raise RuntimeError("BOT_TOKEN or telegram_id is missing")
 
+    item_lines = ""
+    for product_name, weight, price, option_label in items:
+        label_or_weight = option_label if option_label else f"{weight} г"
+        item_lines += (
+            f"\n• {product_name}\n"
+            f"Вариант/вес: {label_or_weight}\n"
+            f"Вес: {weight} г\n"
+            f"Стоимость: {float(price or 0):.2f} €\n"
+        )
+
     text = (
-        f"⚖️ Заказ взвешен.\n\n"
-        f"💰 Финальная сумма: {float(total or 0):.2f} €\n\n"
-        f"Выберите способ оплаты:"
+        f"⚖️ Ваш заказ полностью собран.\n\n"
+        f"📦 Номер заказа:\n#{order_id}\n"
+        f"{item_lines}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💰 Итого к оплате:\n{float(total or 0):.2f} €\n\n"
+        f"👇 Выберите способ оплаты:"
     )
     inline_keyboard = [
         [{"text": "🏦 Оплата IBAN", "callback_data": "pay_iban"}],
         [{"text": "💵 Оплата наличными", "callback_data": "pay_cash"}],
         [{"text": "🅿️ PayPal", "callback_data": "pay_paypal"}],
+        [{"text": "🛍 Продолжить покупки", "callback_data": "back_to_menu"}],
     ]
     data = urllib.parse.urlencode({
         "chat_id": telegram_id,
@@ -3153,6 +3167,7 @@ async def weigh_order_item(
     has_pending_weighing = True
     telegram_id = None
     order_total = None
+    order_items_summary = []
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -3221,6 +3236,18 @@ async def weigh_order_item(
             if order_row:
                 telegram_id, order_total = order_row
 
+            cursor.execute(
+                """
+                SELECT oi.product_name, oi.weight, oi.price, po.label
+                FROM order_items oi
+                LEFT JOIN product_options po ON po.id = oi.option_id
+                WHERE oi.order_id = %s
+                ORDER BY oi.id
+                """,
+                (order_id,),
+            )
+            order_items_summary = cursor.fetchall()
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -3229,7 +3256,7 @@ async def weigh_order_item(
 
     if not has_pending_weighing and telegram_id:
         try:
-            send_weighing_complete_notification(telegram_id, order_id, order_total)
+            send_weighing_complete_notification(telegram_id, order_id, order_total, order_items_summary)
             notify_conn = psycopg2.connect(DATABASE_URL)
             notify_cursor = notify_conn.cursor()
             log_order_event(
