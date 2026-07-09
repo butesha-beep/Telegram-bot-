@@ -1162,17 +1162,20 @@ async def choose_option(callback: types.CallbackQuery):
         ]
     )
 
-    preview_text = (
-        f"🧮 Расчёт заказа\n\n"
-        f"Товар: {product['name']}\n"
-        f"Вариант: {label}\n"
-        f"Сумма: {float(price):.2f} €"
-    )
-
     if weight is None:
-        preview_text += (
-            f"\n\n⚖️ Вес будет определён администратором после взвешивания товара.\n"
-            f"Финальная сумма будет рассчитана перед оплатой."
+        preview_text = (
+            f"🧮 Расчёт заказа\n\n"
+            f"Товар: {product['name']}\n"
+            f"Предварительный размер: {label}\n\n"
+            f"💶 Цена будет рассчитана после взвешивания.\n"
+            f"⚖️ Вес будет определён администратором после сборки заказа."
+        )
+    else:
+        preview_text = (
+            f"🧮 Расчёт заказа\n\n"
+            f"Товар: {product['name']}\n"
+            f"Вариант: {label}\n"
+            f"Сумма: {float(price):.2f} €"
         )
 
     await callback.message.answer(
@@ -1553,6 +1556,7 @@ async def show_cart(callback: types.CallbackQuery):
 
     text = "🛒 Ваша корзина:\n\n"
     total = 0
+    has_pending_weighing = False
     remove_buttons = []
 
     for cart_item_id, product_id, weight, option_id, option_label, option_price, quantity in cart_items:
@@ -1599,12 +1603,17 @@ async def show_cart(callback: types.CallbackQuery):
             total_weight_text = f"{total_weight} г"
 
         if option_id and option_label is not None and option_price is not None:
+            if weight is None:
+                has_pending_weighing = True
+                item_sum_line = "  Сумма: уточняется после взвешивания\n\n"
+            else:
+                item_sum_line = f"  Сумма: {price:.2f} €\n\n"
             text += (
                 f"• {product['name']}\n"
                 f"{item_detail}"
                 f"  Количество: {quantity} шт\n"
                 f"  Общий вес: {total_weight_text}\n"
-                f"  Сумма: {price:.2f} €\n\n"
+                f"{item_sum_line}"
             )
             remove_buttons.append([
                 InlineKeyboardButton(
@@ -1636,7 +1645,13 @@ async def show_cart(callback: types.CallbackQuery):
             )
         ])
 
-    text += f"💰 Общая сумма: {total:.2f} €"
+    if has_pending_weighing:
+        text += (
+            f"💰 Предварительная сумма: {total:.2f} €\n"
+            f"⚖️ Финальная сумма будет рассчитана после взвешивания."
+        )
+    else:
+        text += f"💰 Общая сумма: {total:.2f} €"
 
     keyboard = InlineKeyboardMarkup(
     inline_keyboard=remove_buttons + [
