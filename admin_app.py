@@ -744,6 +744,7 @@ def admin_event_type_label(event_type):
         "order_note_updated": "Заметка обновлена",
         "order_completed": "Заказ завершён",
         "order_cancelled": "Заказ отменён",
+        "item_weighed": "Товар взвешен",
     }
     return labels.get(str(event_type or ""), str(event_type or "-"))
 
@@ -2918,7 +2919,7 @@ async def order_detail(order_id: str):
         try:
             cursor.execute(
                 """
-                SELECT oi.product_name, oi.weight, oi.price, po.label
+                SELECT oi.id, oi.product_name, oi.weight, oi.price, po.label
                 FROM order_items oi
                 LEFT JOIN product_options po ON po.id = oi.option_id
                 WHERE oi.order_id = %s
@@ -2930,14 +2931,14 @@ async def order_detail(order_id: str):
         except Exception:
             cursor.execute(
                 """
-                SELECT product_name, weight, price
+                SELECT id, product_name, weight, price
                 FROM order_items
                 WHERE order_id = %s
                 ORDER BY id
                 """,
                 (order_id,),
             )
-            items = [(product_name, weight, price, None) for product_name, weight, price in cursor.fetchall()]
+            items = [(item_id, product_name, weight, price, None) for item_id, product_name, weight, price in cursor.fetchall()]
         cursor.execute(
             """
             SELECT event_type, event_text, created_at
@@ -3058,11 +3059,23 @@ async def order_detail(order_id: str):
         if items:
             html += "<section class='admin-card dash-section'><h2>Товары</h2><div class='dash-table-wrap'><table>"
             html += "<tr><th>Товар</th><th>Вариант / вес</th><th>Итого</th></tr>"
-            for product_name, weight, price, option_label in items:
+            for item_id, product_name, weight, price, option_label in items:
                 item_label = option_label if option_label else f"{weight} г"
                 product_name_text = escape(str(product_name or "-"), quote=True)
                 item_label_text = escape(str(item_label or "-"), quote=True)
-                html += f"<tr><td>{product_name_text}</td><td>{item_label_text}</td><td>{price:.2f} €</td></tr>"
+                if weight is None:
+                    html += (
+                        f"<tr><td>{product_name_text}</td><td>{item_label_text}</td><td>"
+                        f'<form method="post" action="/orders/{order_id_path}/items/{item_id}/weigh" '
+                        'style="display:flex; gap:4px; align-items:center; margin:0;">'
+                        '<input type="number" name="final_weight_grams" placeholder="г" required style="width:70px;"/>'
+                        '<input type="number" step="0.01" name="final_price" placeholder="€" required style="width:70px;"/>'
+                        '<button class="button secondary" type="submit">Подтвердить вес</button>'
+                        '</form>'
+                        '</td></tr>'
+                    )
+                else:
+                    html += f"<tr><td>{product_name_text}</td><td>{item_label_text}</td><td>{price:.2f} €</td></tr>"
             html += "</table></div>"
             html += f"<p><strong>Итого: {total:.2f} €</strong></p></section>"
         else:
@@ -3099,6 +3112,53 @@ async def update_order_note(order_id: str, order_note: str = Form("")):
         conn.close()
     except Exception as e:
         print(f"ORDER NOTE UPDATE ERROR: {order_id}:", e)
+    return RedirectResponse(f"/orders/{order_id}", status_code=303)
+
+
+@app.post("/orders/{order_id}/items/{item_id}/weigh")
+async def weigh_order_item(
+    order_id: str,
+    item_id: int,
+    final_weight_grams: int = Form(...),
+    final_price: float = Form(...),
+):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE order_items
+            SET weight = %s,
+                price = %s
+            WHERE id = %s
+              AND order_id = %s
+              AND weight IS NULL
+            """,
+            (final_weight_grams, final_price, item_id, order_id),
+        )
+        if cursor.rowcount == 0:
+            conn.close()
+            return RedirectResponse(f"/orders/{order_id}", status_code=303)
+
+        cursor.execute(
+            """
+            UPDATE orders
+            SET total = (SELECT COALESCE(SUM(price), 0) FROM order_items WHERE order_id = %s),
+                updated_at = NOW()
+            WHERE order_id = %s
+            """,
+            (order_id, order_id),
+        )
+        log_order_event(
+            cursor,
+            order_id,
+            "item_weighed",
+            f"Товар взвешен: {final_weight_grams} г, {final_price:.2f} €"
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"ORDER ITEM WEIGH ERROR: {order_id}/{item_id}:", e)
     return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
 
