@@ -250,6 +250,21 @@ def init_db():
         ON master_shop_snapshots (shop_key, last_seen_at DESC, id DESC)
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS product_recommendations (
+            id SERIAL PRIMARY KEY,
+            product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            recommended_product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            recommendation_type TEXT NOT NULL DEFAULT 'frequently_bought_together',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_product_recommendations_unique
+        ON product_recommendations (product_id, recommended_product_id, recommendation_type)
+    """)
+    cursor.execute("""
         INSERT INTO product_options (
             product_id,
             label,
