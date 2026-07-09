@@ -3776,7 +3776,7 @@ async def products():
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name, p.stock_grams, p.is_out_of_stock, p.low_stock_threshold_grams
+            SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name, p.stock_grams, p.is_out_of_stock, p.low_stock_threshold_grams, p.is_promotion
             FROM products p
             LEFT JOIN categories c ON c.id = p.category_id
             ORDER BY p.sort_order, p.id
@@ -3808,7 +3808,7 @@ async def products():
         for category_label in category_order:
             html += f"<tr class='category-row' id='{category_anchors[category_label]}'><td colspan='9'>📁 {category_label}</td></tr>"
             for row in grouped_products[category_label]:
-                pid, name, price, image_url, is_active, category_name, stock_grams, is_out_of_stock, low_stock_threshold_grams = row
+                pid, name, price, image_url, is_active, category_name, stock_grams, is_out_of_stock, low_stock_threshold_grams, is_promotion = row
                 if image_url:
                     escaped_image_url = escape(str(image_url), quote=True)
                     img_html = f"<a href=\"{escaped_image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"product-thumb\" src=\"{escaped_image_url}\" referrerpolicy=\"no-referrer\"/></a>"
@@ -3824,7 +3824,8 @@ async def products():
                 actions_html = f"<div class=\"action-group\">{actions_html}</div>"
                 availability_text = "Нет в наличии" if is_out_of_stock or int(stock_grams or 0) <= 0 else "В наличии"
                 availability_class = "inactive" if availability_text == "Нет в наличии" else "active"
-                html += f"<tr><td>{pid}</td><td>{name}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_label}</td><td>{format_stock_grams(stock_grams)}</td><td><span class='status {availability_class}'>{availability_text}</span></td><td>{actions_html}</td></tr>"
+                name_text = f"🔥 {name}" if is_promotion else name
+                html += f"<tr><td>{pid}</td><td>{name_text}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_label}</td><td>{format_stock_grams(stock_grams)}</td><td><span class='status {availability_class}'>{availability_text}</span></td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception as e:
@@ -3939,7 +3940,7 @@ async def edit_product_form(product_id: int):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams
+            SELECT category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams, is_promotion, promotion_title, promotion_sort_order
             FROM products
             WHERE id = %s
             """,
@@ -3990,10 +3991,12 @@ async def edit_product_form(product_id: int):
         inventory_movements = cursor.fetchall()
         conn.close()
 
-        category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams = row
+        category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams, is_promotion, promotion_title, promotion_sort_order = row
         checked = "checked" if is_active else ""
         out_of_stock_checked = "checked" if is_out_of_stock else ""
         image_url_value = escape(str(image_url or ""), quote=True)
+        promotion_checked = "checked" if is_promotion else ""
+        promotion_title_value = escape(str(promotion_title or ""), quote=True)
         html = f"""
         <section class="admin-card">
           <h1>✏️ Редактировать товар</h1>
@@ -4009,6 +4012,14 @@ async def edit_product_form(product_id: int):
             <label>Порядок сортировки <input name="sort_order" value="{sort_order}"/><small>Меньше число = выше в списке</small></label>
             <label>Товар активен <input type="checkbox" name="is_active" value="1" {checked}/></label>
             <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true" {out_of_stock_checked}/></label>
+            <fieldset>
+              <legend>🔥 Продвижение товара</legend>
+              <label>☑️ Показывать в разделе "Акции" <input type="checkbox" name="is_promotion" value="1" {promotion_checked}/></label>
+              <label>Название акции
+                <input name="promotion_title" value="{promotion_title_value}" placeholder="🔥 Хит недели / 🔥 Новинка / 🔥 Скидка 10% / 🔥 Лучший выбор"/>
+              </label>
+              <label>Порядок показа <input name="promotion_sort_order" type="number" value="{promotion_sort_order}"/></label>
+            </fieldset>
             <div class="form-actions">
               <input class="button" type="submit" value="Сохранить изменения"/>
             </div>
@@ -4481,6 +4492,9 @@ async def update_product(
     sort_order: int = Form(0),
     is_active: str = Form(None),
     is_out_of_stock: bool = Form(False),
+    is_promotion: bool = Form(False),
+    promotion_title: str = Form(''),
+    promotion_sort_order: int = Form(0),
 ):
     active = True if is_active else False
     stock_value = max(stock_grams, 0)
@@ -4509,10 +4523,13 @@ async def update_product(
                 low_stock_threshold_grams = %s,
                 is_out_of_stock = %s,
                 sort_order = %s,
-                is_active = %s
+                is_active = %s,
+                is_promotion = %s,
+                promotion_title = %s,
+                promotion_sort_order = %s
             WHERE id = %s
             """,
-            (category_id, name, price_per_kg, description, saved_image_url, stock_value, low_stock_threshold_value, is_out_of_stock, sort_order, active, product_id),
+            (category_id, name, price_per_kg, description, saved_image_url, stock_value, low_stock_threshold_value, is_out_of_stock, sort_order, active, is_promotion, promotion_title or None, promotion_sort_order, product_id),
         )
         if old_stock != stock_value:
             log_inventory_movement(
