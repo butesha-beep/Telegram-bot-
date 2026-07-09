@@ -2105,6 +2105,18 @@ def create_order_from_cart(
     return order_id, order_text, total
 
 
+def order_needs_weighing(order_id):
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT 1 FROM order_items WHERE order_id = %s AND weight IS NULL LIMIT 1",
+        (order_id,)
+    )
+    needs_weighing = cursor.fetchone() is not None
+    conn.close()
+    return needs_weighing
+
+
 @dp.message()
 async def handle_order_data(message: types.Message):
     user_id = message.from_user.id
@@ -2149,21 +2161,26 @@ async def handle_order_data(message: types.Message):
         )
 
         # Send confirmation to customer
-        await message.answer(
-            f"✅ Заказ успешно оформлен!\n\n"
-            f"📦 Номер заказа: #{order_id}\n\n"
-            f"Спасибо за ваш заказ ❤️\n\n"
-            f"Мы получили заявку и приступим к обработке в ближайшее время.\n\n"
-            f"🍺 Deal Market NL",
-            reply_markup=payment_menu()
-        )
+        if order_needs_weighing(order_id):
+            await message.answer(
+                "⚖️ Заказ принят. Администратор взвесит товар и отправит финальную сумму к оплате."
+            )
+        else:
+            await message.answer(
+                f"✅ Заказ успешно оформлен!\n\n"
+                f"📦 Номер заказа: #{order_id}\n\n"
+                f"Спасибо за ваш заказ ❤️\n\n"
+                f"Мы получили заявку и приступим к обработке в ближайшее время.\n\n"
+                f"🍺 Deal Market NL",
+                reply_markup=payment_menu()
+            )
 
         # Send notification to admin
         await bot.send_message(
             chat_id=config["admin_id"],
             text=f"📦 Новый заказ!\n\n{order_text}"
         )
-        
+
         # Clear pending order state
         del pending_orders[user_id]
 
@@ -2334,14 +2351,19 @@ async def use_saved_data(callback: types.CallbackQuery):
         products=products
     )
 
-    await callback.message.answer(
-        f"✅ Заказ успешно оформлен!\n\n"
-        f"📦 Номер заказа: #{order_id}\n\n"
-        f"Спасибо за ваш заказ ❤️\n\n"
-        f"Мы получили заявку и приступим к обработке в ближайшее время.\n\n"
-        f"🍺 Deal Market NL",
-        reply_markup=payment_menu()
-    )
+    if order_needs_weighing(order_id):
+        await callback.message.answer(
+            "⚖️ Заказ принят. Администратор взвесит товар и отправит финальную сумму к оплате."
+        )
+    else:
+        await callback.message.answer(
+            f"✅ Заказ успешно оформлен!\n\n"
+            f"📦 Номер заказа: #{order_id}\n\n"
+            f"Спасибо за ваш заказ ❤️\n\n"
+            f"Мы получили заявку и приступим к обработке в ближайшее время.\n\n"
+            f"🍺 Deal Market NL",
+            reply_markup=payment_menu()
+        )
 
     await bot.send_message(
         chat_id=config["admin_id"],
