@@ -1010,6 +1010,18 @@ async def show_product(callback: types.CallbackQuery):
     except Exception:
         options = []
 
+    is_variable_weight = any(row[2] is None for row in options)
+
+    if is_variable_weight:
+        text = (
+            f"{product_icon} {product['name']}\n\n"
+            f"{product['description']}\n\n"
+            f"💰 Цена: {product['price_per_kg']} €/кг\n\n"
+            f"👇 Выберите размер:\n\n"
+            f"⚖️ Вес будет уточнён после сборки заказа.\n"
+            f"Администратор взвесит товар и отправит финальную сумму к оплате."
+        )
+
     if options:
         option_rows = []
         option_row = []
@@ -1112,11 +1124,6 @@ async def choose_option(callback: types.CallbackQuery):
 
     product_id, label, weight, price = option
 
-    if weight is None:
-        await callback.message.answer("❌ Для этого варианта не указан вес.")
-        await callback.answer()
-        return
-
     products = get_products()
     product = next(
         (p for p in products if p["id"] == product_id),
@@ -1155,11 +1162,21 @@ async def choose_option(callback: types.CallbackQuery):
         ]
     )
 
-    await callback.message.answer(
+    preview_text = (
         f"🧮 Расчёт заказа\n\n"
         f"Товар: {product['name']}\n"
         f"Вариант: {label}\n"
-        f"Сумма: {float(price):.2f} €",
+        f"Сумма: {float(price):.2f} €"
+    )
+
+    if weight is None:
+        preview_text += (
+            f"\n\n⚖️ Вес будет определён администратором после взвешивания товара.\n"
+            f"Финальная сумма будет рассчитана перед оплатой."
+        )
+
+    await callback.message.answer(
+        preview_text,
         reply_markup=keyboard
     )
 
