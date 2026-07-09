@@ -11,7 +11,7 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 import psycopg2
 
@@ -903,7 +903,15 @@ def send_order_status_notification(telegram_id, order_id, status):
     urllib.request.urlopen(request, timeout=5).read()
 
 
-def send_weighing_complete_notification(telegram_id, order_id, total, items):
+def send_weighing_complete_notification(
+    telegram_id,
+    order_id,
+    total,
+    items,
+    photo_bytes=None,
+    photo_filename=None,
+    photo_content_type=None,
+):
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token or not telegram_id:
         raise RuntimeError("BOT_TOKEN or telegram_id is missing")
@@ -932,10 +940,48 @@ def send_weighing_complete_notification(telegram_id, order_id, total, items):
         [{"text": "🅿️ PayPal", "callback_data": "pay_paypal"}],
         [{"text": "🛍 Продолжить покупки", "callback_data": "back_to_menu"}],
     ]
+    reply_markup_json = json.dumps({"inline_keyboard": inline_keyboard})
+
+    if photo_bytes and len(text) <= 1024:
+        boundary = secrets.token_hex(16)
+        boundary_bytes = boundary.encode("utf-8")
+        parts = []
+
+        def add_field(name, value):
+            parts.append(b"--" + boundary_bytes + b"\r\n")
+            parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+            parts.append(str(value).encode("utf-8") + b"\r\n")
+
+        add_field("chat_id", telegram_id)
+        add_field("caption", text)
+        add_field("reply_markup", reply_markup_json)
+
+        parts.append(b"--" + boundary_bytes + b"\r\n")
+        parts.append(
+            'Content-Disposition: form-data; name="photo"; filename="{}"\r\n'.format(
+                photo_filename or "photo.jpg"
+            ).encode("utf-8")
+        )
+        parts.append(
+            f"Content-Type: {photo_content_type or 'application/octet-stream'}\r\n\r\n".encode("utf-8")
+        )
+        parts.append(photo_bytes + b"\r\n")
+        parts.append(b"--" + boundary_bytes + b"--\r\n")
+
+        body = b"".join(parts)
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{bot_token}/sendPhoto",
+            data=body,
+            method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        urllib.request.urlopen(request, timeout=15).read()
+        return
+
     data = urllib.parse.urlencode({
         "chat_id": telegram_id,
         "text": text,
-        "reply_markup": json.dumps({"inline_keyboard": inline_keyboard}),
+        "reply_markup": reply_markup_json,
     }).encode("utf-8")
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -3176,11 +3222,19 @@ async def weigh_order_item(
     order_id: str,
     item_id: int,
     final_weight_grams: int = Form(...),
+    photo: UploadFile = File(None),
 ):
     has_pending_weighing = True
     telegram_id = None
     order_total = None
     order_items_summary = []
+    photo_bytes = None
+    photo_filename = None
+    photo_content_type = None
+    if photo is not None and photo.filename:
+        photo_bytes = await photo.read()
+        photo_filename = photo.filename
+        photo_content_type = photo.content_type
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -3269,7 +3323,15 @@ async def weigh_order_item(
 
     if not has_pending_weighing and telegram_id:
         try:
-            send_weighing_complete_notification(telegram_id, order_id, order_total, order_items_summary)
+            send_weighing_complete_notification(
+                telegram_id,
+                order_id,
+                order_total,
+                order_items_summary,
+                photo_bytes=photo_bytes,
+                photo_filename=photo_filename,
+                photo_content_type=photo_content_type,
+            )
             notify_conn = psycopg2.connect(DATABASE_URL)
             notify_cursor = notify_conn.cursor()
             log_order_event(
