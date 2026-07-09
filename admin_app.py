@@ -2963,9 +2963,10 @@ async def order_detail(order_id: str):
         try:
             cursor.execute(
                 """
-                SELECT oi.id, oi.product_name, oi.weight, oi.price, po.label
+                SELECT oi.id, oi.product_name, oi.weight, oi.price, po.label, p.price_per_kg
                 FROM order_items oi
                 LEFT JOIN product_options po ON po.id = oi.option_id
+                LEFT JOIN products p ON p.id = oi.product_id
                 WHERE oi.order_id = %s
                 ORDER BY oi.id
                 """,
@@ -2982,7 +2983,7 @@ async def order_detail(order_id: str):
                 """,
                 (order_id,),
             )
-            items = [(item_id, product_name, weight, price, None) for item_id, product_name, weight, price in cursor.fetchall()]
+            items = [(item_id, product_name, weight, price, None, None) for item_id, product_name, weight, price in cursor.fetchall()]
         cursor.execute(
             """
             SELECT event_type, event_text, created_at
@@ -3103,16 +3104,21 @@ async def order_detail(order_id: str):
         if items:
             html += "<section class='admin-card dash-section'><h2>Товары</h2><div class='dash-table-wrap'><table>"
             html += "<tr><th>Товар</th><th>Вариант / вес</th><th>Итого</th></tr>"
-            for item_id, product_name, weight, price, option_label in items:
+            for item_id, product_name, weight, price, option_label, price_per_kg in items:
                 item_label = option_label if option_label else f"{weight} г"
                 product_name_text = escape(str(product_name or "-"), quote=True)
                 item_label_text = escape(str(item_label or "-"), quote=True)
                 if weight is None:
+                    price_per_kg_value = float(price_per_kg) if price_per_kg is not None else 0
+                    preview_id = f"price_preview_{item_id}"
                     html += (
                         f"<tr><td>{product_name_text}</td><td>{item_label_text}</td><td>"
                         f'<form method="post" action="/orders/{order_id_path}/items/{item_id}/weigh" '
                         'style="display:flex; gap:4px; align-items:center; margin:0;">'
-                        '<input type="number" name="final_weight_grams" placeholder="г" required style="width:70px;"/>'
+                        f'<input type="number" name="final_weight_grams" placeholder="г" required style="width:70px;" '
+                        f'data-price-per-kg="{price_per_kg_value}" '
+                        f'oninput="document.getElementById(\'{preview_id}\').innerText = \'≈ \' + ((parseFloat(this.value || 0) / 1000) * parseFloat(this.dataset.pricePerKg || 0)).toFixed(2) + \' €\'"/>'
+                        f'<span id="{preview_id}" style="min-width:70px; color:#6b7280;">≈ 0.00 €</span>'
                         '<button class="button secondary" type="submit">Подтвердить вес</button>'
                         '</form>'
                         '</td></tr>'
