@@ -745,6 +745,8 @@ def admin_event_type_label(event_type):
         "order_completed": "Заказ завершён",
         "order_cancelled": "Заказ отменён",
         "item_weighed": "Товар взвешен",
+        "weighing_notification_sent": "Клиенту отправлено уведомление о взвешивании",
+        "weighing_notification_failed": "Ошибка уведомления о взвешивании",
     }
     return labels.get(str(event_type or ""), str(event_type or "-"))
 
@@ -892,6 +894,34 @@ def send_order_status_notification(telegram_id, order_id, status):
     data = urllib.parse.urlencode({
         "chat_id": telegram_id,
         "text": text,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=data,
+        method="POST"
+    )
+    urllib.request.urlopen(request, timeout=5).read()
+
+
+def send_weighing_complete_notification(telegram_id, order_id, total):
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token or not telegram_id:
+        raise RuntimeError("BOT_TOKEN or telegram_id is missing")
+
+    text = (
+        f"⚖️ Заказ взвешен.\n\n"
+        f"💰 Финальная сумма: {float(total or 0):.2f} €\n\n"
+        f"Выберите способ оплаты:"
+    )
+    inline_keyboard = [
+        [{"text": "🏦 Оплата IBAN", "callback_data": "pay_iban"}],
+        [{"text": "💵 Оплата наличными", "callback_data": "pay_cash"}],
+        [{"text": "🅿️ PayPal", "callback_data": "pay_paypal"}],
+    ]
+    data = urllib.parse.urlencode({
+        "chat_id": telegram_id,
+        "text": text,
+        "reply_markup": json.dumps({"inline_keyboard": inline_keyboard}),
     }).encode("utf-8")
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -3069,7 +3099,6 @@ async def order_detail(order_id: str):
                         f'<form method="post" action="/orders/{order_id_path}/items/{item_id}/weigh" '
                         'style="display:flex; gap:4px; align-items:center; margin:0;">'
                         '<input type="number" name="final_weight_grams" placeholder="г" required style="width:70px;"/>'
-                        '<input type="number" step="0.01" name="final_price" placeholder="€" required style="width:70px;"/>'
                         '<button class="button secondary" type="submit">Подтвердить вес</button>'
                         '</form>'
                         '</td></tr>'
@@ -3120,11 +3149,32 @@ async def weigh_order_item(
     order_id: str,
     item_id: int,
     final_weight_grams: int = Form(...),
-    final_price: float = Form(...),
 ):
+    has_pending_weighing = True
+    telegram_id = None
+    order_total = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT p.price_per_kg
+            FROM order_items oi
+            JOIN products p ON p.id = oi.product_id
+            WHERE oi.id = %s
+              AND oi.order_id = %s
+              AND oi.weight IS NULL
+            """,
+            (item_id, order_id),
+        )
+        product_row = cursor.fetchone()
+        if not product_row:
+            conn.close()
+            return RedirectResponse(f"/orders/{order_id}", status_code=303)
+
+        price_per_kg = product_row[0]
+        final_price = round(final_weight_grams / 1000 * price_per_kg, 2)
+
         cursor.execute(
             """
             UPDATE order_items
@@ -3155,10 +3205,57 @@ async def weigh_order_item(
             "item_weighed",
             f"Товар взвешен: {final_weight_grams} г, {final_price:.2f} €"
         )
+
+        cursor.execute(
+            "SELECT 1 FROM order_items WHERE order_id = %s AND weight IS NULL LIMIT 1",
+            (order_id,),
+        )
+        has_pending_weighing = cursor.fetchone() is not None
+
+        if not has_pending_weighing:
+            cursor.execute(
+                "SELECT telegram_id, total FROM orders WHERE order_id = %s",
+                (order_id,),
+            )
+            order_row = cursor.fetchone()
+            if order_row:
+                telegram_id, order_total = order_row
+
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"ORDER ITEM WEIGH ERROR: {order_id}/{item_id}:", e)
+        return RedirectResponse(f"/orders/{order_id}", status_code=303)
+
+    if not has_pending_weighing and telegram_id:
+        try:
+            send_weighing_complete_notification(telegram_id, order_id, order_total)
+            notify_conn = psycopg2.connect(DATABASE_URL)
+            notify_cursor = notify_conn.cursor()
+            log_order_event(
+                notify_cursor,
+                order_id,
+                "weighing_notification_sent",
+                f"Клиенту отправлено уведомление о финальной сумме: {float(order_total or 0):.2f} €"
+            )
+            notify_conn.commit()
+            notify_conn.close()
+        except Exception as e:
+            print(f"WEIGHING NOTIFICATION ERROR: {order_id}:", e)
+            try:
+                notify_conn = psycopg2.connect(DATABASE_URL)
+                notify_cursor = notify_conn.cursor()
+                log_order_event(
+                    notify_cursor,
+                    order_id,
+                    "weighing_notification_failed",
+                    "Не удалось отправить клиенту уведомление о финальной сумме."
+                )
+                notify_conn.commit()
+                notify_conn.close()
+            except Exception as log_error:
+                print(f"ORDER EVENT LOG ERROR: {order_id} weighing_notification_failed:", log_error)
+
     return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
 
