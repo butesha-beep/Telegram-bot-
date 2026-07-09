@@ -486,7 +486,18 @@ def is_product_out_of_stock(product):
     return int(stock_grams or 0) <= 0
 
 
-def out_of_stock_keyboard(category_id=None):
+def get_alternative_products(category_id, exclude_product_id, limit=3):
+    products = get_products()
+    alternatives = [
+        product for product in products
+        if product.get("category_id") == category_id
+        and product["id"] != exclude_product_id
+        and not is_product_out_of_stock(product)
+    ]
+    return alternatives[:limit]
+
+
+def out_of_stock_keyboard(category_id=None, alternatives=None):
     config = load_json("config.json")
     support_username = str(config.get("support_username", "")).strip().lstrip("@")
     contact_button = InlineKeyboardButton(
@@ -497,10 +508,20 @@ def out_of_stock_keyboard(category_id=None):
         callback_data="support"
     )
     back_callback = f"category_{category_id}" if category_id else "back_to_menu"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [contact_button],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]
-    ])
+
+    keyboard_rows = []
+    for product in (alternatives or []):
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text=DEAL_MARKET_PRODUCT_BUTTON_LABELS.get(product["name"], product["name"]),
+                callback_data=f"product_{product['id']}"
+            )
+        ])
+
+    keyboard_rows.append([contact_button])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
 def seed_products_from_json():
     categories = load_json("categories.json")
@@ -953,8 +974,11 @@ async def show_product(callback: types.CallbackQuery):
     )
 
     if is_product_out_of_stock(product):
+        alternatives = get_alternative_products(product["category_id"], product_id)
         text = f"{text}\n\n{OUT_OF_STOCK_TEXT}"
-        keyboard = out_of_stock_keyboard(product["category_id"])
+        if alternatives:
+            text = f"{text}\n\n🔎 Похожее в наличии:"
+        keyboard = out_of_stock_keyboard(product["category_id"], alternatives)
         photo = product.get("photo") or product.get("image_url")
         if photo:
             try:
