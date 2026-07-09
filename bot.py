@@ -470,6 +470,36 @@ def get_products():
     return load_json("products.json")
 
 
+def get_promotion_products():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, category_id, name, price_per_kg, description, image_url, stock_grams, is_out_of_stock
+        FROM products
+        WHERE is_active = TRUE
+          AND is_promotion = TRUE
+        ORDER BY promotion_sort_order, sort_order, id
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    products = []
+    for row in rows:
+        product_id, category_id, name, price_per_kg, description, image_url, stock_grams, is_out_of_stock = row
+        products.append({
+            "id": product_id,
+            "category_id": category_id,
+            "name": name,
+            "price_per_kg": price_per_kg,
+            "description": description,
+            "image_url": image_url,
+            "photo": image_url,
+            "stock_grams": stock_grams,
+            "is_out_of_stock": is_out_of_stock
+        })
+    return products
+
+
 OUT_OF_STOCK_TEXT = (
     "❌ Сейчас нет в наличии.\n"
     "Напишите администратору — подберём замену или сообщим о поступлении."
@@ -911,6 +941,12 @@ def main_menu():
 
     keyboard.append([
         InlineKeyboardButton(
+            text="🔥 Акции",
+            callback_data="promotions"
+        )
+    ])
+    keyboard.append([
+        InlineKeyboardButton(
             text="💬 Поддержка",
             callback_data="support"
         )
@@ -977,6 +1013,50 @@ async def show_category(callback: types.CallbackQuery):
     )
 
     await callback.answer()
+
+
+@dp.callback_query(F.data == "promotions")
+async def show_promotions(callback: types.CallbackQuery):
+    log_customer_event(callback.from_user.id, "view_promotions", {})
+
+    promotion_products = get_promotion_products()
+
+    if not promotion_products:
+        await callback.message.answer(
+            "🔥 Сейчас активных акций нет.\n\n"
+            "Загляните немного позже ❤️"
+        )
+        await callback.answer()
+        return
+
+    keyboard = []
+
+    for product in promotion_products:
+        keyboard.append([
+            InlineKeyboardButton(
+                text=DEAL_MARKET_PRODUCT_BUTTON_LABELS.get(product["name"], product["name"]),
+                callback_data=f"product_{product['id']}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data="back_to_menu"
+        )
+    ])
+
+    await callback.message.answer(
+        "🔥 Акции\n\n"
+        "Именно сейчас рекомендуем обратить внимание:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=keyboard
+        )
+    )
+
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("product_"))
 async def show_product(callback: types.CallbackQuery):
 
