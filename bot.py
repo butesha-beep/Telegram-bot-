@@ -2,6 +2,7 @@ import asyncio
 import json
 from json.tool import main
 import os
+import random
 import sqlite3
 import psycopg2
 import os
@@ -493,6 +494,49 @@ def get_alternative_products(category_id, exclude_product_id, limit=3):
         and not is_product_out_of_stock(product)
     ]
     return alternatives[:limit]
+
+
+UPSELL_INTRO_PHRASES = [
+    "😋 Кстати, очень рекомендую попробовать ещё:",
+    "🔥 Пока собираем ваш заказ, обратите внимание:",
+    "❤️ Многие наши покупатели ещё берут:",
+    "👌 Отлично дополнит ваш выбор:",
+    "🤤 Это тоже стоит попробовать:",
+]
+
+
+def get_recommended_products(product_id, limit=3):
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT recommended_product_id
+        FROM product_recommendations
+        WHERE product_id = %s
+          AND recommendation_type = 'frequently_bought_together'
+          AND is_active = TRUE
+        ORDER BY sort_order
+        LIMIT %s
+        """,
+        (product_id, limit)
+    )
+    recommended_ids = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    if not recommended_ids:
+        return []
+
+    products = get_products()
+    recommended_products = []
+    for recommended_id in recommended_ids:
+        product = next((p for p in products if p["id"] == recommended_id), None)
+        if not product:
+            continue
+        if is_product_out_of_stock(product):
+            continue
+        recommended_products.append(product)
+
+    return recommended_products
 
 
 def out_of_stock_keyboard(category_id=None, alternatives=None):
@@ -1314,28 +1358,41 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     )
     mark_cart_active(callback.from_user.id)
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🏠 Главное меню",
-                    callback_data="back_to_menu"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🛒 Корзина",
-                    callback_data="cart"
-                )
-            ]
-        ]
-    )
+    recommended_products = get_recommended_products(product_id)
 
-    await callback.message.answer(
+    keyboard_rows = []
+    for recommended_product in recommended_products:
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text=recommended_product["name"],
+                callback_data=f"product_{recommended_product['id']}"
+            )
+        ])
+    keyboard_rows.append([
+        InlineKeyboardButton(
+            text="🏠 Главное меню",
+            callback_data="back_to_menu"
+        )
+    ])
+    keyboard_rows.append([
+        InlineKeyboardButton(
+            text="🛒 Корзина",
+            callback_data="cart"
+        )
+    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    success_text = (
         "✅ Отличный выбор!\n\n"
         "🛒 Товар успешно добавлен в корзину.\n\n"
         "🍺 Соберите свой идеальный набор или переходите к оформлению заказа.\n\n"
-        "👇 Выберите следующее действие:",
+        "👇 Выберите следующее действие:"
+    )
+    if recommended_products:
+        success_text += f"\n\n{random.choice(UPSELL_INTRO_PHRASES)}"
+
+    await callback.message.answer(
+        success_text,
         reply_markup=keyboard
     )
 
@@ -1430,28 +1487,41 @@ async def add_to_cart(callback: types.CallbackQuery):
     )
     mark_cart_active(callback.from_user.id)
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🏠 Главное меню",
-                    callback_data="back_to_menu"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🛒 Корзина",
-                    callback_data="cart"
-                )
-            ]
-        ]
-    )
+    recommended_products = get_recommended_products(product_id)
 
-    await callback.message.answer(
+    keyboard_rows = []
+    for recommended_product in recommended_products:
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text=recommended_product["name"],
+                callback_data=f"product_{recommended_product['id']}"
+            )
+        ])
+    keyboard_rows.append([
+        InlineKeyboardButton(
+            text="🏠 Главное меню",
+            callback_data="back_to_menu"
+        )
+    ])
+    keyboard_rows.append([
+        InlineKeyboardButton(
+            text="🛒 Корзина",
+            callback_data="cart"
+        )
+    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    success_text = (
         "✅ Отличный выбор!\n\n"
         "🛒 Товар успешно добавлен в корзину.\n\n"
         "🍺 Соберите свой идеальный набор или переходите к оформлению заказа.\n\n"
-        "👇 Выберите следующее действие:",
+        "👇 Выберите следующее действие:"
+    )
+    if recommended_products:
+        success_text += f"\n\n{random.choice(UPSELL_INTRO_PHRASES)}"
+
+    await callback.message.answer(
+        success_text,
         reply_markup=keyboard
     )
 
