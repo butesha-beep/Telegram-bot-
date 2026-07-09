@@ -1950,6 +1950,139 @@ async def show_clients(message: types.Message):
     await message.answer(text)
 
 
+def price_cart_items(cart_items, products):
+    total = 0
+    priced_items = []
+
+    for product_id, weight, option_id, option_label, option_price in cart_items:
+        product = next((p for p in products if p["id"] == product_id), None)
+        if not product:
+            continue
+
+        if option_id and option_price is not None:
+            price = float(option_price)
+            item_detail = f"  Вариант: {option_label}\n"
+        else:
+            price = product["price_per_kg"] * weight / 1000
+            item_detail = f"  Вес: {weight} г\n"
+
+        total += price
+        priced_items.append({
+            "product": product,
+            "product_id": product_id,
+            "weight": weight,
+            "option_id": option_id,
+            "price": price,
+            "item_detail": item_detail
+        })
+
+    return total, priced_items
+
+
+def create_order_from_cart(
+    user_id,
+    username,
+    phone,
+    address,
+    cart_items,
+    products,
+    first_name=None,
+    save_contact=False
+):
+    total, priced_items = price_cart_items(cart_items, products)
+
+    order_id = user_id + int(asyncio.get_event_loop().time())
+
+    user_text = f"@{username}" if username else f"ID: {user_id}"
+
+    order_text = f"🧾 Заказ #{order_id}\n\n"
+    for item in priced_items:
+        order_text += (
+            f"• {item['product']['name']}\n"
+            f"{item['item_detail']}"
+            f"  Сумма: {item['price']:.2f} €\n\n"
+        )
+    order_text += (
+        f"💰 Итого: {total:.2f} €\n\n"
+        f"👤 Покупатель: {user_text}\n"
+        f"📞 Телефон: {phone}\n"
+        f"🏠 Адрес: {address}"
+    )
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    if save_contact:
+        cursor.execute("""
+            INSERT INTO clients (
+                telegram_id,
+                username,
+                first_name,
+                phone,
+                address
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (telegram_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                phone = EXCLUDED.phone,
+                address = EXCLUDED.address
+        """, (
+            user_id,
+            username,
+            first_name,
+            phone,
+            address
+        ))
+
+    cursor.execute("""
+        INSERT INTO orders (
+            order_id,
+            telegram_id,
+            username,
+            phone,
+            address,
+            total,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    """, (
+        order_id,
+        user_id,
+        username,
+        phone,
+        address,
+        total,
+        "pending"
+    ))
+
+    for item in priced_items:
+        cursor.execute(
+            "INSERT INTO order_items (order_id, product_id, product_name, weight, price, option_id) VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                order_id,
+                item["product_id"],
+                item["product"]["name"],
+                item["weight"],
+                item["price"],
+                item["option_id"]
+            )
+        )
+
+    cursor.execute(
+        "DELETE FROM cart_items WHERE telegram_id = %s",
+        (user_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    log_customer_event(user_id, "order_created", {"order_id": order_id})
+
+    return order_id, order_text, total
+
+
 @dp.message()
 async def handle_order_data(message: types.Message):
     user_id = message.from_user.id
@@ -1982,121 +2115,16 @@ async def handle_order_data(message: types.Message):
         products = get_products()
         config = load_json("config.json")
 
-        order_id = user_id + int(asyncio.get_event_loop().time())
-
-        username = message.from_user.username
-        if username:
-            user_text = f"@{username}"
-        else:
-            user_text = f"ID: {user_id}"
-
-        order_text = f"🧾 Заказ #{order_id}\n\n"
-        total = 0
-
-        for product_id, weight, option_id, option_label, option_price in cart_items:
-            product = next(
-                (p for p in products if p["id"] == product_id),
-                None
-            )
-
-            if not product:
-                continue
-
-            if option_id and option_price is not None:
-                price = float(option_price)
-                item_detail = f"  Вариант: {option_label}\n"
-            else:
-                price = product["price_per_kg"] * weight / 1000
-                item_detail = f"  Вес: {weight} г\n"
-            total += price
-
-            order_text += (
-                f"• {product['name']}\n"
-                f"{item_detail}"
-                f"  Сумма: {price:.2f} €\n\n"
-            )
-
-        order_text += (
-            f"💰 Итого: {total:.2f} €\n\n"
-            f"👤 Покупатель: {user_text}\n"
-            f"📞 Телефон: {phone}\n"
-            f"🏠 Адрес: {address}"
+        order_id, order_text, _ = create_order_from_cart(
+            user_id=user_id,
+            username=message.from_user.username,
+            phone=phone,
+            address=address,
+            cart_items=cart_items,
+            products=products,
+            first_name=message.from_user.first_name,
+            save_contact=True
         )
-
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-
-        # Update or insert client contact info
-        cursor.execute("""
-            INSERT INTO clients (
-                telegram_id,
-                username,
-                first_name,
-                phone,
-                address
-            )
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (telegram_id) DO UPDATE SET
-                username = EXCLUDED.username,
-                first_name = EXCLUDED.first_name,
-                phone = EXCLUDED.phone,
-                address = EXCLUDED.address
-        """, (
-            user_id,
-            message.from_user.username,
-            message.from_user.first_name,
-            phone,
-            address
-        ))
-        
-        # Save order to database
-        cursor.execute("""
-            INSERT INTO orders (
-                order_id,
-                telegram_id,
-                username,
-                phone,
-                address,
-                total,
-                status,
-                created_at,
-                updated_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-        """, (
-            order_id,
-            user_id,
-            message.from_user.username,
-            phone,
-            address,
-            total,
-            "pending"
-        ))
-
-        for product_id, weight, option_id, option_label, option_price in cart_items:
-            product = next(
-                (p for p in products if p["id"] == product_id),
-                None
-            )
-            if not product:
-                continue
-            product_name = product["name"]
-            if option_id and option_price is not None:
-                price = float(option_price)
-            else:
-                price = (product["price_per_kg"] * weight) / 1000
-            cursor.execute(
-                "INSERT INTO order_items (order_id, product_id, product_name, weight, price, option_id) VALUES (%s, %s, %s, %s, %s, %s)",
-                (order_id, product_id, product_name, weight, price, option_id)
-            )
-        # Delete cart items
-        cursor.execute(
-            "DELETE FROM cart_items WHERE telegram_id = %s",
-            (user_id,)
-        )
-        conn.commit()
-        conn.close()
-        log_customer_event(user_id, "order_created", {"order_id": order_id})
 
         # Send confirmation to customer
         await message.answer(
@@ -2161,15 +2189,8 @@ async def checkout(callback: types.CallbackQuery):
     config = load_json("config.json")
     minimum_order_amount = config.get("minimum_order_amount", 20)
     
-    total = 0
-    for product_id, weight, option_id, option_label, option_price in cart_items:
-        product = next((p for p in products if p["id"] == product_id), None)
-        if product:
-            if option_id and option_price is not None:
-                total += float(option_price)
-            else:
-                total += product["price_per_kg"] * weight / 1000
-    
+    total, _ = price_cart_items(cart_items, products)
+
     if total < minimum_order_amount:
         missing = minimum_order_amount - total
         await callback.message.answer(
@@ -2282,96 +2303,14 @@ async def use_saved_data(callback: types.CallbackQuery):
     products = get_products()
     config = load_json("config.json")
 
-    order_id = user_id + int(asyncio.get_event_loop().time())
-
-    username = callback.from_user.username
-    if username:
-        user_text = f"@{username}"
-    else:
-        user_text = f"ID: {user_id}"
-
-    order_text = f"🧾 Заказ #{order_id}\n\n"
-    total = 0
-
-    for product_id, weight, option_id, option_label, option_price in cart_items:
-        product = next(
-            (p for p in products if p["id"] == product_id),
-            None
-        )
-
-        if not product:
-            continue
-
-        if option_id and option_price is not None:
-            price = float(option_price)
-            item_detail = f"  Вариант: {option_label}\n"
-        else:
-            price = product["price_per_kg"] * weight / 1000
-            item_detail = f"  Вес: {weight} г\n"
-        total += price
-
-        order_text += (
-            f"• {product['name']}\n"
-            f"{item_detail}"
-            f"  Сумма: {price:.2f} €\n\n"
-        )
-
-    order_text += (
-        f"💰 Итого: {total:.2f} €\n\n"
-        f"👤 Покупатель: {user_text}\n"
-        f"📞 Телефон: {phone}\n"
-        f"🏠 Адрес: {address}"
+    order_id, order_text, _ = create_order_from_cart(
+        user_id=user_id,
+        username=callback.from_user.username,
+        phone=phone,
+        address=address,
+        cart_items=cart_items,
+        products=products
     )
-
-    conn = psycopg2.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO orders (
-            order_id,
-            telegram_id,
-            username,
-            phone,
-            address,
-            total,
-            status,
-            created_at,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-    """, (
-        order_id,
-        user_id,
-        callback.from_user.username,
-        phone,
-        address,
-        total,
-        "pending"
-    ))
-
-    for product_id, weight, option_id, option_label, option_price in cart_items:
-        product = next(
-            (p for p in products if p["id"] == product_id),
-            None
-        )
-        if not product:
-            continue
-        product_name = product["name"]
-        if option_id and option_price is not None:
-            price = float(option_price)
-        else:
-            price = (product["price_per_kg"] * weight) / 1000
-        cursor.execute(
-            "INSERT INTO order_items (order_id, product_id, product_name, weight, price, option_id) VALUES (%s, %s, %s, %s, %s, %s)",
-            (order_id, product_id, product_name, weight, price, option_id)
-        )
-
-    cursor.execute(
-        "DELETE FROM cart_items WHERE telegram_id = %s",
-        (user_id,)
-    )
-    conn.commit()
-    conn.close()
-    log_customer_event(user_id, "order_created", {"order_id": order_id})
 
     await callback.message.answer(
         f"✅ Заказ успешно оформлен!\n\n"
