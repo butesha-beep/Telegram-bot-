@@ -478,8 +478,6 @@ OUT_OF_STOCK_TEXT = (
 def is_product_out_of_stock(product):
     if product.get("is_out_of_stock"):
         return True
-    if os.getenv("ENFORCE_STOCK") != "1":
-        return False
     stock_grams = product.get("stock_grams")
     if stock_grams is None:
         return False
