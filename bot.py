@@ -504,14 +504,6 @@ UPSELL_INTRO_PHRASES = [
     "🤤 Это тоже стоит попробовать:",
 ]
 
-CART_UPSELL_INTRO_PHRASES = [
-    "😋 Пока оформляете заказ, обратите внимание ещё на эти товары:",
-    "🔥 Возможно, вам понравится ещё:",
-    "❤️ Отличное дополнение к вашему заказу:",
-    "👌 Многие покупатели добавляют ещё:",
-    "🤤 Эти товары тоже стоит попробовать:",
-]
-
 
 def get_recommended_products(product_id, limit=3):
     conn = psycopg2.connect(DATABASE_URL)
@@ -1749,12 +1741,16 @@ async def show_cart(callback: types.CallbackQuery):
             break
 
     if recommended_products:
-        text += f"\n\n{random.choice(CART_UPSELL_INTRO_PHRASES)}"
+        text += (
+            "\n\n━━━━━━━━━━━━━━\n"
+            "😋 Хотите добавить что-нибудь ещё?\n\n"
+            "Эти товары хорошо подойдут к вашему заказу:"
+        )
 
     recommendation_rows = [
         [
             InlineKeyboardButton(
-                text=recommended_product["name"],
+                text=f"➕ {recommended_product['name']}",
                 callback_data=f"product_{recommended_product['id']}"
             )
         ]
