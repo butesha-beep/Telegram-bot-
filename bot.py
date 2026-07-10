@@ -1218,11 +1218,7 @@ async def show_promotions(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("product_"))
-async def show_product(callback: types.CallbackQuery):
-
-    product_id = int(callback.data.split("_")[1])
-
+async def render_product(message, product_id, telegram_id):
     products = get_products()
 
     product = next(
@@ -1231,13 +1227,12 @@ async def show_product(callback: types.CallbackQuery):
     )
 
     if not product:
-        await callback.message.answer(
+        await message.answer(
             "❌ Товар не найден."
         )
-        await callback.answer()
         return
     log_customer_event(
-        callback.from_user.id,
+        telegram_id,
         "view_product",
         {"product_id": product_id}
     )
@@ -1265,16 +1260,15 @@ async def show_product(callback: types.CallbackQuery):
         photo = product.get("photo") or product.get("image_url")
         if photo:
             try:
-                await callback.message.answer_photo(
+                await message.answer_photo(
                     photo=photo,
                     caption=text,
                     reply_markup=keyboard
                 )
             except Exception:
-                await callback.message.answer(text, reply_markup=keyboard)
+                await message.answer(text, reply_markup=keyboard)
         else:
-            await callback.message.answer(text, reply_markup=keyboard)
-        await callback.answer()
+            await message.answer(text, reply_markup=keyboard)
         return
 
     try:
@@ -1365,21 +1359,29 @@ async def show_product(callback: types.CallbackQuery):
 
     if photo:
         try:
-            await callback.message.answer_photo(
+            await message.answer_photo(
                 photo=photo,
                 caption=text,
                 reply_markup=keyboard
             )
         except Exception:
-            await callback.message.answer(
+            await message.answer(
                 text,
                 reply_markup=keyboard
             )
     else:
-        await callback.message.answer(
+        await message.answer(
             text,
             reply_markup=keyboard
         )
+
+
+@dp.callback_query(F.data.startswith("product_"))
+async def show_product(callback: types.CallbackQuery):
+
+    product_id = int(callback.data.split("_")[1])
+
+    await render_product(callback.message, product_id, callback.from_user.id)
 
     await callback.answer()
 
@@ -2581,6 +2583,118 @@ def find_category_by_free_text(text):
     return None
 
 
+PRODUCT_ALIASES = {
+    "красная рыба": "лосось",
+    "красной рыбы": "лосось",
+}
+
+PRODUCT_TEXT_STOPWORDS = {
+    "хочу",
+    "надо",
+    "нужен",
+    "нужна",
+    "нужно",
+    "дайте",
+    "дать",
+    "покажи",
+    "покажите",
+    "давай",
+    "можно",
+    "пожалуйста",
+    "будет",
+    "есть",
+}
+
+
+def _meaningful_free_text_words(normalized_text):
+    return [
+        word for word in normalized_text.split(" ")
+        if len(word) >= 4 and word not in PRODUCT_TEXT_STOPWORDS
+    ]
+
+
+def _distinctive_words_match(word_a, word_b, prefix_length=4):
+    if len(word_a) < prefix_length or len(word_b) < prefix_length:
+        return word_a == word_b
+    return word_a[:prefix_length] == word_b[:prefix_length]
+
+
+def find_product_by_free_text(text):
+    normalized_text = normalize_free_text(text)
+    if not normalized_text:
+        return None
+
+    products = get_products()
+    normalized_products = [
+        (product, normalize_free_text(product["name"]))
+        for product in products
+    ]
+
+    # A. Exact normalized product-name match
+    exact_matches = []
+    seen_exact_ids = set()
+    for product, normalized_name in normalized_products:
+        if normalized_name and normalized_name == normalized_text:
+            if product["id"] not in seen_exact_ids:
+                seen_exact_ids.add(product["id"])
+                exact_matches.append(product)
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        return None
+
+    # B. Full normalized product name contained inside customer text
+    contained_matches = []
+    seen_contained_ids = set()
+    for product, normalized_name in normalized_products:
+        if normalized_name and normalized_name in normalized_text:
+            if product["id"] not in seen_contained_ids:
+                seen_contained_ids.add(product["id"])
+                contained_matches.append(product)
+    if len(contained_matches) == 1:
+        return contained_matches[0]
+    if len(contained_matches) > 1:
+        return None
+
+    # C. Safe distinctive-word matching (handles short case-ending variation
+    # via a 4-character prefix comparison, without any lemmatization/NLP)
+    customer_words = _meaningful_free_text_words(normalized_text)
+    if customer_words:
+        word_matches = []
+        seen_word_ids = set()
+        for product, normalized_name in normalized_products:
+            product_words = _meaningful_free_text_words(normalized_name)
+            has_match = any(
+                _distinctive_words_match(customer_word, product_word)
+                for customer_word in customer_words
+                for product_word in product_words
+            )
+            if has_match and product["id"] not in seen_word_ids:
+                seen_word_ids.add(product["id"])
+                word_matches.append(product)
+        if len(word_matches) == 1:
+            return word_matches[0]
+        if len(word_matches) > 1:
+            return None
+
+    # D. PRODUCT_ALIASES fallback
+    alias_matches = []
+    seen_alias_ids = set()
+    for alias_phrase, product_name_fragment in PRODUCT_ALIASES.items():
+        if alias_phrase not in normalized_text:
+            continue
+        for product, normalized_name in normalized_products:
+            if product_name_fragment in normalized_name:
+                if product["id"] not in seen_alias_ids:
+                    seen_alias_ids.add(product["id"])
+                    alias_matches.append(product)
+
+    if len(alias_matches) == 1:
+        return alias_matches[0]
+
+    return None
+
+
 def classify_free_text_intent(text):
     normalized = (text or "").strip().lower()
     if not normalized:
@@ -2651,6 +2765,11 @@ async def handle_free_text_fallback(message: types.Message):
 
     if normalized_text and any(keyword in normalized_text for keyword in PROMOTION_KEYWORDS):
         await render_promotions(message, message.from_user.id)
+        return
+
+    matched_product = find_product_by_free_text(message.text)
+    if matched_product:
+        await render_product(message, matched_product["id"], message.from_user.id)
         return
 
     matched_category = find_category_by_free_text(message.text)
