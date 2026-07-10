@@ -1262,6 +1262,72 @@ async def show_promotions(callback: types.CallbackQuery):
     await callback.answer()
 
 
+def _parse_variable_weight_range(label):
+    match = re.search(r'(\d+)\s*[-–]\s*(\d+)\s*г', label or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _variable_weight_size_word(index, total):
+    if total <= 1:
+        return None
+    if index == 0:
+        return "Поменьше"
+    if index == total - 1:
+        return "Побольше"
+    return "Средняя"
+
+
+def _format_variable_weight_button_label(label, index, total):
+    parsed_range = _parse_variable_weight_range(label)
+    if not parsed_range:
+        return label
+
+    start, end = parsed_range
+    range_text = f"{start}–{end} г"
+    size_word = _variable_weight_size_word(index, total)
+    if not size_word:
+        return range_text
+    return f"{size_word} · {range_text}"
+
+
+def _build_variable_weight_explanation(product_icon, product, options):
+    parsed_ranges = [_parse_variable_weight_range(row[1]) for row in options]
+
+    if not all(parsed_ranges):
+        return (
+            f"{product_icon} {product['name']}\n\n"
+            f"{product['description']}\n\n"
+            f"💰 Цена: {product['price_per_kg']} €/кг\n\n"
+            f"🐟 Вес каждой рыбы немного отличается.\n\n"
+            f"⚖️ Точный вес будет известен после взвешивания.\n"
+            f"После оформления заказа администратор взвесит выбранную рыбу и отправит вам точную сумму к оплате.\n\n"
+            f"👇 Выберите размер:"
+        )
+
+    total = len(parsed_ranges)
+    overall_min = min(start for start, _ in parsed_ranges)
+    overall_max = max(end for _, end in parsed_ranges)
+
+    bullet_lines = "\n".join(
+        f"• {_variable_weight_size_word(index, total)} — {start}–{end} г"
+        for index, (start, end) in enumerate(parsed_ranges)
+    )
+
+    return (
+        f"{product_icon} {product['name']}\n\n"
+        f"{product['description']}\n\n"
+        f"💰 Цена: {product['price_per_kg']} €/кг\n\n"
+        f"🐟 Одна рыба весит примерно от {overall_min} г до {overall_max} г.\n\n"
+        f"Выберите, какой размер вам нужен:\n\n"
+        f"{bullet_lines}\n\n"
+        f"⚖️ Точный вес каждой рыбы немного отличается.\n"
+        f"После оформления заказа администратор взвесит выбранную рыбу и отправит вам точную сумму к оплате.\n\n"
+        f"👇 Выберите размер:"
+    )
+
+
 async def render_product(message, product_id, telegram_id):
     products = get_products()
 
@@ -1336,22 +1402,21 @@ async def render_product(message, product_id, telegram_id):
     is_variable_weight = any(row[2] is None for row in options)
 
     if is_variable_weight:
-        text = (
-            f"{product_icon} {product['name']}\n\n"
-            f"{product['description']}\n\n"
-            f"💰 Цена: {product['price_per_kg']} €/кг\n\n"
-            f"👇 Выберите размер:\n\n"
-            f"⚖️ Вес будет уточнён после сборки заказа.\n"
-            f"Администратор взвесит товар и отправит финальную сумму к оплате."
-        )
+        text = _build_variable_weight_explanation(product_icon, product, options)
 
     if options:
         option_rows = []
         option_row = []
-        for option_id, label, weight, option_price in options:
+        options_total = len(options)
+        for option_index, (option_id, label, weight, option_price) in enumerate(options):
+            button_label = (
+                _format_variable_weight_button_label(label, option_index, options_total)
+                if is_variable_weight
+                else label
+            )
             option_row.append(
                 InlineKeyboardButton(
-                    text=label,
+                    text=button_label,
                     callback_data=f"option_{option_id}"
                 )
             )
