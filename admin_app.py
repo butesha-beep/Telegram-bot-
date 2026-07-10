@@ -201,6 +201,9 @@ def admin_css():
   .dash-card:hover { border-color: var(--accent); color: var(--text); }
   .dash-card strong { display: block; margin-bottom: 8px; font-size: 18px; }
   .dash-card span { color: var(--muted); font-size: 14px; }
+  .dash-card.priority-urgent { border-top-color: #ef4444; }
+  .dash-card.priority-today { border-top-color: #eab308; }
+  .dash-card.priority-later { border-top-color: #3b82f6; }
   .attention-banner {
     margin: 16px 0;
     padding: 14px 16px;
@@ -1484,6 +1487,15 @@ async def root():
     low_stock_count = 0
     funnel_rows = []
     error_message = None
+    cc_pending_weighing_count = 0
+    cc_low_stock_count = 0
+    cc_recent_errors_count = 0
+    cc_no_recommendations_count = 0
+    cc_no_promotion_count = 0
+    cc_no_sales_count = 0
+    cc_no_image_count = 0
+    cc_no_description_count = 0
+    cc_never_sold_count = 0
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -1648,6 +1660,127 @@ async def root():
             """
         )
         latest_orders = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT COUNT(DISTINCT o.order_id)
+            FROM orders o
+            WHERE o.status != 'cancelled'
+              AND EXISTS (
+                  SELECT 1
+                  FROM order_items oi
+                  WHERE oi.order_id = o.order_id
+                    AND oi.weight IS NULL
+              )
+            """
+        )
+        cc_pending_weighing_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM products p
+            WHERE p.is_active = TRUE
+              AND (
+                  p.is_out_of_stock = TRUE
+                  OR (
+                      p.stock_grams IS NOT NULL
+                      AND p.low_stock_threshold_grams IS NOT NULL
+                      AND p.stock_grams <= p.low_stock_threshold_grams
+                  )
+              )
+            """
+        )
+        cc_low_stock_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM error_logs
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+            """
+        )
+        cc_recent_errors_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM products p
+            WHERE p.is_active = TRUE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM product_recommendations pr
+                  WHERE pr.product_id = p.id
+                    AND pr.recommendation_type = 'frequently_bought_together'
+                    AND pr.is_active = TRUE
+              )
+            """
+        )
+        cc_no_recommendations_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM products
+            WHERE is_active = TRUE
+              AND is_promotion = FALSE
+            """
+        )
+        cc_no_promotion_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM products p
+            WHERE p.is_active = TRUE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM order_items oi
+                  JOIN orders o ON o.order_id = oi.order_id
+                  WHERE oi.product_id = p.id
+                    AND o.status != 'cancelled'
+                    AND o.created_at >= NOW() - INTERVAL '14 days'
+              )
+            """
+        )
+        cc_no_sales_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM products
+            WHERE is_active = TRUE
+              AND (image_url IS NULL OR TRIM(image_url) = '')
+            """
+        )
+        cc_no_image_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM products
+            WHERE is_active = TRUE
+              AND (description IS NULL OR TRIM(description) = '')
+            """
+        )
+        cc_no_description_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM products p
+            WHERE p.is_active = TRUE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM order_items oi
+                  JOIN orders o ON o.order_id = oi.order_id
+                  WHERE oi.product_id = p.id
+                    AND o.status != 'cancelled'
+              )
+            """
+        )
+        cc_never_sold_count = cursor.fetchone()[0]
+
         conn.close()
     except Exception as e:
         log_admin_error("/", "dashboard", e)
@@ -1877,6 +2010,69 @@ async def root():
         </section>
     """
 
+    control_center_section = f"""
+        <section class="admin-card dash-section">
+          <h2>🧠 Центр управления владельца</h2>
+
+          <h3>🔴 Срочно</h3>
+          <div class="dash-grid">
+            <a class="dash-card priority-urgent" href="/orders?pending_weighing=1">
+              <strong>⚖️ Ожидают взвешивания</strong>
+              <span>Заказы с товарами, которые ещё нужно взвесить</span>
+              <strong class="stat-value">{cc_pending_weighing_count}</strong>
+            </a>
+            <a class="dash-card priority-urgent" href="/products?filter=low_stock">
+              <strong>⚠️ Низкий остаток</strong>
+              <span>Товары заканчиваются или уже отсутствуют</span>
+              <strong class="stat-value">{cc_low_stock_count}</strong>
+            </a>
+            <a class="dash-card priority-urgent" href="/logs">
+              <strong>🛑 Ошибки за 24 часа</strong>
+              <span>Системные ошибки за последние сутки</span>
+              <strong class="stat-value">{cc_recent_errors_count}</strong>
+            </a>
+          </div>
+
+          <h3>🟡 Стоит сделать сегодня</h3>
+          <div class="dash-grid">
+            <a class="dash-card priority-today" href="/products?filter=no_recommendations">
+              <strong>🎯 Без рекомендаций</strong>
+              <span>Товары без настроенных сопутствующих рекомендаций</span>
+              <strong class="stat-value">{cc_no_recommendations_count}</strong>
+            </a>
+            <a class="dash-card priority-today" href="/products?filter=no_promotion">
+              <strong>🔥 Без акции</strong>
+              <span>Товары, не отмеченные как акционные</span>
+              <strong class="stat-value">{cc_no_promotion_count}</strong>
+            </a>
+            <a class="dash-card priority-today" href="/products?filter=no_sales&days=14">
+              <strong>📉 Без продаж 14 дней</strong>
+              <span>Товары без продаж за последние 14 дней</span>
+              <strong class="stat-value">{cc_no_sales_count}</strong>
+            </a>
+          </div>
+
+          <h3>🔵 Можно улучшить позже</h3>
+          <div class="dash-grid">
+            <a class="dash-card priority-later" href="/products?filter=no_image">
+              <strong>📷 Без фотографии</strong>
+              <span>Товары без изображения в карточке</span>
+              <strong class="stat-value">{cc_no_image_count}</strong>
+            </a>
+            <a class="dash-card priority-later" href="/products?filter=no_description">
+              <strong>📝 Без описания</strong>
+              <span>Товары без текстового описания</span>
+              <strong class="stat-value">{cc_no_description_count}</strong>
+            </a>
+            <a class="dash-card priority-later" href="/products?filter=never_sold">
+              <strong>📦 Никогда не продавались</strong>
+              <span>Товары без единой продажи за всё время</span>
+              <strong class="stat-value">{cc_never_sold_count}</strong>
+            </a>
+          </div>
+        </section>
+    """
+
     return admin_layout(
         ADMIN_PANEL_TITLE,
         f"""
@@ -1887,6 +2083,8 @@ async def root():
             <p>Быстрый доступ к заказам, каталогу, категориям и клиентам.</p>
           </div>
         </section>
+
+        {control_center_section}
 
         <div class="dash-grid">
           <a class="dash-card" href="/orders"><strong>Заказы</strong><span>Просмотр и обновление заказов клиентов</span></a>
