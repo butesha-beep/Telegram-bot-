@@ -3771,16 +3771,90 @@ async def update_client_note(telegram_id: int, client_note: str = Form("")):
 
 
 @app.get("/products", response_class=HTMLResponse)
-async def products():
+async def products(filter: str = "", days: int = 14):
     try:
+        allowed_filters = {
+            "low_stock",
+            "no_recommendations",
+            "no_promotion",
+            "no_sales",
+            "no_image",
+            "no_description",
+            "never_sold",
+        }
+        active_filter = filter if filter in allowed_filters else ""
+
+        try:
+            days_value = int(days)
+        except (TypeError, ValueError):
+            days_value = 14
+        days_value = max(1, min(days_value, 365))
+
+        where_sql = ""
+        params = []
+
+        if active_filter == "low_stock":
+            where_sql = """
+                WHERE p.is_active = TRUE
+                  AND (
+                    p.is_out_of_stock = TRUE
+                    OR (
+                        p.stock_grams IS NOT NULL
+                        AND p.low_stock_threshold_grams IS NOT NULL
+                        AND p.stock_grams <= p.low_stock_threshold_grams
+                    )
+                  )
+            """
+        elif active_filter == "no_recommendations":
+            where_sql = """
+                WHERE p.is_active = TRUE
+                  AND NOT EXISTS (
+                    SELECT 1 FROM product_recommendations pr
+                    WHERE pr.product_id = p.id
+                      AND pr.recommendation_type = 'frequently_bought_together'
+                      AND pr.is_active = TRUE
+                  )
+            """
+        elif active_filter == "no_promotion":
+            where_sql = "WHERE p.is_active = TRUE AND p.is_promotion = FALSE"
+        elif active_filter == "no_sales":
+            where_sql = """
+                WHERE p.is_active = TRUE
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM order_items oi
+                    JOIN orders o ON o.order_id = oi.order_id
+                    WHERE oi.product_id = p.id
+                      AND o.status != 'cancelled'
+                      AND o.created_at >= NOW() - (%s * INTERVAL '1 day')
+                  )
+            """
+            params.append(days_value)
+        elif active_filter == "no_image":
+            where_sql = "WHERE p.is_active = TRUE AND (p.image_url IS NULL OR TRIM(p.image_url) = '')"
+        elif active_filter == "no_description":
+            where_sql = "WHERE p.is_active = TRUE AND (p.description IS NULL OR TRIM(p.description) = '')"
+        elif active_filter == "never_sold":
+            where_sql = """
+                WHERE p.is_active = TRUE
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM order_items oi
+                    JOIN orders o ON o.order_id = oi.order_id
+                    WHERE oi.product_id = p.id
+                      AND o.status != 'cancelled'
+                  )
+            """
+
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name, p.stock_grams, p.is_out_of_stock, p.low_stock_threshold_grams, p.is_promotion
             FROM products p
             LEFT JOIN categories c ON c.id = p.category_id
+            {where_sql}
             ORDER BY p.sort_order, p.id
-        """)
+        """, params)
         rows = cursor.fetchall()
         conn.close()
 
@@ -3798,7 +3872,27 @@ async def products():
             anchor = "-".join("".join(ch.lower() if ch.isalnum() else "-" for ch in category_label).split("-"))
             category_anchors[category_label] = f"category-{index}-{anchor or 'items'}"
 
+        filter_labels = {
+            "low_stock": "Фильтр: товары с низким остатком",
+            "no_recommendations": "Фильтр: товары без рекомендаций",
+            "no_promotion": "Фильтр: товары без акций",
+            "no_sales": f"Фильтр: без продаж за {days_value} дн.",
+            "no_image": "Фильтр: товары без фото",
+            "no_description": "Фильтр: товары без описания",
+            "never_sold": "Фильтр: товары, которые ни разу не продавались",
+        }
+
         html = "<section class='admin-card' id='all-products'><h1>🛒 Товары</h1><p><a class='button button-link' href='/products/new'>➕ Новый товар</a></p><p>Скрытые товары не показываются в каталоге, но остаются в системе.</p>"
+        if active_filter:
+            filter_label_text = escape(filter_labels.get(active_filter, ""), quote=True)
+            html += (
+                f"<div class='attention-banner'>{filter_label_text} "
+                f"<a class='button button-link secondary' href='/products'>Сбросить фильтр</a></div>"
+            )
+        if not rows:
+            html += "<p>Нет товаров по выбранному фильтру.</p></section>"
+            return admin_layout("🛒 Товары", html)
+
         html += "<div class='quick-nav'><a href='#all-products'>Все товары</a>"
         for category_label in category_order:
             html += f"<a href='#{category_anchors[category_label]}'>📁 {category_label}</a>"
