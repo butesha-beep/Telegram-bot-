@@ -916,6 +916,53 @@ DEAL_MARKET_SUPPORT_MESSAGE = (
 )
 
 
+FREE_TEXT_GREETING_REPLIES = [
+    "Привет 👋 Рад вас видеть! Чем могу помочь?",
+    "Здравствуйте 😊 С удовольствием помогу выбрать что-нибудь вкусное.",
+    "Добрый день! Подскажите, что хотите подобрать сегодня?",
+    "Привет! Давайте найдём для вас что-нибудь вкусное 😊",
+]
+
+FREE_TEXT_SHOPPING_REPLIES = [
+    (
+        "С удовольствием 😊\n\n"
+        "Для начала подскажите, что вам больше нравится:\n\n"
+        "🐟 Рыбные снеки\n"
+        "🥩 Мясные снеки\n"
+        "🍻 Что-нибудь к пиву\n"
+        "🎁 Подарочный набор\n\n"
+        "Выберите категорию ниже или напишите подробнее, что хотелось бы."
+    ),
+    (
+        "Конечно, помогу 😊\n\n"
+        "Что будем подбирать:\n\n"
+        "🐟 Рыбные снеки\n"
+        "🥩 Мясные снеки\n"
+        "🍻 Закуски к пиву\n"
+        "🎁 Набор на подарок\n\n"
+        "Можно выбрать категорию ниже или просто описать пожелания."
+    ),
+]
+
+FREE_TEXT_THANKS_REPLIES = [
+    "Пожалуйста 😊 Обращайтесь, если захочется подобрать что-нибудь ещё.",
+    "Всегда пожалуйста ❤️ Я рядом, если понадобится помощь.",
+    "Рад помочь 😊 Можете продолжить выбор или открыть корзину.",
+]
+
+FREE_TEXT_OBJECTION_REPLIES = [
+    (
+        "Понимаю вас 😊\n\n"
+        "Давайте помогу подобрать вариант по вкусу и бюджету. "
+        "Можно посмотреть акции или выбрать подходящую категорию ниже."
+    ),
+    (
+        "Понимаю 😊 Подскажите, что именно смущает: цена, доставка или выбор товара? "
+        "Постараюсь помочь подобрать подходящий вариант."
+    ),
+]
+
+
 EMPTY_CART_MESSAGE = (
     "🛒 Корзина пока пустая\n\n"
     "🍻 Не уходите с пустыми руками!\n\n"
@@ -2443,11 +2490,119 @@ def order_needs_weighing(order_id):
     return needs_weighing
 
 
+def classify_free_text_intent(text):
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return "unknown"
+
+    objection_keywords = [
+        "дорого",
+        "дорогая доставка",
+        "почему так дорого",
+        "скидк",
+        "свеж",
+        "сколько ждать",
+        "долго доставка",
+    ]
+    shopping_keywords = [
+        "хочу",
+        "заказать",
+        "посовет",
+        "порекоменд",
+        "подобрать",
+        "к пиву",
+        "рыб",
+        "мяс",
+        "снек",
+        "подар",
+        "набор",
+        "что вкусн",
+        "что есть",
+    ]
+    greeting_keywords = [
+        "привет",
+        "здравств",
+        "добрый день",
+        "добрый вечер",
+        "доброе утро",
+    ]
+    thanks_keywords = [
+        "спасибо",
+        "благодар",
+        "спс",
+    ]
+    thanks_exact_values = {
+        "👍",
+        "🙏",
+        "❤️",
+        "ок",
+        "класс",
+        "супер",
+    }
+
+    if any(keyword in normalized for keyword in objection_keywords):
+        return "objection"
+    if any(keyword in normalized for keyword in shopping_keywords):
+        return "shopping"
+    if any(keyword in normalized for keyword in greeting_keywords):
+        return "greeting"
+    if any(keyword in normalized for keyword in thanks_keywords) or normalized in thanks_exact_values:
+        return "thanks"
+
+    return "unknown"
+
+
+async def handle_free_text_fallback(message: types.Message):
+    if message.text and message.text.startswith("/"):
+        return
+
+    intent = classify_free_text_intent(message.text)
+
+    if intent == "greeting":
+        await message.answer(
+            random.choice(FREE_TEXT_GREETING_REPLIES),
+            reply_markup=main_menu()
+        )
+        return
+
+    if intent == "shopping":
+        await message.answer(
+            random.choice(FREE_TEXT_SHOPPING_REPLIES),
+            reply_markup=main_menu()
+        )
+        return
+
+    if intent == "objection":
+        await message.answer(
+            random.choice(FREE_TEXT_OBJECTION_REPLIES),
+            reply_markup=main_menu()
+        )
+        return
+
+    if intent == "thanks":
+        thanks_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_menu")],
+            [InlineKeyboardButton(text="🛒 Корзина", callback_data="cart")]
+        ])
+        await message.answer(
+            random.choice(FREE_TEXT_THANKS_REPLIES),
+            reply_markup=thanks_keyboard
+        )
+        return
+
+    await message.answer(
+        "Я рядом и с удовольствием помогу 😊\n\n"
+        "Напишите, что хотите подобрать: рыбные снеки, мясные снеки, подарок или что-нибудь к пиву.",
+        reply_markup=main_menu()
+    )
+
+
 @dp.message()
 async def handle_order_data(message: types.Message):
     user_id = message.from_user.id
 
     if user_id not in pending_orders:
+        await handle_free_text_fallback(message)
         return
 
     # Don't save commands as phone or address
