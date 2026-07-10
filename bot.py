@@ -500,6 +500,16 @@ def get_promotion_products():
     return products
 
 
+def has_available_promotions(exclude_product_id=None):
+    for product in get_promotion_products():
+        if exclude_product_id is not None and product["id"] == exclude_product_id:
+            continue
+        if is_product_out_of_stock(product):
+            continue
+        return True
+    return False
+
+
 OUT_OF_STOCK_TEXT = (
     "❌ Сейчас нет в наличии.\n"
     "Напишите администратору — подберём замену или сообщим о поступлении."
@@ -1448,6 +1458,13 @@ async def add_option_to_cart(callback: types.CallbackQuery):
                 callback_data=f"product_{recommended_product['id']}"
             )
         ])
+    if has_available_promotions(exclude_product_id=product_id):
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text="🔥 Посмотреть акции",
+                callback_data="promotions"
+            )
+        ])
     keyboard_rows.append([
         InlineKeyboardButton(
             text="🏠 Главное меню",
@@ -1575,6 +1592,13 @@ async def add_to_cart(callback: types.CallbackQuery):
             InlineKeyboardButton(
                 text=recommended_product["name"],
                 callback_data=f"product_{recommended_product['id']}"
+            )
+        ])
+    if has_available_promotions(exclude_product_id=product_id):
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text="🔥 Посмотреть акции",
+                callback_data="promotions"
             )
         ])
     keyboard_rows.append([
