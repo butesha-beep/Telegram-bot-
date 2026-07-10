@@ -2624,62 +2624,6 @@ def find_category_by_free_text(text):
     return None
 
 
-PRODUCT_ALIASES = {
-    "красная рыба": "лосось",
-    "красной рыбы": "лосось",
-}
-
-PRODUCT_TEXT_STOPWORDS = {
-    "хочу",
-    "надо",
-    "нужен",
-    "нужна",
-    "нужно",
-    "дайте",
-    "дать",
-    "покажи",
-    "покажите",
-    "давай",
-    "можно",
-    "пожалуйста",
-    "будет",
-    "есть",
-}
-
-BROAD_PRODUCT_TOPIC_WORDS = {
-    "рыба",
-    "рыбу",
-    "рыбы",
-    "рыбка",
-    "мясо",
-    "мяса",
-    "снек",
-    "снеки",
-    "закуска",
-    "закуски",
-    "вкусное",
-    "вкусный",
-    "пиво",
-    "пиву",
-    "пивом",
-}
-
-
-def _meaningful_free_text_words(normalized_text):
-    return [
-        word for word in normalized_text.split(" ")
-        if len(word) >= 4
-        and word not in PRODUCT_TEXT_STOPWORDS
-        and word not in BROAD_PRODUCT_TOPIC_WORDS
-    ]
-
-
-def _distinctive_words_match(word_a, word_b, prefix_length=4):
-    if len(word_a) < prefix_length or len(word_b) < prefix_length:
-        return word_a == word_b
-    return word_a[:prefix_length] == word_b[:prefix_length]
-
-
 def find_product_matches_by_free_text(text):
     normalized_text = normalize_free_text(text)
     if not normalized_text:
@@ -2713,39 +2657,7 @@ def find_product_matches_by_free_text(text):
     if contained_matches:
         return contained_matches
 
-    # C. Safe distinctive-word matching (handles short case-ending variation
-    # via a 4-character prefix comparison, without any lemmatization/NLP;
-    # broad topic words are already excluded by _meaningful_free_text_words)
-    customer_words = _meaningful_free_text_words(normalized_text)
-    if customer_words:
-        word_matches = []
-        seen_word_ids = set()
-        for product, normalized_name in normalized_products:
-            product_words = _meaningful_free_text_words(normalized_name)
-            has_match = any(
-                _distinctive_words_match(customer_word, product_word)
-                for customer_word in customer_words
-                for product_word in product_words
-            )
-            if has_match and product["id"] not in seen_word_ids:
-                seen_word_ids.add(product["id"])
-                word_matches.append(product)
-        if word_matches:
-            return word_matches
-
-    # D. PRODUCT_ALIASES fallback
-    alias_matches = []
-    seen_alias_ids = set()
-    for alias_phrase, product_name_fragment in PRODUCT_ALIASES.items():
-        if alias_phrase not in normalized_text:
-            continue
-        for product, normalized_name in normalized_products:
-            if product_name_fragment in normalized_name:
-                if product["id"] not in seen_alias_ids:
-                    seen_alias_ids.add(product["id"])
-                    alias_matches.append(product)
-
-    return alias_matches
+    return []
 
 
 def find_product_by_free_text(text):
@@ -2825,6 +2737,11 @@ async def handle_free_text_fallback(message: types.Message):
         await render_promotions(message, message.from_user.id)
         return
 
+    matched_category = find_category_by_free_text(message.text)
+    if matched_category:
+        await render_category_products(message, matched_category["id"], message.from_user.id)
+        return
+
     matches = find_product_matches_by_free_text(message.text)
 
     if len(matches) == 1:
@@ -2843,11 +2760,6 @@ async def handle_free_text_fallback(message: types.Message):
         elif len(available_matches) == 1:
             await render_product(message, available_matches[0]["id"], message.from_user.id)
             return
-
-    matched_category = find_category_by_free_text(message.text)
-    if matched_category:
-        await render_category_products(message, matched_category["id"], message.from_user.id)
-        return
 
     intent = classify_free_text_intent(message.text)
 
@@ -2884,8 +2796,13 @@ async def handle_free_text_fallback(message: types.Message):
         return
 
     await message.answer(
-        "Я рядом и с удовольствием помогу 😊\n\n"
-        "Напишите, что хотите подобрать: рыбные снеки, мясные снеки, подарок или что-нибудь к пиву.",
+        "Не совсем понял вас 😊\n\n"
+        "Но с удовольствием помогу подобрать.\n\n"
+        "Напишите немного подробнее, что хочется:\n"
+        "рыбные снеки,\n"
+        "мясные снеки,\n"
+        "подарок\n"
+        "или что-нибудь к пиву.",
         reply_markup=main_menu()
     )
 
