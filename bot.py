@@ -557,6 +557,12 @@ UPSELL_INTRO_PHRASES = [
     "🤤 Это тоже стоит попробовать:",
 ]
 
+AUTO_RECOMMENDATION_PHRASES = [
+    "😋 Возможно, вам понравится ещё:",
+    "👌 Обратите внимание ещё на эти товары:",
+    "🔥 Может быть, захотите добавить что-нибудь ещё:",
+]
+
 
 def get_recommended_products(product_id, cart_product_ids=None, limit=3):
     cart_product_ids = cart_product_ids or set()
@@ -596,6 +602,52 @@ def get_recommended_products(product_id, cart_product_ids=None, limit=3):
         return []
 
     return random.sample(eligible_products, min(limit, len(eligible_products)))
+
+
+def get_automatic_recommendations(product_id, cart_product_ids=None, limit=3):
+    cart_product_ids = cart_product_ids or set()
+    products = get_products()
+
+    eligible_products = [
+        product for product in products
+        if product["id"] != product_id
+        and product["id"] not in cart_product_ids
+        and not is_product_out_of_stock(product)
+    ]
+
+    if not eligible_products:
+        return []
+
+    products_by_category = {}
+    for product in eligible_products:
+        products_by_category.setdefault(product["category_id"], []).append(product)
+
+    category_ids = list(products_by_category.keys())
+    random.shuffle(category_ids)
+
+    selected_products = []
+    selected_ids = set()
+
+    for category_id in category_ids:
+        if len(selected_products) >= limit:
+            break
+        candidate = random.choice(products_by_category[category_id])
+        selected_products.append(candidate)
+        selected_ids.add(candidate["id"])
+
+    if len(selected_products) < limit:
+        remaining_products = [
+            product for product in eligible_products
+            if product["id"] not in selected_ids
+        ]
+        random.shuffle(remaining_products)
+        for product in remaining_products:
+            if len(selected_products) >= limit:
+                break
+            selected_products.append(product)
+            selected_ids.add(product["id"])
+
+    return selected_products
 
 
 def out_of_stock_keyboard(category_id=None, alternatives=None):
@@ -1487,10 +1539,15 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     # no separate "exclude the product just added" check is needed.
     cart_product_ids = get_cart_product_ids(callback.from_user.id)
     recommended_products = get_recommended_products(product_id, cart_product_ids)
+    automatic_recommendations = []
+    if not recommended_products:
+        automatic_recommendations = get_automatic_recommendations(product_id, cart_product_ids)
     has_promotions = has_available_promotions(cart_product_ids)
 
+    display_recommendations = recommended_products or automatic_recommendations
+
     keyboard_rows = []
-    for recommended_product in recommended_products:
+    for recommended_product in display_recommendations:
         keyboard_rows.append([
             InlineKeyboardButton(
                 text=recommended_product["name"],
@@ -1526,6 +1583,8 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     )
     if recommended_products:
         success_text += f"\n\n{random.choice(UPSELL_INTRO_PHRASES)}"
+    elif automatic_recommendations:
+        success_text += f"\n\n{random.choice(AUTO_RECOMMENDATION_PHRASES)}"
     elif has_promotions:
         success_text += "\n\n🔥 Для вас сейчас есть выгодные предложения:"
 
@@ -1630,10 +1689,15 @@ async def add_to_cart(callback: types.CallbackQuery):
     # no separate "exclude the product just added" check is needed.
     cart_product_ids = get_cart_product_ids(callback.from_user.id)
     recommended_products = get_recommended_products(product_id, cart_product_ids)
+    automatic_recommendations = []
+    if not recommended_products:
+        automatic_recommendations = get_automatic_recommendations(product_id, cart_product_ids)
     has_promotions = has_available_promotions(cart_product_ids)
 
+    display_recommendations = recommended_products or automatic_recommendations
+
     keyboard_rows = []
-    for recommended_product in recommended_products:
+    for recommended_product in display_recommendations:
         keyboard_rows.append([
             InlineKeyboardButton(
                 text=recommended_product["name"],
@@ -1669,6 +1733,8 @@ async def add_to_cart(callback: types.CallbackQuery):
     )
     if recommended_products:
         success_text += f"\n\n{random.choice(UPSELL_INTRO_PHRASES)}"
+    elif automatic_recommendations:
+        success_text += f"\n\n{random.choice(AUTO_RECOMMENDATION_PHRASES)}"
     elif has_promotions:
         success_text += "\n\n🔥 Для вас сейчас есть выгодные предложения:"
 
@@ -2487,9 +2553,37 @@ async def checkout(callback: types.CallbackQuery):
 
     if not has_pending_weighing and total < minimum_order_amount:
         missing = minimum_order_amount - total
+
+        cart_product_ids = {row[0] for row in cart_items}
+        has_promotions = has_available_promotions(cart_product_ids)
+
+        keyboard_rows = [
+            [
+                InlineKeyboardButton(
+                    text="🛍 Вернуться к товарам",
+                    callback_data="back_to_menu"
+                )
+            ]
+        ]
+        if has_promotions:
+            keyboard_rows.append([
+                InlineKeyboardButton(
+                    text="🔥 Посмотреть акции",
+                    callback_data="promotions"
+                )
+            ])
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text="🛒 Корзина",
+                callback_data="cart"
+            )
+        ])
+
         await callback.message.answer(
-            f"🚚 Минимальная сумма заказа для доставки: {minimum_order_amount:.2f} €\n"
-            f"Добавьте товаров ещё на {missing:.2f} €."
+            f"🚚 Минимальная сумма заказа для доставки: {minimum_order_amount:.2f} €\n\n"
+            f"До оформления осталось добавить товаров ещё на {missing:.2f} €.\n\n"
+            f"Выберите, что сделать дальше 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         )
         await callback.answer()
         return
