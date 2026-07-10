@@ -1376,6 +1376,47 @@ async def render_product(message, product_id, telegram_id):
         )
 
 
+async def render_product_suggestions(message, products, intro_text=None, limit=5):
+    unique_products = []
+    seen_ids = set()
+    for product in products:
+        if product["id"] in seen_ids:
+            continue
+        if is_product_out_of_stock(product):
+            continue
+        seen_ids.add(product["id"])
+        unique_products.append(product)
+
+    limited_products = unique_products[:limit]
+
+    if not limited_products:
+        return False
+
+    keyboard_rows = [
+        [
+            InlineKeyboardButton(
+                text=DEAL_MARKET_PRODUCT_BUTTON_LABELS.get(product["name"], product["name"]),
+                callback_data=f"product_{product['id']}"
+            )
+        ]
+        for product in limited_products
+    ]
+    keyboard_rows.append([
+        InlineKeyboardButton(text="⬅️ К категориям", callback_data="back_to_menu")
+    ])
+    keyboard_rows.append([
+        InlineKeyboardButton(text="🛒 Корзина", callback_data="cart")
+    ])
+
+    text = intro_text or "Конечно 😊 Вот что удалось подобрать по вашему запросу:"
+
+    await message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    )
+    return True
+
+
 @dp.callback_query(F.data.startswith("product_"))
 async def show_product(callback: types.CallbackQuery):
 
@@ -2605,11 +2646,31 @@ PRODUCT_TEXT_STOPWORDS = {
     "есть",
 }
 
+BROAD_PRODUCT_TOPIC_WORDS = {
+    "рыба",
+    "рыбу",
+    "рыбы",
+    "рыбка",
+    "мясо",
+    "мяса",
+    "снек",
+    "снеки",
+    "закуска",
+    "закуски",
+    "вкусное",
+    "вкусный",
+    "пиво",
+    "пиву",
+    "пивом",
+}
+
 
 def _meaningful_free_text_words(normalized_text):
     return [
         word for word in normalized_text.split(" ")
-        if len(word) >= 4 and word not in PRODUCT_TEXT_STOPWORDS
+        if len(word) >= 4
+        and word not in PRODUCT_TEXT_STOPWORDS
+        and word not in BROAD_PRODUCT_TOPIC_WORDS
     ]
 
 
@@ -2619,10 +2680,10 @@ def _distinctive_words_match(word_a, word_b, prefix_length=4):
     return word_a[:prefix_length] == word_b[:prefix_length]
 
 
-def find_product_by_free_text(text):
+def find_product_matches_by_free_text(text):
     normalized_text = normalize_free_text(text)
     if not normalized_text:
-        return None
+        return []
 
     products = get_products()
     normalized_products = [
@@ -2638,10 +2699,8 @@ def find_product_by_free_text(text):
             if product["id"] not in seen_exact_ids:
                 seen_exact_ids.add(product["id"])
                 exact_matches.append(product)
-    if len(exact_matches) == 1:
-        return exact_matches[0]
-    if len(exact_matches) > 1:
-        return None
+    if exact_matches:
+        return exact_matches
 
     # B. Full normalized product name contained inside customer text
     contained_matches = []
@@ -2651,13 +2710,12 @@ def find_product_by_free_text(text):
             if product["id"] not in seen_contained_ids:
                 seen_contained_ids.add(product["id"])
                 contained_matches.append(product)
-    if len(contained_matches) == 1:
-        return contained_matches[0]
-    if len(contained_matches) > 1:
-        return None
+    if contained_matches:
+        return contained_matches
 
     # C. Safe distinctive-word matching (handles short case-ending variation
-    # via a 4-character prefix comparison, without any lemmatization/NLP)
+    # via a 4-character prefix comparison, without any lemmatization/NLP;
+    # broad topic words are already excluded by _meaningful_free_text_words)
     customer_words = _meaningful_free_text_words(normalized_text)
     if customer_words:
         word_matches = []
@@ -2672,10 +2730,8 @@ def find_product_by_free_text(text):
             if has_match and product["id"] not in seen_word_ids:
                 seen_word_ids.add(product["id"])
                 word_matches.append(product)
-        if len(word_matches) == 1:
-            return word_matches[0]
-        if len(word_matches) > 1:
-            return None
+        if word_matches:
+            return word_matches
 
     # D. PRODUCT_ALIASES fallback
     alias_matches = []
@@ -2689,10 +2745,12 @@ def find_product_by_free_text(text):
                     seen_alias_ids.add(product["id"])
                     alias_matches.append(product)
 
-    if len(alias_matches) == 1:
-        return alias_matches[0]
+    return alias_matches
 
-    return None
+
+def find_product_by_free_text(text):
+    matches = find_product_matches_by_free_text(text)
+    return matches[0] if len(matches) == 1 else None
 
 
 def classify_free_text_intent(text):
@@ -2767,10 +2825,24 @@ async def handle_free_text_fallback(message: types.Message):
         await render_promotions(message, message.from_user.id)
         return
 
-    matched_product = find_product_by_free_text(message.text)
-    if matched_product:
-        await render_product(message, matched_product["id"], message.from_user.id)
+    matches = find_product_matches_by_free_text(message.text)
+
+    if len(matches) == 1:
+        await render_product(message, matches[0]["id"], message.from_user.id)
         return
+
+    if 2 <= len(matches) <= 5:
+        available_matches = [
+            product for product in matches
+            if not is_product_out_of_stock(product)
+        ]
+
+        if len(available_matches) >= 2:
+            if await render_product_suggestions(message, available_matches):
+                return
+        elif len(available_matches) == 1:
+            await render_product(message, available_matches[0]["id"], message.from_user.id)
+            return
 
     matched_category = find_category_by_free_text(message.text)
     if matched_category:
