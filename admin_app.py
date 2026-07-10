@@ -1815,14 +1815,6 @@ async def root():
           <div class="dash-card"><span>Заказов сегодня</span><strong class="stat-value">{today_orders}</strong></div>
           <div class="dash-card"><span>Требуют внимания</span><strong class="stat-value">{awaiting_action}</strong></div>
         </div>
-        <h2>Требуют внимания</h2>
-        <div class="dash-grid">
-          <a class="dash-card" href="/orders?status_filter=pending"><span>Новые заказы</span><strong class="stat-value">{pending_orders}</strong></a>
-          <a class="dash-card" href="/orders?status_filter=awaiting_payment"><span>Ожидают оплаты</span><strong class="stat-value">{awaiting_payment_orders}</strong></a>
-          <a class="dash-card" href="/orders?status_filter=payment_reported"><span>Проверить оплату</span><strong class="stat-value">{payment_reported_orders}</strong></a>
-          <a class="dash-card" href="/orders?status_filter=cash_on_delivery"><span>Наличными</span><strong class="stat-value">{cash_on_delivery_orders}</strong></a>
-          <a class="dash-card" href="/products"><span>Низкий остаток</span><strong class="stat-value">{low_stock_count}</strong></a>
-        </div>
         <h2>Выручка</h2>
         <div class="dash-grid">
           <div class="dash-card"><span>Всего завершённых</span><strong class="stat-value">{CURRENCY_SYMBOL}{float(total_done_revenue):.2f}</strong></div>
@@ -2085,13 +2077,6 @@ async def root():
         </section>
 
         {control_center_section}
-
-        <div class="dash-grid">
-          <a class="dash-card" href="/orders"><strong>Заказы</strong><span>Просмотр и обновление заказов клиентов</span></a>
-          <a class="dash-card" href="/products"><strong>Товары</strong><span>Редактирование товаров и наличия</span></a>
-          <a class="dash-card" href="/categories"><strong>Категории</strong><span>Управление разделами каталога</span></a>
-          <a class="dash-card" href="/clients"><strong>Клиенты</strong><span>Просмотр сохраненных данных клиентов</span></a>
-        </div>
 
         {stat_cards}
 
