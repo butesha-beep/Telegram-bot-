@@ -2486,7 +2486,7 @@ async def log_detail(log_id: int):
 
 
 @app.get("/orders", response_class=HTMLResponse)
-async def orders(status_filter: str = "all", q: str = ""):
+async def orders(status_filter: str = "all", q: str = "", pending_weighing: int = 0):
     try:
         allowed_status_filters = {
             "all",
@@ -2501,6 +2501,7 @@ async def orders(status_filter: str = "all", q: str = ""):
         }
         if status_filter not in allowed_status_filters:
             status_filter = "all"
+        is_pending_weighing_filter = pending_weighing == 1
         search_query = q.strip()
         where_clauses = []
         params = []
@@ -2520,6 +2521,17 @@ async def orders(status_filter: str = "all", q: str = ""):
                 """
             )
             params.extend([search_value, search_value, search_value, search_value])
+        if is_pending_weighing_filter:
+            where_clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM order_items oi
+                    WHERE oi.order_id = orders.order_id
+                      AND oi.weight IS NULL
+                )
+                """
+            )
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
         conn = psycopg2.connect(DATABASE_URL)
@@ -2563,6 +2575,13 @@ async def orders(status_filter: str = "all", q: str = ""):
             selected = "selected" if value == status_filter else ""
             options_html += f"<option value=\"{value}\" {selected}>{label}</option>"
 
+        pending_weighing_banner_html = ""
+        if is_pending_weighing_filter:
+            pending_weighing_banner_html = (
+                "<div class='attention-banner'>⚖️ Показаны только заказы, ожидающие взвешивания. "
+                "<a class='button button-link secondary' href='/orders'>Сбросить фильтр</a></div>"
+            )
+
         html = f"""
         <section class='admin-card'>
           <h1>📦 Заказы</h1>
@@ -2578,8 +2597,14 @@ async def orders(status_filter: str = "all", q: str = ""):
             </div>
           </form>
           <div class="attention-banner">⚠️ Требуют внимания: {attention_orders_count} заказов</div>
-          <div class='dash-table-wrap'><table>
+          {pending_weighing_banner_html}
         """
+
+        if is_pending_weighing_filter and not rows:
+            html += "<p>Нет заказов, ожидающих взвешивания.</p></section>"
+            return admin_layout("📦 Заказы", html, refresh_seconds=60)
+
+        html += "<div class='dash-table-wrap'><table>"
         html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th><th>Действия</th></tr>"
         for row in rows:
             id_, order_id, username, phone, address, total, status, payment_method, created_at = row
