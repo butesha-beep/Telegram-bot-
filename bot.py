@@ -3,6 +3,7 @@ import json
 from json.tool import main
 import os
 import random
+import re
 import sqlite3
 import psycopg2
 import os
@@ -1037,7 +1038,7 @@ def support_message():
     return f"{DEAL_MARKET_SUPPORT_MESSAGE}\n\nНаписать нам: {link}"
 
 
-def main_menu():
+def get_categories():
     categories = []
 
     try:
@@ -1062,6 +1063,12 @@ def main_menu():
 
     if not categories:
         categories = load_json("categories.json")
+
+    return categories
+
+
+def main_menu():
+    categories = get_categories()
 
     keyboard = []
 
@@ -1097,16 +1104,7 @@ def main_menu():
     )
 
 
-@dp.callback_query(F.data.startswith("category_"))
-async def show_category(callback: types.CallbackQuery):
-
-    category_id = int(callback.data.split("_")[1])
-    log_customer_event(
-        callback.from_user.id,
-        "view_category",
-        {"category_id": category_id}
-    )
-
+async def render_category_products(message, category_id, telegram_id):
     products = get_products()
 
     category_products = [
@@ -1116,10 +1114,9 @@ async def show_category(callback: types.CallbackQuery):
     ]
 
     if not category_products:
-        await callback.message.answer(
+        await message.answer(
             "📭 В этой категории пока нет товаров."
         )
-        await callback.answer()
         return
 
     keyboard = []
@@ -1139,31 +1136,40 @@ async def show_category(callback: types.CallbackQuery):
         )
     ])
 
-    await callback.message.answer(
+    await message.answer(
         DEAL_MARKET_CATEGORY_INTROS.get(category_id, "Выберите товар:"),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=keyboard
         )
     )
 
+
+@dp.callback_query(F.data.startswith("category_"))
+async def show_category(callback: types.CallbackQuery):
+
+    category_id = int(callback.data.split("_")[1])
+    log_customer_event(
+        callback.from_user.id,
+        "view_category",
+        {"category_id": category_id}
+    )
+
+    await render_category_products(callback.message, category_id, callback.from_user.id)
+
     await callback.answer()
 
 
-@dp.callback_query(F.data == "promotions")
-async def show_promotions(callback: types.CallbackQuery):
-    log_customer_event(callback.from_user.id, "view_promotions", {})
-
+async def render_promotions(message, telegram_id):
     promotion_products = get_promotion_products()
 
     if not promotion_products:
-        await callback.message.answer(
+        await message.answer(
             "🔥 Сейчас активных акций нет.\n\n"
             "Загляните немного позже ❤️"
         )
-        await callback.answer()
         return
 
-    cart_product_ids = get_cart_product_ids(callback.from_user.id)
+    cart_product_ids = get_cart_product_ids(telegram_id)
     available_promotion_products = [
         product for product in promotion_products
         if product["id"] not in cart_product_ids
@@ -1171,11 +1177,10 @@ async def show_promotions(callback: types.CallbackQuery):
     ]
 
     if not available_promotion_products:
-        await callback.message.answer(
+        await message.answer(
             "🔥 Все доступные акционные товары уже добавлены в вашу корзину.\n\n"
             "Загляните сюда позже ❤️"
         )
-        await callback.answer()
         return
 
     keyboard = []
@@ -1195,13 +1200,20 @@ async def show_promotions(callback: types.CallbackQuery):
         )
     ])
 
-    await callback.message.answer(
+    await message.answer(
         "🔥 Акции\n\n"
         "Именно сейчас рекомендуем обратить внимание:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=keyboard
         )
     )
+
+
+@dp.callback_query(F.data == "promotions")
+async def show_promotions(callback: types.CallbackQuery):
+    log_customer_event(callback.from_user.id, "view_promotions", {})
+
+    await render_promotions(callback.message, callback.from_user.id)
 
     await callback.answer()
 
@@ -2490,6 +2502,85 @@ def order_needs_weighing(order_id):
     return needs_weighing
 
 
+def normalize_free_text(value):
+    normalized = (value or "").strip().lower()
+    normalized = normalized.replace("ё", "е")
+    normalized = re.sub(r"[^\w\s]", " ", normalized, flags=re.UNICODE)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+PROMOTION_KEYWORDS = [
+    "акция",
+    "акции",
+    "скидка",
+    "скидки",
+    "что по акции",
+]
+
+CATEGORY_ALIASES = {
+    "рыбные снеки": "рыбные снеки",
+    "рыбный снек": "рыбные снеки",
+    "рыбка": "рыбные снеки",
+    "рыбные закуски": "рыбные снеки",
+    "мясные снеки": "мясные снеки",
+    "мясной снек": "мясные снеки",
+    "мясо": "мясные снеки",
+    "бастурма": "мясные снеки",
+    "копченая рыба": "копченая рыба",
+    "копченую": "копченая рыба",
+    "копченое": "копченая рыба",
+    "подарочный набор": "подарочные наборы",
+    "на подарок": "подарочные наборы",
+    "подарок": "подарочные наборы",
+    "вяленая икра": "икра",
+    "икра": "икра",
+}
+
+
+def find_category_by_free_text(text):
+    normalized_text = normalize_free_text(text)
+    if not normalized_text:
+        return None
+
+    categories = get_categories()
+    normalized_categories = [
+        (category, normalize_free_text(category["name"]))
+        for category in categories
+    ]
+
+    direct_matches = []
+    seen_direct_ids = set()
+    for category, normalized_name in normalized_categories:
+        if not normalized_name:
+            continue
+        if normalized_name == normalized_text or normalized_name in normalized_text:
+            if category["id"] not in seen_direct_ids:
+                seen_direct_ids.add(category["id"])
+                direct_matches.append(category)
+
+    if len(direct_matches) == 1:
+        return direct_matches[0]
+    if len(direct_matches) > 1:
+        return None
+
+    alias_matches = []
+    seen_alias_ids = set()
+    for alias_phrase, category_name_fragment in CATEGORY_ALIASES.items():
+        if alias_phrase not in normalized_text:
+            continue
+        for category, normalized_name in normalized_categories:
+            if category_name_fragment in normalized_name:
+                if category["id"] not in seen_alias_ids:
+                    seen_alias_ids.add(category["id"])
+                    alias_matches.append(category)
+
+    if len(alias_matches) == 1:
+        return alias_matches[0]
+
+    return None
+
+
 def classify_free_text_intent(text):
     normalized = (text or "").strip().lower()
     if not normalized:
@@ -2554,6 +2645,17 @@ def classify_free_text_intent(text):
 
 async def handle_free_text_fallback(message: types.Message):
     if message.text and message.text.startswith("/"):
+        return
+
+    normalized_text = normalize_free_text(message.text)
+
+    if normalized_text and any(keyword in normalized_text for keyword in PROMOTION_KEYWORDS):
+        await render_promotions(message, message.from_user.id)
+        return
+
+    matched_category = find_category_by_free_text(message.text)
+    if matched_category:
+        await render_category_products(message, matched_category["id"], message.from_user.id)
         return
 
     intent = classify_free_text_intent(message.text)
