@@ -2522,6 +2522,7 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
             )
             params.extend([search_value, search_value, search_value, search_value])
         if is_pending_weighing_filter:
+            where_clauses.append("status != 'cancelled'")
             where_clauses.append(
                 """
                 EXISTS (
