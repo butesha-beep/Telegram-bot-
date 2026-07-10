@@ -500,9 +500,22 @@ def get_promotion_products():
     return products
 
 
-def has_available_promotions(exclude_product_id=None):
+def get_cart_product_ids(telegram_id):
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT DISTINCT product_id FROM cart_items WHERE telegram_id = %s",
+        (telegram_id,)
+    )
+    cart_product_ids = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return cart_product_ids
+
+
+def has_available_promotions(cart_product_ids=None):
+    cart_product_ids = cart_product_ids or set()
     for product in get_promotion_products():
-        if exclude_product_id is not None and product["id"] == exclude_product_id:
+        if product["id"] in cart_product_ids:
             continue
         if is_product_out_of_stock(product):
             continue
@@ -545,7 +558,9 @@ UPSELL_INTRO_PHRASES = [
 ]
 
 
-def get_recommended_products(product_id, limit=3):
+def get_recommended_products(product_id, cart_product_ids=None, limit=3):
+    cart_product_ids = cart_product_ids or set()
+
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     cursor.execute(
@@ -556,9 +571,8 @@ def get_recommended_products(product_id, limit=3):
           AND recommendation_type = 'frequently_bought_together'
           AND is_active = TRUE
         ORDER BY sort_order
-        LIMIT %s
         """,
-        (product_id, limit)
+        (product_id,)
     )
     recommended_ids = [row[0] for row in cursor.fetchall()]
     conn.close()
@@ -567,16 +581,21 @@ def get_recommended_products(product_id, limit=3):
         return []
 
     products = get_products()
-    recommended_products = []
+    eligible_products = []
     for recommended_id in recommended_ids:
+        if recommended_id in cart_product_ids:
+            continue
         product = next((p for p in products if p["id"] == recommended_id), None)
         if not product:
             continue
         if is_product_out_of_stock(product):
             continue
-        recommended_products.append(product)
+        eligible_products.append(product)
 
-    return recommended_products
+    if not eligible_products:
+        return []
+
+    return random.sample(eligible_products, min(limit, len(eligible_products)))
 
 
 def out_of_stock_keyboard(category_id=None, alternatives=None):
@@ -1039,9 +1058,24 @@ async def show_promotions(callback: types.CallbackQuery):
         await callback.answer()
         return
 
+    cart_product_ids = get_cart_product_ids(callback.from_user.id)
+    available_promotion_products = [
+        product for product in promotion_products
+        if product["id"] not in cart_product_ids
+        and not is_product_out_of_stock(product)
+    ]
+
+    if not available_promotion_products:
+        await callback.message.answer(
+            "🔥 Все доступные акционные товары уже добавлены в вашу корзину.\n\n"
+            "Загляните сюда позже ❤️"
+        )
+        await callback.answer()
+        return
+
     keyboard = []
 
-    for product in promotion_products:
+    for product in available_promotion_products:
         keyboard.append([
             InlineKeyboardButton(
                 text=DEAL_MARKET_PRODUCT_BUTTON_LABELS.get(product["name"], product["name"]),
@@ -1448,7 +1482,11 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     )
     mark_cart_active(callback.from_user.id)
 
-    recommended_products = get_recommended_products(product_id)
+    # The product just added is already committed to cart_items above, so it is
+    # already a member of cart_product_ids and gets excluded automatically below —
+    # no separate "exclude the product just added" check is needed.
+    cart_product_ids = get_cart_product_ids(callback.from_user.id)
+    recommended_products = get_recommended_products(product_id, cart_product_ids)
 
     keyboard_rows = []
     for recommended_product in recommended_products:
@@ -1458,7 +1496,7 @@ async def add_option_to_cart(callback: types.CallbackQuery):
                 callback_data=f"product_{recommended_product['id']}"
             )
         ])
-    if has_available_promotions(exclude_product_id=product_id):
+    if has_available_promotions(cart_product_ids):
         keyboard_rows.append([
             InlineKeyboardButton(
                 text="🔥 Посмотреть акции",
@@ -1584,7 +1622,11 @@ async def add_to_cart(callback: types.CallbackQuery):
     )
     mark_cart_active(callback.from_user.id)
 
-    recommended_products = get_recommended_products(product_id)
+    # The product just added is already committed to cart_items above, so it is
+    # already a member of cart_product_ids and gets excluded automatically below —
+    # no separate "exclude the product just added" check is needed.
+    cart_product_ids = get_cart_product_ids(callback.from_user.id)
+    recommended_products = get_recommended_products(product_id, cart_product_ids)
 
     keyboard_rows = []
     for recommended_product in recommended_products:
@@ -1594,7 +1636,7 @@ async def add_to_cart(callback: types.CallbackQuery):
                 callback_data=f"product_{recommended_product['id']}"
             )
         ])
-    if has_available_promotions(exclude_product_id=product_id):
+    if has_available_promotions(cart_product_ids):
         keyboard_rows.append([
             InlineKeyboardButton(
                 text="🔥 Посмотреть акции",
