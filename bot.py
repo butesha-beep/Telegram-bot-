@@ -1487,6 +1487,7 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     # no separate "exclude the product just added" check is needed.
     cart_product_ids = get_cart_product_ids(callback.from_user.id)
     recommended_products = get_recommended_products(product_id, cart_product_ids)
+    has_promotions = has_available_promotions(cart_product_ids)
 
     keyboard_rows = []
     for recommended_product in recommended_products:
@@ -1496,7 +1497,7 @@ async def add_option_to_cart(callback: types.CallbackQuery):
                 callback_data=f"product_{recommended_product['id']}"
             )
         ])
-    if has_available_promotions(cart_product_ids):
+    if has_promotions:
         keyboard_rows.append([
             InlineKeyboardButton(
                 text="🔥 Посмотреть акции",
@@ -1525,6 +1526,8 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     )
     if recommended_products:
         success_text += f"\n\n{random.choice(UPSELL_INTRO_PHRASES)}"
+    elif has_promotions:
+        success_text += "\n\n🔥 Для вас сейчас есть выгодные предложения:"
 
     await callback.message.answer(
         success_text,
@@ -1627,6 +1630,7 @@ async def add_to_cart(callback: types.CallbackQuery):
     # no separate "exclude the product just added" check is needed.
     cart_product_ids = get_cart_product_ids(callback.from_user.id)
     recommended_products = get_recommended_products(product_id, cart_product_ids)
+    has_promotions = has_available_promotions(cart_product_ids)
 
     keyboard_rows = []
     for recommended_product in recommended_products:
@@ -1636,7 +1640,7 @@ async def add_to_cart(callback: types.CallbackQuery):
                 callback_data=f"product_{recommended_product['id']}"
             )
         ])
-    if has_available_promotions(cart_product_ids):
+    if has_promotions:
         keyboard_rows.append([
             InlineKeyboardButton(
                 text="🔥 Посмотреть акции",
@@ -1665,6 +1669,8 @@ async def add_to_cart(callback: types.CallbackQuery):
     )
     if recommended_products:
         success_text += f"\n\n{random.choice(UPSELL_INTRO_PHRASES)}"
+    elif has_promotions:
+        success_text += "\n\n🔥 Для вас сейчас есть выгодные предложения:"
 
     await callback.message.answer(
         success_text,
