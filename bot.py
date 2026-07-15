@@ -689,10 +689,7 @@ def seed_products_from_json():
             """
             INSERT INTO categories (id, name, sort_order, is_active)
             VALUES (%s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                name = EXCLUDED.name,
-                sort_order = EXCLUDED.sort_order,
-                is_active = EXCLUDED.is_active
+            ON CONFLICT (id) DO NOTHING
             """,
             (
                 category["id"],
@@ -716,14 +713,7 @@ def seed_products_from_json():
                 sort_order
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                category_id = EXCLUDED.category_id,
-                name = EXCLUDED.name,
-                price_per_kg = EXCLUDED.price_per_kg,
-                description = EXCLUDED.description,
-                image_url = EXCLUDED.image_url,
-                is_active = EXCLUDED.is_active,
-                sort_order = EXCLUDED.sort_order
+            ON CONFLICT (id) DO NOTHING
             """,
             (
                 product["id"],
