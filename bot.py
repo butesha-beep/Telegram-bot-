@@ -317,6 +317,12 @@ async def cancel_expired_pending_orders():
         WHERE status = 'pending'
           AND payment_method IS NULL
           AND created_at <= NOW() - (%s * INTERVAL '1 hour')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM order_items
+              WHERE order_items.order_id = orders.order_id
+                AND order_items.weight IS NULL
+          )
         """,
         (PENDING_ORDER_CANCEL_HOURS,)
     )
