@@ -21,7 +21,6 @@ Update:
 - `brand_name`
 - `admin_panel_title`
 - `support_username`
-- `admin_id`
 - `iban`
 - `receiver_name`
 - `paypal`
@@ -132,25 +131,28 @@ Examples:
 
 1. Choose a strong `ADMIN_PASSWORD`.
 2. Generate a long random `ADMIN_SESSION_SECRET`.
-3. Set `ADMIN_ID` to the admin Telegram numeric user ID.
-4. Also update `config.json.admin_id` as fallback.
+3. Set `ADMIN_ID` only when Telegram actions are explicitly enabled. It is
+   read only from the process environment; `config.json.admin_id` is not a
+   recipient fallback.
 
 ## Database Startup Order
 
 Recommended:
 
-1. Deploy PostgreSQL.
-2. Deploy admin service.
-3. Deploy bot service.
-4. Start bot service at least once.
+1. Provision PostgreSQL without reusing a production or client database.
+2. Prepare and validate a compatible schema through a separately authorized
+   process before starting either application service.
+3. Configure the admin and bot to use that prepared database.
+4. Start the admin and bot only after compatibility has been confirmed.
 
 Why:
 
-- Admin creates/validates schema through `db_schema.py`.
-- `admin_app.py` runs `init_db()` on startup.
-- Bot also runs `init_db()`.
-- Bot starts and seeds catalog from `products.json` and `categories.json`.
-- Catalog seeding currently happens from bot startup, not admin startup.
+- Admin and bot do not call `init_db()` or seed data during ordinary startup.
+- Ordinary startup performs only a read-only schema compatibility probe.
+- An unavailable or incompatible schema fails closed.
+- No automatic initialization or catalog seed exists.
+- `RUN_DB_INIT` and `RUN_DB_SEED` do not enable writable startup behavior.
+- No writable maintenance command is currently exposed.
 
 ## Clean DB Launch
 
@@ -170,11 +172,16 @@ Do not reuse a DB from another shop unless you intentionally want old:
 - products
 - categories
 
-## Seed Behavior Warning
+## Legacy Seed Behavior Warning
 
-Product/category JSON seeding upserts data.
+The repository retains legacy catalog-seeding code, but ordinary admin and bot
+startup never invoke it and no supported maintenance command currently exposes
+it. Do not expect `products.json` or `categories.json` to populate a deployed
+database automatically.
 
-It does not automatically fully wipe old DB state. Old products, categories, clients, orders, carts, broadcasts, and events can remain if a database is reused.
+Any future separately authorized import must account for old products,
+categories, clients, orders, carts, broadcasts, and events when a database is
+reused.
 
 Current demo cleanup assumes:
 
@@ -259,9 +266,10 @@ Symptom:
 
 Fix:
 
-- Start/restart bot service.
-- Bot startup runs catalog seed from `products.json` and `categories.json`.
-- Confirm bot and admin use the same database URL.
+- Stop the rollout and confirm that bot and admin use the intended database.
+- Prepare or import the catalog only through a separately authorized process.
+- Do not restart services or enable runtime flags expecting them to initialize
+  or seed the database.
 
 ## Test Checklist After Deployment
 

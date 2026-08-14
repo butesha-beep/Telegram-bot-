@@ -16,6 +16,7 @@ os.environ.setdefault("ADMIN_PASSWORD", "unit-test-password")
 os.environ.setdefault("ADMIN_SESSION_SECRET", "unit-test-session-secret")
 
 import admin_app
+import db_schema
 import storefront
 
 
@@ -209,25 +210,36 @@ class StorefrontTests(unittest.TestCase):
             called = True
             return PlainTextResponse("admin")
 
-        response = asyncio.run(admin_app.require_admin_login(make_request("/"), call_next))
+        response = asyncio.run(admin_app.require_admin_login(make_request("/admin"), call_next))
         self.assertFalse(called)
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "/login")
 
-    def test_database_startup_success_marks_database_ready(self):
-        with patch.object(admin_app, "DATABASE_URL", "postgresql://configured/test"):
-            with patch.object(admin_app, "init_db") as init_db:
-                with patch.object(admin_app.logger, "exception") as log_exception:
-                    admin_app.DATABASE_READY = False
-                    asyncio.run(admin_app.startup_db_init())
+    def test_public_root_redirects_to_shop(self):
+        response = asyncio.run(admin_app.public_root())
 
-        init_db.assert_called_once_with()
-        log_exception.assert_not_called()
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], "/shop")
+
+    def test_database_startup_checks_schema_and_ignores_write_flags(self):
+        with patch.object(admin_app, "DATABASE_URL", "postgresql://configured/test"):
+            with patch.dict(
+                os.environ,
+                {"APP_ENV": "test", "RUN_DB_INIT": "true", "RUN_DB_SEED": "true"},
+            ):
+                with patch.object(db_schema, "init_db") as init_db:
+                    with patch.object(
+                        admin_app, "catalog_schema_is_compatible", return_value=True
+                    ):
+                        admin_app.DATABASE_READY = False
+                        asyncio.run(admin_app.startup_db_init())
+
+        init_db.assert_not_called()
         self.assertTrue(admin_app.DATABASE_READY)
 
     def test_missing_database_url_skips_connection_and_stays_unavailable(self):
         with patch.object(admin_app, "DATABASE_URL", None):
-            with patch.object(admin_app, "init_db") as init_db:
+            with patch.object(db_schema, "init_db") as init_db:
                 with patch.object(admin_app.logger, "error") as log_error:
                     admin_app.DATABASE_READY = True
                     asyncio.run(admin_app.startup_db_init())
@@ -236,39 +248,24 @@ class StorefrontTests(unittest.TestCase):
         log_error.assert_called_once_with("Database is not configured")
         self.assertFalse(admin_app.DATABASE_READY)
 
-    def test_operational_database_error_is_logged_and_does_not_stop_startup(self):
-        connection_error = admin_app.psycopg2.OperationalError("connection refused")
+    def test_incompatible_schema_never_falls_back_to_initialization(self):
         with patch.object(admin_app, "DATABASE_URL", "postgresql://configured/test"):
-            with patch.object(admin_app, "init_db", side_effect=connection_error):
-                with patch.object(admin_app.logger, "exception") as log_exception:
-                    admin_app.DATABASE_READY = True
-                    asyncio.run(admin_app.startup_db_init())
+            with patch.dict(
+                os.environ,
+                {"APP_ENV": "test", "RUN_DB_INIT": "true", "RUN_DB_SEED": "true"},
+            ):
+                with patch.object(db_schema, "init_db") as init_db:
+                    with patch.object(
+                        admin_app, "catalog_schema_is_compatible", return_value=False
+                    ):
+                        with patch.object(admin_app.logger, "error") as log_error:
+                            admin_app.DATABASE_READY = True
+                            asyncio.run(admin_app.startup_db_init())
 
-        log_exception.assert_called_once_with(
-            "PostgreSQL is unavailable during database initialization"
+        init_db.assert_not_called()
+        log_error.assert_called_once_with(
+            "Database schema is unavailable or incompatible"
         )
-        self.assertFalse(admin_app.DATABASE_READY)
-
-    def test_unexpected_startup_error_is_logged_and_raised(self):
-        with patch.object(admin_app, "DATABASE_URL", "postgresql://configured/test"):
-            with patch.object(admin_app, "init_db", side_effect=RuntimeError("programming defect")):
-                with patch.object(admin_app.logger, "exception") as log_exception:
-                    admin_app.DATABASE_READY = True
-                    with self.assertRaisesRegex(RuntimeError, "programming defect"):
-                        asyncio.run(admin_app.startup_db_init())
-
-        log_exception.assert_called_once_with("Unexpected database initialization failure")
-        self.assertFalse(admin_app.DATABASE_READY)
-
-    def test_sql_or_schema_error_is_not_classified_as_connectivity_failure(self):
-        schema_error = admin_app.psycopg2.ProgrammingError("invalid schema")
-        with patch.object(admin_app, "DATABASE_URL", "postgresql://configured/test"):
-            with patch.object(admin_app, "init_db", side_effect=schema_error):
-                with patch.object(admin_app.logger, "exception") as log_exception:
-                    with self.assertRaises(admin_app.psycopg2.ProgrammingError):
-                        asyncio.run(admin_app.startup_db_init())
-
-        log_exception.assert_called_once_with("Unexpected database initialization failure")
         self.assertFalse(admin_app.DATABASE_READY)
 
     def test_authorized_admin_route_returns_503_when_database_is_unavailable(self):
@@ -297,11 +294,12 @@ class StorefrontTests(unittest.TestCase):
             called = True
             return PlainTextResponse("master")
 
-        with patch.object(admin_app, "DATABASE_READY", False):
-            with patch.object(admin_app, "is_master_authenticated", return_value=True):
-                response = asyncio.run(
-                    admin_app.require_admin_login(make_request("/master"), call_next)
-                )
+        with patch.dict(os.environ, {"ENABLE_MASTER_ADMIN": "true"}):
+            with patch.object(admin_app, "DATABASE_READY", False):
+                with patch.object(admin_app, "is_master_authenticated", return_value=True):
+                    response = asyncio.run(
+                        admin_app.require_admin_login(make_request("/master"), call_next)
+                    )
 
         self.assertFalse(called)
         self.assertEqual(response.status_code, 503)
@@ -467,6 +465,49 @@ class StorefrontTests(unittest.TestCase):
         self.assertIn("Фото скоро", broken)
         self.assertIn("onerror=", broken)
         self.assertNotIn("javascript:", unsafe)
+
+    def test_support_username_is_read_from_environment_at_render_time(self):
+        with patch.dict(os.environ, {"SUPPORT_USERNAME": "preview_support"}):
+            page = storefront.render_catalog_page(self.sample_catalog())
+
+        self.assertIn('href="https://t.me/preview_support"', page)
+
+    def test_missing_support_username_renders_disabled_non_link(self):
+        with patch.dict(os.environ, {"SUPPORT_USERNAME": ""}):
+            page = storefront.render_catalog_page(self.sample_catalog())
+
+        self.assertIn('class="contact-button disabled"', page)
+        self.assertNotIn('href="https://t.me/', page)
+
+    def test_malformed_or_malicious_support_destinations_are_rejected(self):
+        invalid_values = (
+            "bad",
+            "a" * 33,
+            " preview_support",
+            "preview_support ",
+            "preview support",
+            "@preview_support",
+            "@@preview_support",
+            "prevіew_support",
+            "preview/support",
+            "preview\\support",
+            "preview_support?start=1",
+            "preview_support#fragment",
+            "preview%5Fsupport",
+            "https://t.me/preview_support",
+            "t.me/preview_support",
+            "javascript:alert(1)",
+            "data:text/html,test",
+            "user:password@example.com",
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                self.assertEqual(storefront.public_contact_url(value), "")
+                page = storefront.render_catalog_page(
+                    self.sample_catalog(), support_username=value
+                )
+                self.assertIn('class="contact-button disabled"', page)
+                self.assertNotIn('href="https://t.me/', page)
 
     def test_long_descriptions_open_in_accessible_modal(self):
         catalog = self.sample_catalog()

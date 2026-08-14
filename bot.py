@@ -7,9 +7,12 @@ import re
 import sqlite3
 import psycopg2
 import os
+from functools import wraps
 
-from db_schema import DATABASE_URL, get_db_connection, init_db
+from db_schema import DATABASE_URL, catalog_schema_is_compatible, get_db_connection
+from runtime_settings import env_flag_enabled, get_app_env
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardMarkup,
@@ -37,7 +40,43 @@ UNPAID_ORDER_WORKER_SLEEP_SECONDS = 1800
 callback_locks = {}
 
 
+def telegram_actions_enabled():
+    return env_flag_enabled("ENABLE_TELEGRAM_ACTIONS")
+
+
+def telegram_action_boundary(function):
+    @wraps(function)
+    async def guarded(*args, **kwargs):
+        if not telegram_actions_enabled():
+            return None
+        return await function(*args, **kwargs)
+
+    guarded.telegram_actions_guarded = True
+    return guarded
+
+
+def get_admin_recipient_id():
+    value = os.getenv("ADMIN_ID", "")
+    if not re.fullmatch(r"-?[1-9][0-9]{0,18}", value):
+        return None
+    return int(value)
+
+
+async def send_admin_message(text):
+    if not telegram_actions_enabled():
+        return False
+    recipient_id = get_admin_recipient_id()
+    if recipient_id is None:
+        return False
+    await bot.send_message(chat_id=recipient_id, text=text)
+    return True
+
+
 def log_customer_event(telegram_id, event_type, metadata=None):
+    if not telegram_actions_enabled():
+        return False
+    conn = None
+    cursor = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -56,11 +95,26 @@ def log_customer_event(telegram_id, event_type, metadata=None):
         )
 
         conn.commit()
-        cursor.close()
-        conn.close()
-
-    except Exception as e:
-        print(f"Customer event logging failed: {e}")
+        return True
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        print("customer_event_log_failed")
+        return False
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def is_callback_locked(callback, cooldown=CALLBACK_COOLDOWN_SECONDS):
@@ -74,15 +128,15 @@ def is_callback_locked(callback, cooldown=CALLBACK_COOLDOWN_SECONDS):
 
 
 def is_telegram_blocked_error(error):
-    error_text = str(error).lower()
-    return (
-        "403" in error_text
-        or "forbidden" in error_text
-        or "bot was blocked" in error_text
-    )
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(error, "code", None)
+    return status_code == 403 or isinstance(error, TelegramForbiddenError)
 
 
 def mark_cart_active(telegram_id):
+    if not telegram_actions_enabled():
+        return False
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     cursor.execute(
@@ -96,6 +150,7 @@ def mark_cart_active(telegram_id):
     )
     conn.commit()
     conn.close()
+    return True
 
 
 def abandoned_cart_keyboard():
@@ -104,6 +159,7 @@ def abandoned_cart_keyboard():
     ])
 
 
+@telegram_action_boundary
 async def send_abandoned_cart_reminders():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -166,16 +222,17 @@ async def send_abandoned_cart_reminders():
                     update_conn.commit()
                 finally:
                     update_conn.close()
-            except Exception as update_error:
-                print(f"ABANDONED CART REMINDER MARK ERROR for {telegram_id}:", update_error)
+            except Exception:
+                print("abandoned_cart_reminder_mark_failed")
             log_customer_event(
                 telegram_id,
                 "abandoned_cart_reminder_failed",
                 {"reason": reason}
             )
-            print(f"ABANDONED CART REMINDER ERROR for {telegram_id}:", e)
+            print("abandoned_cart_reminder_failed")
 
 
+@telegram_action_boundary
 async def clear_expired_abandoned_carts():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -208,17 +265,18 @@ async def clear_expired_abandoned_carts():
                 )
             finally:
                 delete_conn.close()
-        except Exception as e:
-            print(f"ABANDONED CART CLEANUP ERROR for {telegram_id}:", e)
+        except Exception:
+            print("abandoned_cart_cleanup_failed")
 
 
+@telegram_action_boundary
 async def abandoned_cart_worker():
     while True:
         try:
             await send_abandoned_cart_reminders()
             await clear_expired_abandoned_carts()
-        except Exception as e:
-            print("ABANDONED CART WORKER ERROR:", e)
+        except Exception:
+            print("abandoned_cart_worker_failed")
 
         await asyncio.sleep(ABANDONED_CART_WORKER_SLEEP_SECONDS)
 
@@ -229,6 +287,7 @@ def unpaid_order_keyboard():
     ])
 
 
+@telegram_action_boundary
 async def send_pending_order_reminders():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -296,16 +355,17 @@ async def send_pending_order_reminders():
                     update_conn.commit()
                 finally:
                     update_conn.close()
-            except Exception as update_error:
-                print(f"PENDING ORDER REMINDER MARK ERROR for {telegram_id}:", update_error)
+            except Exception:
+                print("pending_order_reminder_mark_failed")
             log_customer_event(
                 telegram_id,
                 "pending_order_reminder_failed",
                 {"reason": reason}
             )
-            print(f"PENDING ORDER REMINDER ERROR for {telegram_id}:", e)
+            print("pending_order_reminder_failed")
 
 
+@telegram_action_boundary
 async def cancel_expired_pending_orders():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -330,6 +390,7 @@ async def cancel_expired_pending_orders():
     conn.close()
 
 
+@telegram_action_boundary
 async def send_awaiting_payment_reminders():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -396,16 +457,17 @@ async def send_awaiting_payment_reminders():
                     update_conn.commit()
                 finally:
                     update_conn.close()
-            except Exception as update_error:
-                print(f"AWAITING PAYMENT REMINDER MARK ERROR for {telegram_id}:", update_error)
+            except Exception:
+                print("awaiting_payment_reminder_mark_failed")
             log_customer_event(
                 telegram_id,
                 "awaiting_payment_reminder_failed",
                 {"reason": reason}
             )
-            print(f"AWAITING PAYMENT REMINDER ERROR for {telegram_id}:", e)
+            print("awaiting_payment_reminder_failed")
 
 
+@telegram_action_boundary
 async def cancel_expired_awaiting_payment_orders():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -423,6 +485,7 @@ async def cancel_expired_awaiting_payment_orders():
     conn.close()
 
 
+@telegram_action_boundary
 async def unpaid_order_worker():
     while True:
         try:
@@ -430,8 +493,8 @@ async def unpaid_order_worker():
             await cancel_expired_pending_orders()
             await send_awaiting_payment_reminders()
             await cancel_expired_awaiting_payment_orders()
-        except Exception as e:
-            print("UNPAID ORDER WORKER ERROR:", e)
+        except Exception:
+            print("unpaid_order_worker_failed")
 
         await asyncio.sleep(UNPAID_ORDER_WORKER_SLEEP_SECONDS)
 
@@ -1149,6 +1212,7 @@ def main_menu():
     )
 
 
+@telegram_action_boundary
 async def render_category_products(message, category_id, telegram_id):
     products = get_products()
 
@@ -1191,6 +1255,7 @@ async def render_category_products(message, category_id, telegram_id):
 
 
 @dp.callback_query(F.data.startswith("category_"))
+@telegram_action_boundary
 async def show_category(callback: types.CallbackQuery):
 
     category_id = int(callback.data.split("_")[1])
@@ -1205,6 +1270,7 @@ async def show_category(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@telegram_action_boundary
 async def render_promotions(message, telegram_id):
     promotion_products = get_promotion_products()
 
@@ -1256,6 +1322,7 @@ async def render_promotions(message, telegram_id):
 
 
 @dp.callback_query(F.data == "promotions")
+@telegram_action_boundary
 async def show_promotions(callback: types.CallbackQuery):
     log_customer_event(callback.from_user.id, "view_promotions", {})
 
@@ -1330,6 +1397,7 @@ def _build_variable_weight_explanation(product_icon, product, options):
     )
 
 
+@telegram_action_boundary
 async def render_product(message, product_id, telegram_id):
     products = get_products()
 
@@ -1487,6 +1555,7 @@ async def render_product(message, product_id, telegram_id):
         )
 
 
+@telegram_action_boundary
 async def render_product_suggestions(message, products, intro_text=None, limit=5):
     unique_products = []
     seen_ids = set()
@@ -1529,6 +1598,7 @@ async def render_product_suggestions(message, products, intro_text=None, limit=5
 
 
 @dp.callback_query(F.data.startswith("product_"))
+@telegram_action_boundary
 async def show_product(callback: types.CallbackQuery):
 
     product_id = int(callback.data.split("_")[1])
@@ -1539,6 +1609,7 @@ async def show_product(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("option_"))
+@telegram_action_boundary
 async def choose_option(callback: types.CallbackQuery):
     option_id = int(callback.data.split("_")[1])
 
@@ -1626,6 +1697,7 @@ async def choose_option(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("weight_"))
+@telegram_action_boundary
 async def choose_weight(callback: types.CallbackQuery):
 
     _, product_id, weight = callback.data.split("_")
@@ -1678,6 +1750,7 @@ async def choose_weight(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("cart_add_option_"))
+@telegram_action_boundary
 async def add_option_to_cart(callback: types.CallbackQuery):
     if is_callback_locked(callback):
         await callback.answer("Подождите секунду", show_alert=False)
@@ -1826,6 +1899,7 @@ def is_legacy_cart_add(callback: types.CallbackQuery):
 
 
 @dp.callback_query(is_legacy_cart_add)
+@telegram_action_boundary
 async def add_to_cart(callback: types.CallbackQuery):
     _, _, product_id, weight = callback.data.split("_")
 
@@ -1963,6 +2037,7 @@ async def add_to_cart(callback: types.CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("order_"))
+@telegram_action_boundary
 async def create_order(callback: types.CallbackQuery):
 
     _, product_id, weight = callback.data.split("_")
@@ -1971,7 +2046,6 @@ async def create_order(callback: types.CallbackQuery):
     weight = int(weight)
 
     products = get_products()
-    config = load_json("config.json")
 
     product = next(
         (p for p in products if p["id"] == product_id),
@@ -2008,13 +2082,11 @@ async def create_order(callback: types.CallbackQuery):
         f"🍺 Deal Market NL"
     )
 
-    await bot.send_message(
-        chat_id=config["admin_id"],
-        text=f"📦 Новый заказ!\n\n{order_text}"
-    )
+    await send_admin_message(f"📦 Новый заказ!\n\n{order_text}")
 
     await callback.answer()
 @dp.callback_query(F.data == "support")
+@telegram_action_boundary
 async def support(callback: types.CallbackQuery):
 
     await callback.message.answer(
@@ -2023,6 +2095,7 @@ async def support(callback: types.CallbackQuery):
 
     await callback.answer()
 @dp.callback_query(F.data == "cart")
+@telegram_action_boundary
 async def show_cart(callback: types.CallbackQuery):
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -2190,6 +2263,7 @@ async def show_cart(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("cart_plus_option_"))
+@telegram_action_boundary
 async def cart_plus_option(callback: types.CallbackQuery):
     if is_callback_locked(callback):
         await callback.answer("Подождите секунду", show_alert=False)
@@ -2258,6 +2332,7 @@ async def cart_plus_option(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("cart_plus_weight_"))
+@telegram_action_boundary
 async def cart_plus_weight(callback: types.CallbackQuery):
     if is_callback_locked(callback):
         await callback.answer("Подождите секунду", show_alert=False)
@@ -2332,6 +2407,7 @@ async def cart_plus_weight(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("remove_item_"))
+@telegram_action_boundary
 async def remove_item(callback: types.CallbackQuery):
     if is_callback_locked(callback):
         await callback.answer("Подождите секунду", show_alert=False)
@@ -2360,6 +2436,7 @@ async def remove_item(callback: types.CallbackQuery):
     await show_cart(callback)
 
 @dp.callback_query(F.data == "clear_cart")
+@telegram_action_boundary
 async def clear_cart(callback: types.CallbackQuery):
     if is_callback_locked(callback):
         await callback.answer("Подождите секунду", show_alert=False)
@@ -2385,6 +2462,7 @@ async def clear_cart(callback: types.CallbackQuery):
 
 
 @dp.message(Command("start"))
+@telegram_action_boundary
 async def start(message: types.Message):
     # Reset checkout state if user is in pending orders
     user_id = message.from_user.id
@@ -2401,10 +2479,10 @@ async def start(message: types.Message):
 
 
 @dp.message(Command("orders"))
+@telegram_action_boundary
 async def show_orders(message: types.Message):
-    config = load_json("config.json")
-
-    if message.from_user.id != config["admin_id"]:
+    admin_id = get_admin_recipient_id()
+    if admin_id is None or message.from_user.id != admin_id:
         await message.answer("⛔️ У вас нет доступа.")
         return
 
@@ -2444,10 +2522,10 @@ async def show_orders(message: types.Message):
 
 
 @dp.message(Command("clients"))
+@telegram_action_boundary
 async def show_clients(message: types.Message):
-    config = load_json("config.json")
-
-    if message.from_user.id != config["admin_id"]:
+    admin_id = get_admin_recipient_id()
+    if admin_id is None or message.from_user.id != admin_id:
         await message.answer("⛔️ У вас нет доступа.")
         return
 
@@ -2836,6 +2914,7 @@ def classify_free_text_intent(text):
     return "unknown"
 
 
+@telegram_action_boundary
 async def handle_free_text_fallback(message: types.Message):
     if message.text and message.text.startswith("/"):
         return
@@ -2917,6 +2996,7 @@ async def handle_free_text_fallback(message: types.Message):
 
 
 @dp.message()
+@telegram_action_boundary
 async def handle_order_data(message: types.Message):
     user_id = message.from_user.id
 
@@ -2947,7 +3027,6 @@ async def handle_order_data(message: types.Message):
         address = pending_orders[user_id]["address"]
 
         products = get_products()
-        config = load_json("config.json")
 
         order_id, order_text, _ = create_order_from_cart(
             user_id=user_id,
@@ -2976,10 +3055,7 @@ async def handle_order_data(message: types.Message):
             )
 
         # Send notification to admin
-        await bot.send_message(
-            chat_id=config["admin_id"],
-            text=f"📦 Новый заказ!\n\n{order_text}"
-        )
+        await send_admin_message(f"📦 Новый заказ!\n\n{order_text}")
 
         # Clear pending order state
         del pending_orders[user_id]
@@ -2987,6 +3063,7 @@ async def handle_order_data(message: types.Message):
 
 
 @dp.callback_query(F.data == "checkout")
+@telegram_action_boundary
 async def checkout(callback: types.CallbackQuery):
     if is_callback_locked(callback):
         await callback.answer("Подождите секунду", show_alert=False)
@@ -3116,6 +3193,7 @@ async def checkout(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data == "resume_payment")
+@telegram_action_boundary
 async def resume_payment(callback: types.CallbackQuery):
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -3154,6 +3232,7 @@ async def resume_payment(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data == "use_saved_data")
+@telegram_action_boundary
 async def use_saved_data(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in pending_orders:
@@ -3169,7 +3248,6 @@ async def use_saved_data(callback: types.CallbackQuery):
     address = pending_orders[user_id]["address"]
 
     products = get_products()
-    config = load_json("config.json")
 
     order_id, order_text, _ = create_order_from_cart(
         user_id=user_id,
@@ -3194,16 +3272,14 @@ async def use_saved_data(callback: types.CallbackQuery):
             reply_markup=payment_menu()
         )
 
-    await bot.send_message(
-        chat_id=config["admin_id"],
-        text=f"📦 Новый заказ!\n\n{order_text}"
-    )
+    await send_admin_message(f"📦 Новый заказ!\n\n{order_text}")
 
     del pending_orders[user_id]
     await callback.answer()
 
 
 @dp.callback_query(F.data == "enter_new_data")
+@telegram_action_boundary
 async def enter_new_data(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in pending_orders:
@@ -3220,6 +3296,7 @@ async def enter_new_data(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data == "pay_iban")
+@telegram_action_boundary
 async def pay_iban(callback: types.CallbackQuery):
     config = load_json("config.json")
     payment_details = get_payment_details(config)
@@ -3299,6 +3376,7 @@ async def pay_iban(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data == "pay_paypal")
+@telegram_action_boundary
 async def pay_paypal(callback: types.CallbackQuery):
     config = load_json("config.json")
     payment_details = get_payment_details(config)
@@ -3376,8 +3454,8 @@ async def pay_paypal(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data == "pay_cash")
+@telegram_action_boundary
 async def pay_cash(callback: types.CallbackQuery):
-    config = load_json("config.json")
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
@@ -3431,9 +3509,8 @@ async def pay_cash(callback: types.CallbackQuery):
         "Спасибо, что выбрали Deal Market NL! ❤️"
     )
 
-    await bot.send_message(
-        chat_id=config["admin_id"],
-        text=(
+    await send_admin_message(
+        (
             "💵 Клиент выбрал оплату наличными.\n\n"
             f"Покупатель: {user_text}"
         )
@@ -3442,6 +3519,7 @@ async def pay_cash(callback: types.CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(F.data == "back_to_menu")
+@telegram_action_boundary
 async def back_to_menu(callback: types.CallbackQuery):
     await callback.message.answer(
         "Выберите категорию ниже:",
@@ -3481,6 +3559,7 @@ def payment_menu():
     ])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 @dp.callback_query(F.data.startswith("payment_done_"))
+@telegram_action_boundary
 async def payment_done_for_order(callback: types.CallbackQuery):
     raw_order_id = callback.data.replace("payment_done_", "", 1)
     try:
@@ -3522,8 +3601,6 @@ async def payment_done_for_order(callback: types.CallbackQuery):
         {"order_id": order_id}
     )
 
-    config = load_json("config.json")
-
     username = callback.from_user.username
     if username:
         user_text = f"@{username}"
@@ -3534,9 +3611,8 @@ async def payment_done_for_order(callback: types.CallbackQuery):
         "Спасибо! Мы получили отметку об оплате. Проверим платёж и подтвердим заказ в ближайшее время."
     )
 
-    await bot.send_message(
-        chat_id=config["admin_id"],
-        text=(
+    await send_admin_message(
+        (
             "💸 Клиент сообщил об оплате.\n\n"
             f"Заказ: {order_id}\n"
             f"Покупатель: {user_text}"
@@ -3547,6 +3623,7 @@ async def payment_done_for_order(callback: types.CallbackQuery):
 
 
 @dp.callback_query(F.data == "payment_done")
+@telegram_action_boundary
 async def payment_done(callback: types.CallbackQuery):
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -3572,8 +3649,6 @@ async def payment_done(callback: types.CallbackQuery):
     conn.commit()
     conn.close()
 
-    config = load_json("config.json")
-
     username = callback.from_user.username
 
     if username:
@@ -3586,9 +3661,8 @@ async def payment_done(callback: types.CallbackQuery):
         "Ожидайте подтверждения заказа."
     )
 
-    await bot.send_message(
-        chat_id=config["admin_id"],
-        text=(
+    await send_admin_message(
+        (
             "💸 Клиент сообщил об оплате.\n\n"
             f"Покупатель: {user_text}"
         )
@@ -3597,9 +3671,17 @@ async def payment_done(callback: types.CallbackQuery):
     await callback.answer()
 
 
+def prepare_bot_database():
+    get_app_env()
+    if not catalog_schema_is_compatible():
+        raise RuntimeError("Database schema is unavailable or incompatible")
+
+
 async def main():
-    init_db()
-    seed_products_from_json()
+    get_app_env()
+    if not telegram_actions_enabled():
+        raise RuntimeError("Telegram actions are disabled")
+    prepare_bot_database()
     asyncio.create_task(abandoned_cart_worker())
     asyncio.create_task(unpaid_order_worker())
     await dp.start_polling(bot)

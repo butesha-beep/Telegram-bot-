@@ -1,24 +1,30 @@
 import os
+import base64
+import binascii
 import logging
 import json
 import html
 import csv
 import io
 import math
+import re
 from html import escape
 import hmac
 import hashlib
 import secrets
 import time
-import traceback
 import urllib.parse
 import urllib.request
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 import psycopg2
 
 try:
-    from db_schema import DATABASE_URL, get_db_connection, init_db
+    from db_schema import (
+        DATABASE_URL,
+        catalog_schema_is_compatible,
+        get_db_connection,
+    )
 except ValueError:
     if os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL"):
         raise
@@ -27,9 +33,10 @@ except ValueError:
     def get_db_connection():
         raise RuntimeError("Database is unavailable")
 
-    def init_db():
-        raise RuntimeError("Database is unavailable")
+    def catalog_schema_is_compatible():
+        return False
 
+from runtime_settings import env_flag_enabled, get_app_env
 from shop_settings import ADMIN_PANEL_TITLE, CURRENCY_SYMBOL
 from storefront import router as storefront_router, safe_image_url
 
@@ -41,24 +48,65 @@ ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_MAX_AGE = 86400
 MASTER_SESSION_COOKIE = "master_session"
 MASTER_SESSION_MAX_AGE = 86400
+PREVIEW_GATE_REALM = "Deal Market Preview"
+LOW_STOCK_SYNC_FAILED = "low_stock_sync_failed"
+ORDER_NOTIFICATION_FAILED = "order_notification_failed"
+ORDER_STATUS_UPDATE_FAILED = "order_status_update_failed"
+WEIGHING_UPDATE_FAILED = "weighing_update_failed"
+WEIGHING_NOTIFICATION_FAILED = "weighing_notification_failed"
+ORDER_NOTE_UPDATE_FAILED = "order_note_update_failed"
+CLIENT_NOTE_UPDATE_FAILED = "client_note_update_failed"
+CHANNEL_POST_FAILED = "channel_post_failed"
+ADMIN_ERROR_LOG_WRITE_FAILED = "admin_error_log_write_failed"
+TELEGRAM_OPERATION_FAILED = "telegram_operation_failed"
+INTERNAL_OPERATION_FAILED = "internal_operation_failed"
+DASHBOARD_LOAD_FAILED = "dashboard_load_failed"
+ADMIN_OPERATION_ERROR_CODES = frozenset({
+    LOW_STOCK_SYNC_FAILED,
+    ORDER_NOTIFICATION_FAILED,
+    ORDER_STATUS_UPDATE_FAILED,
+    WEIGHING_UPDATE_FAILED,
+    WEIGHING_NOTIFICATION_FAILED,
+    ORDER_NOTE_UPDATE_FAILED,
+    CLIENT_NOTE_UPDATE_FAILED,
+    CHANNEL_POST_FAILED,
+    ADMIN_ERROR_LOG_WRITE_FAILED,
+    TELEGRAM_OPERATION_FAILED,
+    "broadcast_list_failed",
+    "broadcast_form_failed",
+    "broadcast_create_failed",
+    "broadcast_send_failed",
+    "channel_list_failed",
+    "channel_form_failed",
+    "channel_create_failed",
+    "channel_delete_failed",
+    DASHBOARD_LOAD_FAILED,
+    INTERNAL_OPERATION_FAILED,
+    "master_dashboard_load_failed",
+    "master_shop_detail_load_failed",
+    "error_log_list_failed",
+    "error_log_detail_failed",
+    "order_list_failed",
+    "order_detail_failed",
+    "product_list_failed",
+    "product_create_failed",
+    "product_recommendations_load_failed",
+    "product_recommendations_update_failed",
+    "product_update_failed",
+})
 
 
 @app.on_event("startup")
 async def startup_db_init():
     global DATABASE_READY
     DATABASE_READY = False
+    validate_preview_gate_configuration()
     if not DATABASE_URL:
+        refresh_database_readiness()
         logger.error("Database is not configured")
         return
-    try:
-        init_db()
-    except psycopg2.OperationalError:
-        logger.exception("PostgreSQL is unavailable during database initialization")
-        return
-    except Exception:
-        logger.exception("Unexpected database initialization failure")
-        raise
-    DATABASE_READY = True
+    if not refresh_database_readiness():
+        logger.error("Database schema is unavailable or incompatible")
 
 PAGE_STYLE = """
 <style>
@@ -555,7 +603,7 @@ def admin_layout(title, content, refresh_seconds=None):
   <div class="admin-shell">
     <header class="admin-topbar">
       <nav class="admin-nav">
-        <a class="admin-brand" href="/">🏠 Главная</a>
+        <a class="admin-brand" href="/admin">🏠 Главная</a>
         <div class="admin-links">
           <a href="/orders">📦 Заказы</a>
           <a href="/products">🛒 Товары</a>
@@ -628,6 +676,171 @@ def master_error_page(title, message):
 
 def admin_auth_configured():
     return bool(os.getenv("ADMIN_PASSWORD") and os.getenv("ADMIN_SESSION_SECRET"))
+
+
+def preview_gate_enabled():
+    return env_flag_enabled("PREVIEW_GATE_ENABLED")
+
+
+def master_admin_enabled():
+    return env_flag_enabled("ENABLE_MASTER_ADMIN")
+
+
+def telegram_actions_enabled():
+    return env_flag_enabled("ENABLE_TELEGRAM_ACTIONS")
+
+
+def preview_gate_required():
+    app_env = get_app_env()
+    gate_enabled = preview_gate_enabled()
+    if app_env == "preview" and not gate_enabled:
+        raise RuntimeError("Preview access gate is not configured")
+    return gate_enabled
+
+
+def _is_trivially_repeated(value):
+    for size in range(1, len(value) // 2 + 1):
+        if len(value) % size == 0 and value[:size] * (len(value) // size) == value:
+            return True
+    return False
+
+
+def _contains_sequential_pattern(value):
+    sequences = (
+        "abcdefghijklmnopqrstuvwxyz",
+        "zyxwvutsrqponmlkjihgfedcba",
+        "0123456789",
+        "9876543210",
+        "qwertyuiop",
+        "poiuytrewq",
+        "asdfghjkl",
+        "lkjhgfdsa",
+        "zxcvbnm",
+        "mnbvcxz",
+    )
+    normalized = value.casefold()
+    return any(
+        sequence[index:index + 6] in normalized
+        for sequence in sequences
+        for index in range(len(sequence) - 5)
+    )
+
+
+def _preview_gate_password_is_strong(username, password):
+    if not 32 <= len(password) <= 256:
+        return False
+    if password != password.strip() or any(character.isspace() for character in password):
+        return False
+    if not all(33 <= ord(character) <= 126 for character in password):
+        return False
+    if password.casefold() == username.casefold() or _is_trivially_repeated(password):
+        return False
+
+    character_classes = (
+        any(character.islower() for character in password),
+        any(character.isupper() for character in password),
+        any(character.isdigit() for character in password),
+        any(not character.isalnum() for character in password),
+    )
+    if sum(character_classes) < 4 or len(set(password)) < 12:
+        return False
+
+    if _contains_sequential_pattern(password):
+        return False
+
+    normalized = password.casefold()
+    forbidden_patterns = (
+        "password",
+        "letmein",
+        "qwerty",
+        "administrator",
+        "dealmarket",
+        "123456",
+        "654321",
+        "abcdef",
+        "fedcba",
+    )
+    return not any(pattern in normalized for pattern in forbidden_patterns)
+
+
+def _preview_gate_credentials():
+    username = os.getenv("PREVIEW_GATE_USERNAME", "")
+    password = os.getenv("PREVIEW_GATE_PASSWORD", "")
+    username_valid = bool(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", username))
+    password_valid = username_valid and _preview_gate_password_is_strong(
+        username, password
+    )
+    if not username_valid or not password_valid:
+        raise RuntimeError("Preview access gate is not configured")
+    return username, password
+
+
+def validate_preview_gate_configuration():
+    if preview_gate_required():
+        _preview_gate_credentials()
+
+
+def _preview_basic_credentials(authorization):
+    if not authorization:
+        return None
+    try:
+        scheme, encoded = authorization.split(" ", 1)
+        if scheme.lower() != "basic" or not encoded:
+            return None
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        username, separator, password = decoded.partition(":")
+        if not separator:
+            return None
+        return username, password
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+
+
+def preview_gate_authenticated(request):
+    try:
+        expected_username, expected_password = _preview_gate_credentials()
+    except RuntimeError:
+        return False
+    provided = _preview_basic_credentials(request.headers.get("authorization"))
+    if provided is None:
+        return False
+    username, password = provided
+    username_matches = hmac.compare_digest(
+        username.encode("utf-8"), expected_username.encode("utf-8")
+    )
+    password_matches = hmac.compare_digest(
+        password.encode("utf-8"), expected_password.encode("utf-8")
+    )
+    return username_matches and password_matches
+
+
+def preview_gate_unauthorized():
+    return PlainTextResponse(
+        "Authentication required",
+        status_code=401,
+        headers={
+            "WWW-Authenticate": f'Basic realm="{PREVIEW_GATE_REALM}", charset="UTF-8"'
+        },
+    )
+
+
+def generic_not_found():
+    return PlainTextResponse("Not Found", status_code=404)
+
+
+def refresh_database_readiness():
+    global DATABASE_READY
+    DATABASE_READY = False
+    if not DATABASE_URL:
+        return False
+    DATABASE_READY = bool(catalog_schema_is_compatible())
+    return DATABASE_READY
+
+
+def telegram_write_route_disabled(request):
+    if telegram_actions_enabled() or request.method in {"GET", "HEAD", "OPTIONS"}:
+        return False
+    return request.url.path.startswith(("/broadcasts", "/channel"))
 
 
 def master_auth_configured():
@@ -779,24 +992,40 @@ def database_service_unavailable():
 
 @app.middleware("http")
 async def require_admin_login(request: Request, call_next):
-    if request.url.path in {"/shop", "/shop/"}:
+    path = request.url.path
+    if path not in {"/health", "/ready"}:
+        try:
+            gate_required = preview_gate_required()
+            if gate_required:
+                _preview_gate_credentials()
+        except RuntimeError:
+            return PlainTextResponse("Service unavailable", status_code=503)
+        if gate_required and not preview_gate_authenticated(request):
+            return preview_gate_unauthorized()
+
+    if path.startswith("/master") and not master_admin_enabled():
+        return generic_not_found()
+    if telegram_write_route_disabled(request):
+        return generic_not_found()
+
+    if path in {"/", "/shop", "/shop/"}:
         return await call_next(request)
 
-    if request.url.path.startswith("/master"):
+    if path.startswith("/master"):
         public_master_paths = {"/master/login", "/master/health"}
-        if request.url.path in public_master_paths:
+        if path in public_master_paths:
             return await call_next(request)
         if is_master_authenticated(request):
-            if request.url.path != "/master/logout" and not DATABASE_READY:
+            if path != "/master/logout" and not DATABASE_READY:
                 return database_service_unavailable()
             return await call_next(request)
         return RedirectResponse("/master/login", status_code=303)
 
-    public_paths = {"/login", "/health"}
-    if request.url.path in public_paths:
+    public_paths = {"/login", "/health", "/ready"}
+    if path in public_paths:
         return await call_next(request)
     if is_admin_authenticated(request):
-        if request.url.path != "/logout" and not DATABASE_READY:
+        if path != "/logout" and not DATABASE_READY:
             return database_service_unavailable()
         return await call_next(request)
     return RedirectResponse("/login", status_code=303)
@@ -817,7 +1046,7 @@ async def login(password: str = Form(...)):
     if not secrets.compare_digest(password, admin_password):
         return login_page("Неверный пароль.")
 
-    response = RedirectResponse("/", status_code=303)
+    response = RedirectResponse("/admin", status_code=303)
     response.set_cookie(
         ADMIN_SESSION_COOKIE,
         sign_admin_session(),
@@ -1216,24 +1445,19 @@ def log_inventory_movement(
 
 
 def get_admin_chat_id():
-    admin_id = os.getenv("ADMIN_ID")
-    if admin_id:
-        return admin_id
-
-    try:
-        with open("config.json", "r", encoding="utf-8") as file:
-            config = json.load(file)
-    except Exception:
+    value = os.getenv("ADMIN_ID", "")
+    if not re.fullmatch(r"-?[1-9][0-9]{0,18}", value):
         return None
-
-    return config.get("admin_id")
+    return int(value)
 
 
 def send_low_stock_alert(product_name, stock_grams, threshold_grams):
+    if not telegram_actions_enabled():
+        return False
     bot_token = os.getenv("BOT_TOKEN")
     admin_id = get_admin_chat_id()
     if not bot_token or not admin_id:
-        return
+        return False
 
     text = (
         "⚠️ Низкий остаток\n\n"
@@ -1251,9 +1475,12 @@ def send_low_stock_alert(product_name, stock_grams, threshold_grams):
         method="POST"
     )
     urllib.request.urlopen(request, timeout=5).read()
+    return True
 
 
 def sync_low_stock_alert_state(cursor, product_ids):
+    if not telegram_actions_enabled():
+        return
     seen_product_ids = []
     for product_id in product_ids or []:
         if not product_id or product_id in seen_product_ids:
@@ -1298,7 +1525,8 @@ def sync_low_stock_alert_state(cursor, product_ids):
 
         name, stock_grams, threshold_grams = row
         try:
-            send_low_stock_alert(name, stock_grams, threshold_grams)
+            if not send_low_stock_alert(name, stock_grams, threshold_grams):
+                continue
             cursor.execute(
                 """
                 UPDATE products
@@ -1308,14 +1536,16 @@ def sync_low_stock_alert_state(cursor, product_ids):
                 """,
                 (product_id,),
             )
-        except Exception as e:
-            print(f"LOW STOCK ALERT ERROR: product_id={product_id}:", e)
+        except Exception:
+            print(LOW_STOCK_SYNC_FAILED)
 
 
 def send_order_status_notification(telegram_id, order_id, status):
+    if not telegram_actions_enabled():
+        return False
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token or not telegram_id:
-        return
+        return False
 
     messages = {
         "paid": f"✅ Ваш заказ №{order_id} подтверждён и оплачен.",
@@ -1325,7 +1555,7 @@ def send_order_status_notification(telegram_id, order_id, status):
     }
     text = messages.get(status)
     if not text:
-        return
+        return False
 
     data = urllib.parse.urlencode({
         "chat_id": telegram_id,
@@ -1337,6 +1567,7 @@ def send_order_status_notification(telegram_id, order_id, status):
         method="POST"
     )
     urllib.request.urlopen(request, timeout=5).read()
+    return True
 
 
 def send_weighing_complete_notification(
@@ -1348,9 +1579,11 @@ def send_weighing_complete_notification(
     photo_filename=None,
     photo_content_type=None,
 ):
+    if not telegram_actions_enabled():
+        return False
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token or not telegram_id:
-        raise RuntimeError("BOT_TOKEN or telegram_id is missing")
+        return False
 
     item_lines = ""
     for product_name, weight, price, option_label in items:
@@ -1412,7 +1645,7 @@ def send_weighing_complete_notification(
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         urllib.request.urlopen(request, timeout=15).read()
-        return
+        return True
 
     data = urllib.parse.urlencode({
         "chat_id": telegram_id,
@@ -1425,18 +1658,84 @@ def send_weighing_complete_notification(
         method="POST"
     )
     urllib.request.urlopen(request, timeout=5).read()
+    return True
+
+
+def record_notification_event(order_id, event_type, event_text):
+    if not telegram_actions_enabled():
+        return False
+    connection = psycopg2.connect(DATABASE_URL)
+    cursor = None
+    try:
+        cursor = connection.cursor()
+        log_order_event(cursor, order_id, event_type, event_text)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        connection.close()
+    return True
+
+
+def send_order_status_notification_and_record(telegram_id, order_id, status):
+    if not send_order_status_notification(telegram_id, order_id, status):
+        return False
+    return record_notification_event(
+        order_id,
+        "notification_sent",
+        f"Клиенту отправлено уведомление о статусе: {admin_status_label(status)}",
+    )
+
+
+def send_weighing_notification_and_record(
+    telegram_id,
+    order_id,
+    total,
+    items,
+    photo_bytes=None,
+    photo_filename=None,
+    photo_content_type=None,
+):
+    sent = send_weighing_complete_notification(
+        telegram_id,
+        order_id,
+        total,
+        items,
+        photo_bytes=photo_bytes,
+        photo_filename=photo_filename,
+        photo_content_type=photo_content_type,
+    )
+    if not sent:
+        return False
+    return record_notification_event(
+        order_id,
+        "weighing_notification_sent",
+        f"Клиенту отправлено уведомление о финальной сумме: {float(total or 0):.2f} €",
+    )
 
 
 def get_channel_chat_id():
     return os.getenv("TELEGRAM_CHANNEL_ID")
 
 
+def _telegram_error_is_forbidden(error):
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(error, "code", None)
+    return status_code == 403
+
+
 def send_channel_post(message_text):
+    if not telegram_actions_enabled():
+        return False, "disabled"
     try:
         bot_token = os.getenv("BOT_TOKEN")
         channel_chat_id = get_channel_chat_id()
         if not bot_token or not channel_chat_id:
-            return False, "BOT_TOKEN or TELEGRAM_CHANNEL_ID is missing"
+            return False, CHANNEL_POST_FAILED
 
         data = urllib.parse.urlencode({
             "chat_id": channel_chat_id,
@@ -1449,11 +1748,13 @@ def send_channel_post(message_text):
         )
         urllib.request.urlopen(request, timeout=5).read()
         return True, None
-    except Exception as error:
-        return False, str(error)
+    except Exception:
+        return False, CHANNEL_POST_FAILED
 
 
 def send_broadcast_message(telegram_id, message_text):
+    if not telegram_actions_enabled():
+        return False, "disabled"
     try:
         bot_token = os.getenv("BOT_TOKEN")
         if not bot_token or not telegram_id:
@@ -1471,8 +1772,7 @@ def send_broadcast_message(telegram_id, message_text):
         urllib.request.urlopen(request, timeout=5).read()
         return True, "sent"
     except Exception as error:
-        error_text = str(error).lower()
-        if "403" in error_text or "forbidden" in error_text:
+        if _telegram_error_is_forbidden(error):
             return False, "blocked"
         return False, "failed"
 
@@ -1507,9 +1807,17 @@ def broadcast_target_label(target_type):
     return html.escape(labels.get(str(target_type or ""), str(target_type or "-")))
 
 
-def log_admin_error(route, action, error):
+def stable_admin_error_code(error_code):
+    if isinstance(error_code, str) and error_code in ADMIN_OPERATION_ERROR_CODES:
+        return error_code
+    return INTERNAL_OPERATION_FAILED
+
+
+def log_admin_error(route, action, error_code):
+    stable_code = stable_admin_error_code(error_code)
+    conn = None
+    cursor = None
     try:
-        tb = traceback.format_exc()
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -1518,13 +1826,31 @@ def log_admin_error(route, action, error):
             (route, action, error_message, traceback)
             VALUES (%s, %s, %s, %s)
             """,
-            (route, action, str(error), tb),
+            (route, action, stable_code, None),
         )
         conn.commit()
-        cursor.close()
-        conn.close()
-    except Exception as log_error:
-        print(f"Failed to write admin error log: {log_error}")
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        print(ADMIN_ERROR_LOG_WRITE_FAILED)
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def log_admin_stable_error(route, action, error_code):
+    log_admin_error(route, action, error_code)
 
 
 def seed_default_master_shop(cursor):
@@ -1799,8 +2125,10 @@ async def master_dashboard():
         cursor.close()
         conn.close()
         return master_layout("Master Dashboard", master_shop_rows(rows))
-    except Exception as e:
-        log_admin_error("/master", "master_dashboard", e)
+    except Exception:
+        log_admin_error(
+            "/master", "master_dashboard", "master_dashboard_load_failed"
+        )
         return master_error_page("Error", "Could not load Master Dashboard.")
 
 
@@ -1904,12 +2232,21 @@ async def master_shop_detail(shop_key: str):
         </section>
         """
         return master_layout(f"Master Shop: {brand_name or shop_key_value}", content)
-    except Exception as e:
-        log_admin_error("/master/shops/{shop_key}", "master_shop_detail", e)
+    except Exception:
+        log_admin_error(
+            "/master/shops/{shop_key}",
+            "master_shop_detail",
+            "master_shop_detail_load_failed",
+        )
         return master_error_page("Error", "Could not load shop details.")
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
+async def public_root():
+    return RedirectResponse("/shop", status_code=307)
+
+
+@app.get("/admin", response_class=HTMLResponse)
 async def root():
     stats = None
     latest_orders = []
@@ -2219,9 +2556,9 @@ async def root():
         cc_never_sold_count = cursor.fetchone()[0]
 
         conn.close()
-    except Exception as e:
-        log_admin_error("/", "dashboard", e)
-        error_message = str(e)
+    except Exception:
+        log_admin_error("/admin", "dashboard", DASHBOARD_LOAD_FAILED)
+        error_message = "Не удалось загрузить статистику. Попробуйте позже."
 
     if stats:
         (
@@ -2486,6 +2823,13 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/ready")
+async def ready():
+    if refresh_database_readiness():
+        return {"status": "ready"}
+    return JSONResponse({"status": "unavailable"}, status_code=503)
+
+
 @app.get("/broadcasts", response_class=HTMLResponse)
 async def broadcasts():
     try:
@@ -2560,8 +2904,10 @@ async def broadcasts():
             html_content += "</table></div>"
         html_content += "</section>"
         return admin_layout("📨 Рассылка", html_content)
-    except Exception as e:
-        log_admin_error("/broadcasts", "list_broadcasts", e)
+    except Exception:
+        log_admin_stable_error(
+            "/broadcasts", "list_broadcasts", "broadcast_list_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -2592,13 +2938,17 @@ async def new_broadcast_form():
         </section>
         """
         return admin_layout("Новая рассылка", content)
-    except Exception as e:
-        log_admin_error("/broadcasts/new", "new_broadcast_form", e)
+    except Exception:
+        log_admin_stable_error(
+            "/broadcasts/new", "new_broadcast_form", "broadcast_form_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/broadcasts/new", response_class=HTMLResponse)
 async def create_broadcast(message_text: str = Form(""), target_type: str = Form("all_clients")):
+    if not telegram_actions_enabled():
+        return generic_not_found()
     try:
         message_text = (message_text or "").strip()
         if not message_text:
@@ -2660,13 +3010,19 @@ async def create_broadcast(message_text: str = Form(""), target_type: str = Form
         cursor.close()
         conn.close()
         return RedirectResponse("/broadcasts", status_code=303)
-    except Exception as e:
-        log_admin_error("/broadcasts/new", "create_broadcast", e)
+    except Exception:
+        log_admin_stable_error(
+            "/broadcasts/new", "create_broadcast", "broadcast_create_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/broadcasts/{broadcast_id}/send", response_class=HTMLResponse)
 async def send_broadcast_route(broadcast_id: int):
+    if not telegram_actions_enabled():
+        return generic_not_found()
+    conn = None
+    cursor = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -2680,14 +3036,10 @@ async def send_broadcast_route(broadcast_id: int):
         )
         broadcast = cursor.fetchone()
         if not broadcast:
-            cursor.close()
-            conn.close()
             return admin_error_page("Ошибка", "Рассылка не найдена.")
 
         _, message_text, status = broadcast
         if str(status or "") == "sent":
-            cursor.close()
-            conn.close()
             return RedirectResponse("/broadcasts", status_code=303)
 
         cursor.execute(
@@ -2706,6 +3058,7 @@ async def send_broadcast_route(broadcast_id: int):
             (broadcast_id,),
         )
         recipients = cursor.fetchall()
+        conn.commit()
 
         for recipient_id, telegram_id in recipients:
             success, result_status = send_broadcast_message(telegram_id, message_text)
@@ -2740,6 +3093,7 @@ async def send_broadcast_route(broadcast_id: int):
                     """,
                     ("failed", recipient_id),
                 )
+            conn.commit()
 
         cursor.execute(
             """
@@ -2764,12 +3118,28 @@ async def send_broadcast_route(broadcast_id: int):
             )
 
         conn.commit()
-        cursor.close()
-        conn.close()
         return RedirectResponse("/broadcasts", status_code=303)
-    except Exception as e:
-        log_admin_error("/broadcasts/{id}/send", "send_broadcast", e)
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        log_admin_stable_error(
+            "/broadcasts/{id}/send", "send_broadcast", "broadcast_send_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 @app.get("/channel", response_class=HTMLResponse)
@@ -2802,7 +3172,12 @@ async def channel_posts():
             for post_id, message_text, status, error_message, created_at, sent_at in rows:
                 post_id_int = int(post_id)
                 message_html = html.escape(str(message_text or "-")).replace("\n", "<br>")
-                error_html = html.escape(str(error_message or "-"))
+                error_code = (
+                    CHANNEL_POST_FAILED
+                    if error_message == CHANNEL_POST_FAILED
+                    else INTERNAL_OPERATION_FAILED
+                )
+                error_html = "-" if not error_message else html.escape(error_code)
                 actions_html = "Отправлено"
                 if str(status or "") in {"draft", "failed"}:
                     actions_html = (
@@ -2828,8 +3203,10 @@ async def channel_posts():
             html_content += "</table></div>"
         html_content += "</section>"
         return admin_layout("📢 Канал", html_content)
-    except Exception as e:
-        log_admin_error("/channel", "list_channel_posts", e)
+    except Exception:
+        log_admin_stable_error(
+            "/channel", "list_channel_posts", "channel_list_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -2851,13 +3228,17 @@ async def new_channel_post_form():
         </section>
         """
         return admin_layout("Новый пост в канал", content)
-    except Exception as e:
-        log_admin_error("/channel/new", "new_channel_post_form", e)
+    except Exception:
+        log_admin_stable_error(
+            "/channel/new", "new_channel_post_form", "channel_form_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/channel/new", response_class=HTMLResponse)
 async def create_channel_post(message_text: str = Form("")):
+    if not telegram_actions_enabled():
+        return generic_not_found()
     try:
         message_text = (message_text or "").strip()
         if not message_text:
@@ -2878,13 +3259,19 @@ async def create_channel_post(message_text: str = Form("")):
         cursor.close()
         conn.close()
         return RedirectResponse("/channel", status_code=303)
-    except Exception as e:
-        log_admin_error("/channel/new", "create_channel_post", e)
+    except Exception:
+        log_admin_stable_error(
+            "/channel/new", "create_channel_post", "channel_create_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.post("/channel/{post_id}/send", response_class=HTMLResponse)
 async def send_channel_post_route(post_id: int):
+    if not telegram_actions_enabled():
+        return generic_not_found()
+    conn = None
+    cursor = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -2894,16 +3281,13 @@ async def send_channel_post_route(post_id: int):
         )
         row = cursor.fetchone()
         if not row:
-            cursor.close()
-            conn.close()
             return admin_error_page("Ошибка", "Пост не найден.")
 
         _, message_text, status = row
         if str(status or "") == "sent":
-            cursor.close()
-            conn.close()
             return RedirectResponse("/channel", status_code=303)
 
+        conn.rollback()
         success, error_message = send_channel_post(message_text)
         if success:
             cursor.execute(
@@ -2915,6 +3299,11 @@ async def send_channel_post_route(post_id: int):
                 (post_id,),
             )
         else:
+            error_message = (
+                error_message
+                if error_message == CHANNEL_POST_FAILED
+                else CHANNEL_POST_FAILED
+            )
             cursor.execute(
                 """
                 UPDATE channel_posts
@@ -2924,16 +3313,34 @@ async def send_channel_post_route(post_id: int):
                 (error_message, post_id),
             )
         conn.commit()
-        cursor.close()
-        conn.close()
         return RedirectResponse("/channel", status_code=303)
-    except Exception as e:
-        log_admin_error("/channel/{id}/send", "send_channel_post", e)
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        log_admin_stable_error(
+            "/channel/{id}/send", "send_channel_post", CHANNEL_POST_FAILED
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 @app.post("/channel/{post_id}/delete", response_class=HTMLResponse)
 async def delete_channel_post(post_id: int):
+    if not telegram_actions_enabled():
+        return generic_not_found()
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -2952,8 +3359,10 @@ async def delete_channel_post(post_id: int):
         cursor.close()
         conn.close()
         return RedirectResponse("/channel", status_code=303)
-    except Exception as e:
-        log_admin_error("/channel/{id}/delete", "delete_channel_post", e)
+    except Exception:
+        log_admin_stable_error(
+            "/channel/{id}/delete", "delete_channel_post", "channel_delete_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -2984,12 +3393,13 @@ async def logs():
             html_content += "<div class='dash-table-wrap'><table>"
             html_content += "<tr><th>Дата</th><th>Route</th><th>Action</th><th>Ошибка</th><th></th></tr>"
             for log_id, route, action, error_message, created_at in rows:
+                error_code = stable_admin_error_code(error_message)
                 html_content += (
                     "<tr>"
                     f"<td>{format_admin_datetime(created_at)}</td>"
                     f"<td>{html.escape(str(route or '-'))}</td>"
                     f"<td>{html.escape(str(action or '-'))}</td>"
-                    f"<td>{html.escape(str(error_message or '-'))}</td>"
+                    f"<td>{html.escape(error_code)}</td>"
                     f"<td><a class='button button-link' href='/logs/{int(log_id)}'>Открыть</a></td>"
                     "</tr>"
                 )
@@ -2998,8 +3408,8 @@ async def logs():
             html_content += "<p>Логов пока нет.</p>"
         html_content += "</section>"
         return admin_layout("🧾 Логи ошибок", html_content)
-    except Exception as e:
-        log_admin_error("/logs", "list_error_logs", e)
+    except Exception:
+        log_admin_error("/logs", "list_error_logs", "error_log_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -3015,7 +3425,6 @@ async def log_detail(log_id: int):
                 route,
                 action,
                 error_message,
-                traceback,
                 created_at
             FROM error_logs
             WHERE id = %s
@@ -3031,7 +3440,8 @@ async def log_detail(log_id: int):
                 "<section class='admin-card'><h1>Лог не найден</h1><p><a class='button button-link' href='/logs'>← К логам</a></p></section>",
             )
 
-        _, route, action, error_message, traceback_text, created_at = row
+        _, route, action, error_message, created_at = row
+        error_code = stable_admin_error_code(error_message)
         content = f"""
         <section class="admin-card">
           <h1>🧾 Лог ошибки</h1>
@@ -3040,15 +3450,15 @@ async def log_detail(log_id: int):
             <div class="detail-field"><strong>Дата</strong>{format_admin_datetime(created_at)}</div>
             <div class="detail-field"><strong>Route</strong>{html.escape(str(route or '-'))}</div>
             <div class="detail-field"><strong>Action</strong>{html.escape(str(action or '-'))}</div>
-            <div class="detail-field"><strong>Ошибка</strong>{html.escape(str(error_message or '-'))}</div>
+            <div class="detail-field"><strong>Ошибка</strong>{html.escape(error_code)}</div>
           </div>
-          <h2>Traceback</h2>
-          <pre>{html.escape(str(traceback_text or ''))}</pre>
         </section>
         """
         return admin_layout("🧾 Лог ошибки", content)
-    except Exception as e:
-        log_admin_error("/logs/{id}", "error_log_detail", e)
+    except Exception:
+        log_admin_error(
+            "/logs/{id}", "error_log_detail", "error_log_detail_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -3191,8 +3601,8 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
             html += f"<tr{row_class}><td>{id_}</td><td>{order_id_text}</td><td>{username_text}</td><td>{phone_text}</td><td>{address_text}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method_text}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("📦 Заказы", html, refresh_seconds=60)
-    except Exception as e:
-        log_admin_error("/orders", "list_orders", e)
+    except Exception:
+        log_admin_error("/orders", "list_orders", "order_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -3300,6 +3710,8 @@ async def update_order_status(order_id: str, status: str):
     allowed = {"paid", "preparing", "done", "cancelled"}
     if status not in allowed:
         return admin_error_page("Недопустимый статус", "Операция не может быть выполнена для этого заказа.")
+    conn = None
+    cursor = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -3309,7 +3721,6 @@ async def update_order_status(order_id: str, status: str):
         )
         row = cursor.fetchone()
         if not row:
-            conn.close()
             return RedirectResponse("/orders", status_code=303)
 
         current_status = str(row[0] or "")
@@ -3327,8 +3738,7 @@ async def update_order_status(order_id: str, status: str):
             "cancelled": set(),
         }
         if status not in allowed_transitions.get(current_status, set()):
-            print(f"INVALID ORDER STATUS TRANSITION: {order_id} {current_status} -> {status}")
-            conn.close()
+            print("order_status_transition_rejected")
             return RedirectResponse("/orders", status_code=303)
 
         if status == "paid" and not inventory_deducted:
@@ -3345,11 +3755,11 @@ async def update_order_status(order_id: str, status: str):
             order_items = cursor.fetchall()
             try:
                 validate_weight_inventory_modes(order_items)
-            except ValueError as exc:
+            except ValueError:
                 conn.rollback()
-                conn.close()
                 return admin_error_page(
-                    "Списание не выполнено", escape(str(exc), quote=True)
+                    "Списание не выполнено",
+                    "Проверьте данные заказа и повторите попытку.",
                 )
             for product_id, weight, _pricing_mode in order_items:
                 if not product_id or not weight:
@@ -3432,11 +3842,11 @@ async def update_order_status(order_id: str, status: str):
             restore_items = cursor.fetchall()
             try:
                 validate_weight_inventory_modes(restore_items)
-            except ValueError as exc:
+            except ValueError:
                 conn.rollback()
-                conn.close()
                 return admin_error_page(
-                    "Возврат остатка не выполнен", escape(str(exc), quote=True)
+                    "Возврат остатка не выполнен",
+                    "Проверьте данные заказа и повторите попытку.",
                 )
             for product_id, restore_grams, _pricing_mode in restore_items:
                 if not product_id or not restore_grams or int(restore_grams or 0) <= 0:
@@ -3515,38 +3925,21 @@ async def update_order_status(order_id: str, status: str):
                 f"Статус изменён: {admin_status_label(current_status)} → {admin_status_label(status)}"
             )
         conn.commit()
-        conn.close()
         if current_status != status:
             try:
-                send_order_status_notification(telegram_id, order_id, status)
+                send_order_status_notification_and_record(
+                    telegram_id, order_id, status
+                )
+            except Exception:
+                print(ORDER_NOTIFICATION_FAILED)
                 try:
-                    event_conn = psycopg2.connect(DATABASE_URL)
-                    event_cursor = event_conn.cursor()
-                    log_order_event(
-                        event_cursor,
-                        order_id,
-                        "notification_sent",
-                        f"Клиенту отправлено уведомление о статусе: {admin_status_label(status)}"
-                    )
-                    event_conn.commit()
-                    event_conn.close()
-                except Exception as e:
-                    print(f"ORDER EVENT LOG ERROR: {order_id} notification_sent:", e)
-            except Exception as e:
-                print(f"ORDER STATUS NOTIFICATION ERROR: {order_id} {status}:", e)
-                try:
-                    event_conn = psycopg2.connect(DATABASE_URL)
-                    event_cursor = event_conn.cursor()
-                    log_order_event(
-                        event_cursor,
+                    record_notification_event(
                         order_id,
                         "notification_failed",
                         f"Не удалось отправить уведомление о статусе: {admin_status_label(status)}"
                     )
-                    event_conn.commit()
-                    event_conn.close()
-                except Exception as log_error:
-                    print(f"ORDER EVENT LOG ERROR: {order_id} notification_failed:", log_error)
+                except Exception:
+                    print(ORDER_NOTIFICATION_FAILED)
         return admin_layout(
             "✅ Статус заказа обновлён",
             f"""
@@ -3560,9 +3953,29 @@ async def update_order_status(order_id: str, status: str):
             </section>
             """,
         )
-    except Exception as e:
-        log_admin_error("/orders/{order_id}/status/{status}", "update_order_status", e)
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        log_admin_stable_error(
+            "/orders/{order_id}/status/{status}",
+            "update_order_status",
+            ORDER_STATUS_UPDATE_FAILED,
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 @app.get("/orders/{order_id}", response_class=HTMLResponse)
@@ -3816,8 +4229,10 @@ async def order_detail(order_id: str):
             html += f"<p><strong>Итого: {total:.2f} €</strong></p></section>"
         html += f"<p><a class='button button-link' href=\"/orders\">← К заказам</a></p>"
         return admin_layout(f"Заказ {order_id}", html)
-    except Exception as e:
-        log_admin_error("/orders/{order_id}", "order_detail", e)
+    except Exception:
+        log_admin_error(
+            "/orders/{order_id}", "order_detail", "order_detail_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -3843,8 +4258,8 @@ async def update_order_note(order_id: str, order_note: str = Form("")):
         )
         conn.commit()
         conn.close()
-    except Exception as e:
-        print(f"ORDER NOTE UPDATE ERROR: {order_id}:", e)
+    except Exception:
+        print(ORDER_NOTE_UPDATE_FAILED)
     return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
 
@@ -3870,6 +4285,8 @@ async def weigh_order_item(
         photo_bytes = await photo.read()
         photo_filename = photo.filename
         photo_content_type = photo.content_type
+    conn = None
+    cursor = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -3886,7 +4303,6 @@ async def weigh_order_item(
         )
         product_row = cursor.fetchone()
         if not product_row:
-            conn.close()
             return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
         price_per_kg, pricing_mode, product_id = product_row
@@ -3894,11 +4310,11 @@ async def weigh_order_item(
             validate_weight_inventory_modes(
                 [(product_id, final_weight_grams, pricing_mode)]
             )
-        except ValueError as exc:
+        except ValueError:
             conn.rollback()
-            conn.close()
             return admin_error_page(
-                "Взвешивание не выполнено", escape(str(exc), quote=True)
+                "Взвешивание не выполнено",
+                "Проверьте вес товара и повторите попытку.",
             )
         final_price = round(final_weight_grams / 1000 * price_per_kg, 2)
 
@@ -3914,7 +4330,6 @@ async def weigh_order_item(
             (final_weight_grams, final_price, item_id, order_id),
         )
         if cursor.rowcount == 0:
-            conn.close()
             return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
         cursor.execute(
@@ -3961,14 +4376,29 @@ async def weigh_order_item(
             order_items_summary = cursor.fetchall()
 
         conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"ORDER ITEM WEIGH ERROR: {order_id}/{item_id}:", e)
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        print(WEIGHING_UPDATE_FAILED)
         return RedirectResponse(f"/orders/{order_id}", status_code=303)
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     if not has_pending_weighing and telegram_id:
         try:
-            send_weighing_complete_notification(
+            send_weighing_notification_and_record(
                 telegram_id,
                 order_id,
                 order_total,
@@ -3977,31 +4407,16 @@ async def weigh_order_item(
                 photo_filename=photo_filename,
                 photo_content_type=photo_content_type,
             )
-            notify_conn = psycopg2.connect(DATABASE_URL)
-            notify_cursor = notify_conn.cursor()
-            log_order_event(
-                notify_cursor,
-                order_id,
-                "weighing_notification_sent",
-                f"Клиенту отправлено уведомление о финальной сумме: {float(order_total or 0):.2f} €"
-            )
-            notify_conn.commit()
-            notify_conn.close()
-        except Exception as e:
-            print(f"WEIGHING NOTIFICATION ERROR: {order_id}:", e)
+        except Exception:
+            print(WEIGHING_NOTIFICATION_FAILED)
             try:
-                notify_conn = psycopg2.connect(DATABASE_URL)
-                notify_cursor = notify_conn.cursor()
-                log_order_event(
-                    notify_cursor,
+                record_notification_event(
                     order_id,
                     "weighing_notification_failed",
                     "Не удалось отправить клиенту уведомление о финальной сумме."
                 )
-                notify_conn.commit()
-                notify_conn.close()
-            except Exception as log_error:
-                print(f"ORDER EVENT LOG ERROR: {order_id} weighing_notification_failed:", log_error)
+            except Exception:
+                print(WEIGHING_NOTIFICATION_FAILED)
 
     return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
@@ -4410,8 +4825,8 @@ async def update_client_note(telegram_id: int, client_note: str = Form("")):
         )
         conn.commit()
         conn.close()
-    except Exception as e:
-        print(f"CLIENT NOTE UPDATE ERROR: {telegram_id}:", e)
+    except Exception:
+        print(CLIENT_NOTE_UPDATE_FAILED)
     return RedirectResponse(f"/clients/{telegram_id}", status_code=303)
 
 
@@ -4628,8 +5043,8 @@ async def products(filter: str = "", days: int = 14):
             )
         html += f"</table></div><div class='mobile-products-list'>{''.join(mobile_sections)}</div></section>"
         return admin_layout("🛒 Товары", html)
-    except Exception as e:
-        log_admin_error("/products", "list_products", e)
+    except Exception:
+        log_admin_error("/products", "list_products", "product_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 @app.get("/products/new", response_class=HTMLResponse)
 async def new_product_form():
@@ -4706,8 +5121,10 @@ async def create_product(
         stock_value = normalize_product_stock_grams(
             pricing_mode_value, stock_grams
         )
-    except ValueError as exc:
-        return admin_error_page("Некорректная цена", escape(str(exc), quote=True))
+    except ValueError:
+        return admin_error_page(
+            "Некорректная цена", "Проверьте значения цены и единицы продажи."
+        )
     try:
         low_stock_threshold_value = max(int(low_stock_threshold_grams or 0), 0)
     except (TypeError, ValueError):
@@ -4774,8 +5191,10 @@ async def create_product(
             </section>
             """,
         )
-    except Exception as e:
-        log_admin_error("/products/new", "create_product", e)
+    except Exception:
+        log_admin_error(
+            "/products/new", "create_product", "product_create_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -5073,8 +5492,12 @@ async def product_recommendations_form(product_id: int):
         </section>
         """
         return admin_layout("🎯 Рекомендации продаж", html)
-    except Exception as e:
-        log_admin_error("/products/{product_id}/recommendations", "product_recommendations_form", e)
+    except Exception:
+        log_admin_error(
+            "/products/{product_id}/recommendations",
+            "product_recommendations_form",
+            "product_recommendations_load_failed",
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -5133,8 +5556,12 @@ async def update_product_recommendations(
 
         conn.commit()
         conn.close()
-    except Exception as e:
-        log_admin_error("/products/{product_id}/recommendations", "update_product_recommendations", e)
+    except Exception:
+        log_admin_error(
+            "/products/{product_id}/recommendations",
+            "update_product_recommendations",
+            "product_recommendations_update_failed",
+        )
     return RedirectResponse(f"/products/{product_id}/edit", status_code=303)
 
 
@@ -5183,9 +5610,9 @@ async def create_product_option(
         ) = normalize_product_option(
             label, weight, price, stock_quantity
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError):
         return admin_error_page(
-            "Некорректный вариант", escape(str(exc), quote=True)
+            "Некорректный вариант", "Проверьте название, цену, вес и остаток."
         )
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -5318,9 +5745,9 @@ async def update_product_option(
         ) = normalize_product_option(
             label, weight, price, stock_quantity
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError):
         return admin_error_page(
-            "Некорректный вариант", escape(str(exc), quote=True)
+            "Некорректный вариант", "Проверьте название, цену, вес и остаток."
         )
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -5466,8 +5893,10 @@ async def update_product(
             if pricing_mode_value == "per_kg"
             else None
         )
-    except ValueError as exc:
-        return admin_error_page("Некорректная цена", escape(str(exc), quote=True))
+    except ValueError:
+        return admin_error_page(
+            "Некорректная цена", "Проверьте значения цены и единицы продажи."
+        )
     try:
         low_stock_threshold_value = max(int(low_stock_threshold_grams or 0), 0)
     except (TypeError, ValueError):
@@ -5549,8 +5978,10 @@ async def update_product(
             </section>
             """,
         )
-    except Exception as e:
-        log_admin_error("/products/{product_id}/edit", "update_product", e)
+    except Exception:
+        log_admin_error(
+            "/products/{product_id}/edit", "update_product", "product_update_failed"
+        )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 

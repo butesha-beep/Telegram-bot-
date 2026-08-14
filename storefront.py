@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-from shop_settings import BRAND_NAME, CURRENCY_SYMBOL, SUPPORT_USERNAME
+from shop_settings import BRAND_NAME, CURRENCY_SYMBOL, get_support_username
 
 
 router = APIRouter()
@@ -340,25 +340,12 @@ def safe_image_url(value):
 
 
 def public_contact_url(value):
-    raw_value = str(value or "").strip()
-    if not raw_value:
+    raw_value = str(value or "")
+    if not raw_value or raw_value != raw_value.strip():
         return ""
 
-    username = raw_value.lstrip("@")
-    if re.fullmatch(r"[A-Za-z0-9_]{1,32}", username):
-        return f"https://t.me/{username}"
-
-    try:
-        parsed = urlparse(raw_value)
-        candidate = parsed.path.strip("/")
-        if (
-            parsed.scheme.lower() == "https"
-            and parsed.hostname in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}
-            and re.fullmatch(r"[A-Za-z0-9_]{1,32}", candidate)
-        ):
-            return f"https://t.me/{candidate}"
-    except (TypeError, ValueError):
-        return ""
+    if re.fullmatch(r"[A-Za-z0-9_]{5,32}", raw_value):
+        return f"https://t.me/{raw_value}"
     return ""
 
 
@@ -665,8 +652,10 @@ def _contact_element(contact_url):
     return '<span class="contact-button disabled" aria-disabled="true">Связаться для заказа</span>'
 
 
-def render_catalog_page(categories, brand_name=BRAND_NAME, currency_symbol=CURRENCY_SYMBOL, support_username=SUPPORT_USERNAME):
+def render_catalog_page(categories, brand_name=BRAND_NAME, currency_symbol=CURRENCY_SYMBOL, support_username=None):
     category_sections = []
+    if support_username is None:
+        support_username = get_support_username()
     contact_url = public_contact_url(support_username)
 
     for category in categories:

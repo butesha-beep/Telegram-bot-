@@ -5,12 +5,103 @@ import psycopg2
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
 
+REQUIRED_CATALOG_COLUMNS = {
+    "categories": {"id", "name", "sort_order", "is_active"},
+    "products": {
+        "id",
+        "category_id",
+        "name",
+        "price_per_kg",
+        "description",
+        "image_url",
+        "is_active",
+        "sort_order",
+        "stock_grams",
+        "is_out_of_stock",
+        "pricing_mode",
+        "fixed_price",
+        "sale_unit",
+        "unit_weight_grams",
+        "stock_quantity",
+    },
+    "product_options": {
+        "id",
+        "product_id",
+        "label",
+        "weight",
+        "price",
+        "sort_order",
+        "is_active",
+        "stock_quantity",
+        "is_out_of_stock",
+    },
+}
+
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL is not set")
 
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
+
+
+def get_readiness_connection():
+    return psycopg2.connect(DATABASE_URL, connect_timeout=3)
+
+
+def catalog_schema_is_compatible(connection_factory=None):
+    if connection_factory is None:
+        if not DATABASE_URL:
+            return False
+        connection_factory = get_readiness_connection
+
+    connection = None
+    cursor = None
+    try:
+        connection = connection_factory()
+        connection.set_session(readonly=True, autocommit=False)
+        cursor = connection.cursor()
+        cursor.execute("BEGIN TRANSACTION READ ONLY")
+        cursor.execute("SET LOCAL statement_timeout = '3000ms'")
+        cursor.execute("SET LOCAL lock_timeout = '1000ms'")
+        cursor.execute("SELECT current_setting('transaction_read_only')")
+        if cursor.fetchone()[0] != "on":
+            return False
+        cursor.execute(
+            """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = ANY(%s)
+            """,
+            (sorted(REQUIRED_CATALOG_COLUMNS),),
+        )
+        found_columns = {table: set() for table in REQUIRED_CATALOG_COLUMNS}
+        for table_name, column_name in cursor.fetchall():
+            if table_name in found_columns:
+                found_columns[table_name].add(column_name)
+        return all(
+            required_columns <= found_columns[table_name]
+            for table_name, required_columns in REQUIRED_CATALOG_COLUMNS.items()
+        )
+    except Exception:
+        return False
+    finally:
+        if connection is not None:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def init_db():

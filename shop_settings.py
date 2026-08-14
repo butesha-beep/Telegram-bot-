@@ -21,7 +21,6 @@ def get_config_value(key, default=None):
 
 
 BRAND_NAME = get_config_value("brand_name", "Shop")
-SUPPORT_USERNAME = get_config_value("support_username", "")
 CURRENCY_CODE = get_config_value("currency", "EUR")
 CURRENCY_SYMBOL = get_config_value("currency_symbol", "€")
 ADMIN_PANEL_TITLE = get_config_value("admin_panel_title", BRAND_NAME)
@@ -30,3 +29,7 @@ IBAN = get_config_value("iban", "")
 RECEIVER_NAME = get_config_value("receiver_name", "")
 PAYPAL = get_config_value("paypal", "")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+
+
+def get_support_username():
+    return os.getenv("SUPPORT_USERNAME", "")
