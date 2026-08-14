@@ -1,8 +1,10 @@
 import os
+import logging
 import json
 import html
 import csv
 import io
+import math
 from html import escape
 import hmac
 import hashlib
@@ -15,10 +17,26 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 import psycopg2
 
-from db_schema import DATABASE_URL, get_db_connection, init_db
-from shop_settings import ADMIN_PANEL_TITLE, CURRENCY_SYMBOL
+try:
+    from db_schema import DATABASE_URL, get_db_connection, init_db
+except ValueError:
+    if os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL"):
+        raise
+    DATABASE_URL = None
 
+    def get_db_connection():
+        raise RuntimeError("Database is unavailable")
+
+    def init_db():
+        raise RuntimeError("Database is unavailable")
+
+from shop_settings import ADMIN_PANEL_TITLE, CURRENCY_SYMBOL
+from storefront import router as storefront_router
+
+logger = logging.getLogger(__name__)
 app = FastAPI()
+app.include_router(storefront_router)
+DATABASE_READY = False
 ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_MAX_AGE = 86400
 MASTER_SESSION_COOKIE = "master_session"
@@ -27,7 +45,20 @@ MASTER_SESSION_MAX_AGE = 86400
 
 @app.on_event("startup")
 async def startup_db_init():
-    init_db()
+    global DATABASE_READY
+    DATABASE_READY = False
+    if not DATABASE_URL:
+        logger.error("Database is not configured")
+        return
+    try:
+        init_db()
+    except psycopg2.OperationalError:
+        logger.exception("PostgreSQL is unavailable during database initialization")
+        return
+    except Exception:
+        logger.exception("Unexpected database initialization failure")
+        raise
+    DATABASE_READY = True
 
 PAGE_STYLE = """
 <style>
@@ -589,13 +620,29 @@ def master_login_page(message=""):
 </html>"""
 
 
+def database_service_unavailable():
+    return HTMLResponse(
+        """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Service unavailable</title></head>
+<body><main><h1>Service temporarily unavailable</h1><p>Please try again later.</p></main></body>
+</html>""",
+        status_code=503,
+    )
+
+
 @app.middleware("http")
 async def require_admin_login(request: Request, call_next):
+    if request.url.path in {"/shop", "/shop/"}:
+        return await call_next(request)
+
     if request.url.path.startswith("/master"):
         public_master_paths = {"/master/login", "/master/health"}
         if request.url.path in public_master_paths:
             return await call_next(request)
         if is_master_authenticated(request):
+            if request.url.path != "/master/logout" and not DATABASE_READY:
+                return database_service_unavailable()
             return await call_next(request)
         return RedirectResponse("/master/login", status_code=303)
 
@@ -603,6 +650,8 @@ async def require_admin_login(request: Request, call_next):
     if request.url.path in public_paths:
         return await call_next(request)
     if is_admin_authenticated(request):
+        if request.url.path != "/logout" and not DATABASE_READY:
+            return database_service_unavailable()
         return await call_next(request)
     return RedirectResponse("/login", status_code=303)
 
@@ -733,6 +782,139 @@ def format_stock_grams(stock_grams):
     return f"{stock} г"
 
 
+PRICING_MODES = {"fixed", "per_kg", "options"}
+
+
+def parse_optional_nonnegative_number(value, field_name, integer=False):
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        parsed = int(raw_value) if integer else float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name}: некорректное число") from exc
+    if not integer and not math.isfinite(parsed):
+        raise ValueError(f"{field_name}: требуется конечное число")
+    if parsed < 0:
+        raise ValueError(f"{field_name}: значение не может быть отрицательным")
+    return parsed
+
+
+def parse_optional_positive_number(value, field_name, integer=False):
+    parsed = parse_optional_nonnegative_number(value, field_name, integer=integer)
+    if parsed is not None and parsed <= 0:
+        raise ValueError(f"{field_name}: значение должно быть больше нуля")
+    return parsed
+
+
+def normalize_product_pricing(
+    pricing_mode,
+    price_per_kg,
+    fixed_price,
+    sale_unit,
+    unit_weight_grams,
+    stock_quantity,
+):
+    mode = str(pricing_mode or "").strip()
+    if mode not in PRICING_MODES:
+        raise ValueError("Неизвестный режим цены")
+
+    if mode == "fixed":
+        fixed_price_value = parse_optional_positive_number(
+            fixed_price, "Фиксированная цена"
+        )
+        stock_quantity_value = parse_optional_nonnegative_number(
+            stock_quantity, "Остаток в единицах", integer=True
+        )
+        sale_unit_value = str(sale_unit or "").strip()
+        if fixed_price_value is None:
+            raise ValueError("Для fixed требуется фиксированная цена")
+        if not sale_unit_value:
+            raise ValueError("Для fixed требуется единица продажи")
+        return mode, 0.0, fixed_price_value, sale_unit_value, None, stock_quantity_value
+    if mode == "per_kg":
+        per_kg_price = parse_optional_positive_number(price_per_kg, "Цена за кг")
+        unit_weight_value = parse_optional_positive_number(
+            unit_weight_grams, "Ориентировочный вес", integer=True
+        )
+        if per_kg_price is None:
+            raise ValueError("Для per_kg требуется цена за кг")
+        return mode, per_kg_price, None, None, unit_weight_value, None
+    return mode, 0.0, None, None, None, None
+
+
+def normalize_product_stock_grams(pricing_mode, stock_grams, existing_stock_grams=None):
+    if pricing_mode != "per_kg":
+        return int(existing_stock_grams or 0) if existing_stock_grams is not None else 0
+    parsed = parse_optional_nonnegative_number(
+        stock_grams, "Остаток в граммах", integer=True
+    )
+    return int(parsed or 0)
+
+
+def normalize_product_option(label, weight, price, stock_quantity):
+    label_value = str(label or "").strip()
+    if not label_value:
+        raise ValueError("Название варианта не может быть пустым")
+    price_value = parse_optional_positive_number(price, "Цена варианта")
+    if price_value is None:
+        raise ValueError("Для варианта требуется цена")
+    weight_value = parse_optional_positive_number(
+        weight, "Вес варианта", integer=True
+    )
+    stock_quantity_value = parse_optional_nonnegative_number(
+        stock_quantity, "Остаток варианта", integer=True
+    )
+    return label_value, weight_value, price_value, stock_quantity_value
+
+
+def validate_weight_inventory_modes(rows):
+    unsupported_ids = sorted({
+        int(product_id)
+        for product_id, _quantity, pricing_mode in rows
+        if product_id and pricing_mode != "per_kg"
+    })
+    if unsupported_ids:
+        ids = ", ".join(str(product_id) for product_id in unsupported_ids)
+        raise ValueError(
+            "Списание по весу доступно только для режима per_kg. "
+            f"Проверьте товары: {ids}."
+        )
+
+
+def admin_options_warning(pricing_mode, options):
+    if pricing_mode != "options":
+        if options:
+            return (
+                f"Сохранено старых вариантов: {len(options)}. "
+                "Они игнорируются в текущем режиме и не показываются в storefront."
+            )
+        return "Варианты не используются в выбранном режиме цены."
+
+    active_options = [option for option in options if bool(option[5])]
+    available_options = [
+        option for option in active_options
+        if not bool(option[7])
+        and (option[6] is None or int(option[6] or 0) > 0)
+    ]
+    if not active_options:
+        return "Нет активных вариантов: товар недоступен в storefront."
+    if not available_options:
+        return "Нет доступных активных вариантов: товар недоступен в storefront."
+    return ""
+
+
+def format_admin_product_price(pricing_mode, price_per_kg, fixed_price, sale_unit):
+    if pricing_mode not in PRICING_MODES:
+        raise ValueError(f"Неизвестный режим цены: {pricing_mode!r}")
+    if pricing_mode == "fixed":
+        unit = escape(str(sale_unit or "за упаковку"), quote=True)
+        return f"{float(fixed_price or 0):.2f} {escape(CURRENCY_SYMBOL)} {unit}"
+    if pricing_mode == "options":
+        return "Варианты"
+    return f"{float(price_per_kg or 0):.2f} {escape(CURRENCY_SYMBOL)}/кг"
+
+
 def admin_event_type_label(event_type):
     labels = {
         "order_created": "Заказ создан",
@@ -839,6 +1021,8 @@ def sync_low_stock_alert_state(cursor, product_ids):
             WHERE id = %s
               AND low_stock_alert_sent = TRUE
               AND (
+                  pricing_mode != 'per_kg'
+                  OR
                   low_stock_threshold_grams <= 0
                   OR stock_grams > low_stock_threshold_grams
               )
@@ -850,6 +1034,7 @@ def sync_low_stock_alert_state(cursor, product_ids):
             SELECT name, stock_grams, low_stock_threshold_grams
             FROM products
             WHERE id = %s
+              AND pricing_mode = 'per_kg'
               AND is_active = TRUE
               AND is_out_of_stock = FALSE
               AND stock_grams > 0
@@ -1186,7 +1371,8 @@ def create_current_master_snapshot(cursor):
         SELECT COUNT(*)
         FROM products
         WHERE
-            is_active = TRUE
+            pricing_mode = 'per_kg'
+            AND is_active = TRUE
             AND is_out_of_stock = FALSE
             AND low_stock_threshold_grams > 0
             AND stock_grams > 0
@@ -1604,7 +1790,8 @@ async def root():
                 low_stock_threshold_grams
             FROM products
             WHERE
-                is_active = TRUE
+                pricing_mode = 'per_kg'
+                AND is_active = TRUE
                 AND is_out_of_stock = FALSE
                 AND low_stock_threshold_grams > 0
                 AND stock_grams > 0
@@ -1619,7 +1806,8 @@ async def root():
             SELECT COUNT(*)
             FROM products
             WHERE
-                is_active = TRUE
+                pricing_mode = 'per_kg'
+                AND is_active = TRUE
                 AND is_out_of_stock = FALSE
                 AND low_stock_threshold_grams > 0
                 AND stock_grams > 0
@@ -1684,7 +1872,8 @@ async def root():
               AND (
                   p.is_out_of_stock = TRUE
                   OR (
-                      p.stock_grams IS NOT NULL
+                      p.pricing_mode = 'per_kg'
+                      AND p.stock_grams IS NOT NULL
                       AND p.low_stock_threshold_grams IS NOT NULL
                       AND p.stock_grams <= p.low_stock_threshold_grams
                   )
@@ -2951,14 +3140,23 @@ async def update_order_status(order_id: str, status: str):
             affected_product_ids = []
             cursor.execute(
                 """
-                SELECT product_id, weight
-                FROM order_items
-                WHERE order_id = %s
+                SELECT oi.product_id, oi.weight, p.pricing_mode
+                FROM order_items oi
+                LEFT JOIN products p ON p.id = oi.product_id
+                WHERE oi.order_id = %s
                 """,
                 (order_id,)
             )
             order_items = cursor.fetchall()
-            for product_id, weight in order_items:
+            try:
+                validate_weight_inventory_modes(order_items)
+            except ValueError as exc:
+                conn.rollback()
+                conn.close()
+                return admin_error_page(
+                    "Списание не выполнено", escape(str(exc), quote=True)
+                )
+            for product_id, weight, _pricing_mode in order_items:
                 if not product_id or not weight:
                     continue
                 cursor.execute(
@@ -2972,6 +3170,7 @@ async def update_order_status(order_id: str, status: str):
                         UPDATE products
                         SET stock_grams = GREATEST(stock_grams - %s, 0)
                         WHERE id = %s
+                          AND pricing_mode = 'per_kg'
                         RETURNING stock_grams AS stock_after
                     )
                     SELECT before_update.stock_before, updated.stock_after
@@ -2994,13 +3193,17 @@ async def update_order_status(order_id: str, status: str):
                     order_id,
                     "Склад списан по заказу."
                 )
-            cursor.execute(
-                """
-                UPDATE products
-                SET is_out_of_stock = TRUE
-                WHERE stock_grams <= 0
-                """
-            )
+            if affected_product_ids:
+                cursor.execute(
+                    """
+                    UPDATE products
+                    SET is_out_of_stock = TRUE
+                    WHERE pricing_mode = 'per_kg'
+                      AND id = ANY(%s)
+                      AND stock_grams <= 0
+                    """,
+                    (affected_product_ids,),
+                )
             sync_low_stock_alert_state(cursor, affected_product_ids)
             cursor.execute(
                 """
@@ -3022,15 +3225,25 @@ async def update_order_status(order_id: str, status: str):
             affected_product_ids = []
             cursor.execute(
                 """
-                SELECT product_id, COALESCE(SUM(weight), 0) AS restore_grams
-                FROM order_items
-                WHERE order_id = %s
-                GROUP BY product_id
+                SELECT oi.product_id, COALESCE(SUM(oi.weight), 0) AS restore_grams,
+                       p.pricing_mode
+                FROM order_items oi
+                LEFT JOIN products p ON p.id = oi.product_id
+                WHERE oi.order_id = %s
+                GROUP BY oi.product_id, p.pricing_mode
                 """,
                 (order_id,)
             )
             restore_items = cursor.fetchall()
-            for product_id, restore_grams in restore_items:
+            try:
+                validate_weight_inventory_modes(restore_items)
+            except ValueError as exc:
+                conn.rollback()
+                conn.close()
+                return admin_error_page(
+                    "Возврат остатка не выполнен", escape(str(exc), quote=True)
+                )
+            for product_id, restore_grams, _pricing_mode in restore_items:
                 if not product_id or not restore_grams or int(restore_grams or 0) <= 0:
                     continue
                 cursor.execute(
@@ -3044,6 +3257,7 @@ async def update_order_status(order_id: str, status: str):
                         UPDATE products
                         SET stock_grams = stock_grams + %s
                         WHERE id = %s
+                          AND pricing_mode = 'per_kg'
                         RETURNING stock_grams AS stock_after
                     )
                     SELECT before_update.stock_before, updated.stock_after
@@ -3066,13 +3280,17 @@ async def update_order_status(order_id: str, status: str):
                     order_id,
                     "Остаток восстановлен после отмены заказа."
                 )
-            cursor.execute(
-                """
-                UPDATE products
-                SET is_out_of_stock = FALSE
-                WHERE stock_grams > 0
-                """
-            )
+            if affected_product_ids:
+                cursor.execute(
+                    """
+                    UPDATE products
+                    SET is_out_of_stock = FALSE
+                    WHERE pricing_mode = 'per_kg'
+                      AND id = ANY(%s)
+                      AND stock_grams > 0
+                    """,
+                    (affected_product_ids,),
+                )
             sync_low_stock_alert_state(cursor, affected_product_ids)
             cursor.execute(
                 """
@@ -3218,7 +3436,8 @@ async def order_detail(order_id: str):
         try:
             cursor.execute(
                 """
-                SELECT oi.id, oi.product_name, oi.weight, oi.price, po.label, p.price_per_kg
+                SELECT oi.id, oi.product_name, oi.weight, oi.price, po.label,
+                       p.price_per_kg, p.pricing_mode
                 FROM order_items oi
                 LEFT JOIN product_options po ON po.id = oi.option_id
                 LEFT JOIN products p ON p.id = oi.product_id
@@ -3359,11 +3578,14 @@ async def order_detail(order_id: str):
         if items:
             html += "<section class='admin-card dash-section'><h2>Товары</h2><div class='dash-table-wrap'><table>"
             html += "<tr><th>Товар</th><th>Вариант / вес</th><th>Итого</th></tr>"
-            for item_id, product_name, weight, price, option_label, price_per_kg in items:
+            for (
+                item_id, product_name, weight, price, option_label, price_per_kg,
+                pricing_mode,
+            ) in items:
                 item_label = option_label if option_label else f"{weight} г"
                 product_name_text = escape(str(product_name or "-"), quote=True)
                 item_label_text = escape(str(item_label or "-"), quote=True)
-                if weight is None:
+                if weight is None and pricing_mode == "per_kg":
                     price_per_kg_value = float(price_per_kg) if price_per_kg is not None else 0
                     preview_id = f"price_preview_{item_id}"
                     photo_preview_id = f"photo_preview_{item_id}"
@@ -3384,6 +3606,11 @@ async def order_detail(order_id: str):
                         '<button class="button secondary" type="submit">Подтвердить вес</button>'
                         '</form>'
                         '</td></tr>'
+                    )
+                elif weight is None:
+                    html += (
+                        f"<tr><td>{product_name_text}</td><td>{item_label_text}</td>"
+                        "<td>Взвешивание доступно только для товаров per_kg.</td></tr>"
                     )
                 else:
                     html += f"<tr><td>{product_name_text}</td><td>{item_label_text}</td><td>{price:.2f} €</td></tr>"
@@ -3433,6 +3660,10 @@ async def weigh_order_item(
     final_weight_grams: int = Form(...),
     photo: UploadFile = File(None),
 ):
+    if final_weight_grams <= 0:
+        return admin_error_page(
+            "Некорректный вес", "Финальный вес должен быть больше нуля."
+        )
     has_pending_weighing = True
     telegram_id = None
     order_total = None
@@ -3449,7 +3680,7 @@ async def weigh_order_item(
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT p.price_per_kg
+            SELECT p.price_per_kg, p.pricing_mode, p.id
             FROM order_items oi
             JOIN products p ON p.id = oi.product_id
             WHERE oi.id = %s
@@ -3463,7 +3694,17 @@ async def weigh_order_item(
             conn.close()
             return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
-        price_per_kg = product_row[0]
+        price_per_kg, pricing_mode, product_id = product_row
+        try:
+            validate_weight_inventory_modes(
+                [(product_id, final_weight_grams, pricing_mode)]
+            )
+        except ValueError as exc:
+            conn.rollback()
+            conn.close()
+            return admin_error_page(
+                "Взвешивание не выполнено", escape(str(exc), quote=True)
+            )
         final_price = round(final_weight_grams / 1000 * price_per_kg, 2)
 
         cursor.execute(
@@ -4008,7 +4249,8 @@ async def products(filter: str = "", days: int = 14):
                   AND (
                     p.is_out_of_stock = TRUE
                     OR (
-                        p.stock_grams IS NOT NULL
+                        p.pricing_mode = 'per_kg'
+                        AND p.stock_grams IS NOT NULL
                         AND p.low_stock_threshold_grams IS NOT NULL
                         AND p.stock_grams <= p.low_stock_threshold_grams
                     )
@@ -4058,7 +4300,24 @@ async def products(filter: str = "", days: int = 14):
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute(f"""
-            SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name, p.stock_grams, p.is_out_of_stock, p.low_stock_threshold_grams, p.is_promotion
+            SELECT p.id, p.name, p.price_per_kg, p.image_url, p.is_active, c.name,
+                   p.stock_grams, p.is_out_of_stock, p.low_stock_threshold_grams,
+                   p.is_promotion, p.pricing_mode, p.fixed_price, p.sale_unit,
+                   p.stock_quantity,
+                   (
+                       SELECT COUNT(*)
+                       FROM product_options po
+                       WHERE po.product_id = p.id
+                         AND po.is_active = TRUE
+                   ) AS active_option_count,
+                   (
+                       SELECT COUNT(*)
+                       FROM product_options po
+                       WHERE po.product_id = p.id
+                         AND po.is_active = TRUE
+                         AND po.is_out_of_stock = FALSE
+                         AND (po.stock_quantity IS NULL OR po.stock_quantity > 0)
+                   ) AS available_option_count
             FROM products p
             LEFT JOIN categories c ON c.id = p.category_id
             {where_sql}
@@ -4111,7 +4370,12 @@ async def products(filter: str = "", days: int = 14):
         for category_label in category_order:
             html += f"<tr class='category-row' id='{category_anchors[category_label]}'><td colspan='9'>📁 {category_label}</td></tr>"
             for row in grouped_products[category_label]:
-                pid, name, price, image_url, is_active, category_name, stock_grams, is_out_of_stock, low_stock_threshold_grams, is_promotion = row
+                (
+                    pid, name, price, image_url, is_active, category_name,
+                    stock_grams, is_out_of_stock, low_stock_threshold_grams,
+                    is_promotion, pricing_mode, fixed_price, sale_unit, stock_quantity,
+                    active_option_count, available_option_count,
+                ) = row
                 if image_url:
                     escaped_image_url = escape(str(image_url), quote=True)
                     img_html = f"<a href=\"{escaped_image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"product-thumb\" src=\"{escaped_image_url}\" referrerpolicy=\"no-referrer\"/></a>"
@@ -4125,10 +4389,25 @@ async def products(filter: str = "", days: int = 14):
                 else:
                     actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Включить</button></form>"
                 actions_html = f"<div class=\"action-group\">{actions_html}</div>"
-                availability_text = "Нет в наличии" if is_out_of_stock or int(stock_grams or 0) <= 0 else "В наличии"
+                if pricing_mode == "fixed":
+                    inventory_empty = stock_quantity is not None and int(stock_quantity or 0) <= 0
+                    stock_text = f"{max(int(stock_quantity or 0), 0)} шт." if stock_quantity is not None else "—"
+                elif pricing_mode == "options":
+                    inventory_empty = int(available_option_count or 0) <= 0
+                    stock_text = (
+                        f"Доступно вариантов: {int(available_option_count or 0)}"
+                        f"/{int(active_option_count or 0)}"
+                    )
+                else:
+                    inventory_empty = int(stock_grams or 0) <= 0
+                    stock_text = format_stock_grams(stock_grams)
+                availability_text = "Нет в наличии" if is_out_of_stock or inventory_empty else "В наличии"
                 availability_class = "inactive" if availability_text == "Нет в наличии" else "active"
                 name_text = f"🔥 {name}" if is_promotion else name
-                html += f"<tr><td>{pid}</td><td>{name_text}</td><td>{price:.2f}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_label}</td><td>{format_stock_grams(stock_grams)}</td><td><span class='status {availability_class}'>{availability_text}</span></td><td>{actions_html}</td></tr>"
+                price_text = format_admin_product_price(
+                    pricing_mode, price, fixed_price, sale_unit
+                )
+                html += f"<tr><td>{pid}</td><td>{name_text}</td><td>{price_text}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_label}</td><td>{stock_text}</td><td><span class='status {availability_class}'>{availability_text}</span></td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception as e:
@@ -4143,7 +4422,18 @@ async def new_product_form():
       <form class="admin-form" method="post" action="/products/new">
         <label>Категория <input name="category_id"/></label>
         <label>Название товара <input name="name"/></label>
-        <label>Цена за кг (€) <input name="price_per_kg"/></label>
+        <label>Режим цены
+          <select name="pricing_mode">
+            <option value="fixed">Фиксированная цена</option>
+            <option value="per_kg" selected>Цена за килограмм</option>
+            <option value="options">Готовые варианты</option>
+          </select>
+        </label>
+        <label>Цена за кг (€) <input name="price_per_kg" type="number" min="0.01" step="0.01"/></label>
+        <label>Фиксированная цена (€) <input name="fixed_price" type="number" min="0.01" step="0.01"/></label>
+        <label>Единица продажи <input name="sale_unit" placeholder="за упаковку / за штуку"/></label>
+        <label>Ориентировочный вес, г <input name="unit_weight_grams" type="number" min="1"/></label>
+        <label>Остаток в единицах <input name="stock_quantity" type="number" min="0"/></label>
         <label>Описание <input name="description"/></label>
         <label>Ссылка на фото <input name="image_url"/></label>
         <label>Остаток, г <input name="stock_grams" type="number" min="0" value="0"/></label>
@@ -4164,17 +4454,42 @@ async def new_product_form():
 async def create_product(
     category_id: int = Form(...),
     name: str = Form(...),
-    price_per_kg: float = Form(...),
+    pricing_mode: str = Form("per_kg"),
+    price_per_kg: str = Form(""),
+    fixed_price: str = Form(""),
+    sale_unit: str = Form(""),
+    unit_weight_grams: str = Form(""),
+    stock_quantity: str = Form(""),
     description: str = Form(''),
     image_url: str = Form(''),
-    stock_grams: int = Form(0),
+    stock_grams: str = Form("0"),
     low_stock_threshold_grams: str = Form("500"),
     sort_order: int = Form(0),
     is_active: str = Form(None),
     is_out_of_stock: bool = Form(False),
 ):
     active = True if is_active else False
-    stock_value = max(stock_grams, 0)
+    try:
+        (
+            pricing_mode_value,
+            price_per_kg_value,
+            fixed_price_value,
+            sale_unit_value,
+            unit_weight_value,
+            stock_quantity_value,
+        ) = normalize_product_pricing(
+            pricing_mode,
+            price_per_kg,
+            fixed_price,
+            sale_unit,
+            unit_weight_grams,
+            stock_quantity,
+        )
+        stock_value = normalize_product_stock_grams(
+            pricing_mode_value, stock_grams
+        )
+    except ValueError as exc:
+        return admin_error_page("Некорректная цена", escape(str(exc), quote=True))
     try:
         low_stock_threshold_value = max(int(low_stock_threshold_grams or 0), 0)
     except (TypeError, ValueError):
@@ -4197,22 +4512,32 @@ async def create_product(
     low_stock_threshold_grams,
     is_out_of_stock,
     is_active,
-    sort_order
+    sort_order,
+    pricing_mode,
+    fixed_price,
+    sale_unit,
+    unit_weight_grams,
+    stock_quantity
 )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
     new_id,
     category_id,
     name,
-    price_per_kg,
+    price_per_kg_value,
     description,
     image_url,
     stock_value,
     low_stock_threshold_value,
     is_out_of_stock,
     active,
-    sort_order
+    sort_order,
+    pricing_mode_value,
+    fixed_price_value,
+    sale_unit_value,
+    unit_weight_value,
+    stock_quantity_value
 ),
         )
         sync_low_stock_alert_state(cursor, [new_id])
@@ -4243,7 +4568,10 @@ async def edit_product_form(product_id: int):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams, is_promotion, promotion_title, promotion_sort_order
+            SELECT category_id, name, price_per_kg, description, image_url, sort_order,
+                   is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams,
+                   is_promotion, promotion_title, promotion_sort_order, pricing_mode,
+                   fixed_price, sale_unit, unit_weight_grams, stock_quantity
             FROM products
             WHERE id = %s
             """,
@@ -4266,7 +4594,8 @@ async def edit_product_form(product_id: int):
             )
         cursor.execute(
             """
-            SELECT id, label, weight, price, sort_order, is_active
+            SELECT id, label, weight, price, sort_order, is_active,
+                   stock_quantity, is_out_of_stock
             FROM product_options
             WHERE product_id = %s
             ORDER BY sort_order, id
@@ -4294,12 +4623,22 @@ async def edit_product_form(product_id: int):
         inventory_movements = cursor.fetchall()
         conn.close()
 
-        category_id, name, price_per_kg, description, image_url, sort_order, is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams, is_promotion, promotion_title, promotion_sort_order = row
+        (
+            category_id, name, price_per_kg, description, image_url, sort_order,
+            is_active, stock_grams, is_out_of_stock, low_stock_threshold_grams,
+            is_promotion, promotion_title, promotion_sort_order, pricing_mode,
+            fixed_price, sale_unit, unit_weight_grams, stock_quantity,
+        ) = row
+        if pricing_mode not in PRICING_MODES:
+            raise ValueError(f"Неизвестный режим цены: {pricing_mode!r}")
         checked = "checked" if is_active else ""
         out_of_stock_checked = "checked" if is_out_of_stock else ""
         image_url_value = escape(str(image_url or ""), quote=True)
         promotion_checked = "checked" if is_promotion else ""
         promotion_title_value = escape(str(promotion_title or ""), quote=True)
+        fixed_selected = "selected" if pricing_mode == "fixed" else ""
+        per_kg_selected = "selected" if pricing_mode == "per_kg" else ""
+        options_selected = "selected" if pricing_mode == "options" else ""
         html = f"""
         <section class="admin-card">
           <h1>✏️ Редактировать товар</h1>
@@ -4307,7 +4646,18 @@ async def edit_product_form(product_id: int):
           <form class="admin-form" method="post" action="/products/{product_id}/edit">
             <label>Категория <input name="category_id" value="{category_id}"/></label>
             <label>Название товара <input name="name" value="{name}"/></label>
-            <label>Цена за кг (€) <input name="price_per_kg" value="{price_per_kg}"/></label>
+            <label>Режим цены
+              <select name="pricing_mode">
+                <option value="fixed" {fixed_selected}>Фиксированная цена</option>
+                <option value="per_kg" {per_kg_selected}>Цена за килограмм</option>
+                <option value="options" {options_selected}>Готовые варианты</option>
+              </select>
+            </label>
+            <label>Цена за кг (€) <input name="price_per_kg" type="number" min="0.01" step="0.01" value="{price_per_kg}"/></label>
+            <label>Фиксированная цена (€) <input name="fixed_price" type="number" min="0.01" step="0.01" value="{fixed_price if fixed_price is not None else ''}"/></label>
+            <label>Единица продажи <input name="sale_unit" value="{escape(str(sale_unit or ''), quote=True)}"/></label>
+            <label>Ориентировочный вес, г <input name="unit_weight_grams" type="number" min="1" value="{unit_weight_grams if unit_weight_grams is not None else ''}"/></label>
+            <label>Остаток в единицах <input name="stock_quantity" type="number" min="0" value="{stock_quantity if stock_quantity is not None else ''}"/></label>
             <label>Описание <input name="description" value="{description or ''}"/></label>
             <label>Ссылка на фото <input name="image_url" value="{image_url_value}"/></label>
             <label>Остаток, г <input name="stock_grams" type="number" min="0" value="{max(int(stock_grams or 0), 0)}"/></label>
@@ -4376,26 +4726,44 @@ async def edit_product_form(product_id: int):
         <section class="admin-card dash-section">
           <h2>⚖️ Варианты продажи</h2>
         """
-        html += f"<p><a class='button button-link' href='/products/{product_id}/options/new'>➕ Добавить вариант</a></p>"
-        if options:
+        options_warning = admin_options_warning(pricing_mode, options)
+        if options_warning:
+            html += (
+                "<div class='attention-banner'>"
+                f"{escape(options_warning, quote=True)}"
+                "</div>"
+            )
+        if pricing_mode == "options":
+            html += f"<p><a class='button button-link' href='/products/{product_id}/options/new'>➕ Добавить вариант</a></p>"
+        if pricing_mode == "options" and options:
             html += """
           <div class="dash-table-wrap">
             <table>
-              <tr><th>ID</th><th>Вариант</th><th>Вес</th><th>Цена</th><th>Сортировка</th><th>Статус</th><th>Действия</th></tr>
+              <tr><th>ID</th><th>Вариант</th><th>Вес</th><th>Цена</th><th>Остаток</th><th>Наличие</th><th>Сортировка</th><th>Статус</th><th>Действия</th></tr>
             """
-            for option_id, label, weight, price, option_sort_order, option_is_active in options:
+            for (
+                option_id, label, weight, price, option_sort_order, option_is_active,
+                option_stock_quantity, option_is_out_of_stock,
+            ) in options:
                 option_status = "Активен" if option_is_active else "Скрыт"
                 option_status_class = "active" if option_is_active else "inactive"
                 weight_text = weight if weight is not None else "-"
+                option_stock_text = option_stock_quantity if option_stock_quantity is not None else "—"
+                option_availability = (
+                    "Нет в наличии"
+                    if option_is_out_of_stock
+                    or (option_stock_quantity is not None and int(option_stock_quantity or 0) <= 0)
+                    else "В наличии"
+                )
                 toggle_text = "👁 Скрыть" if option_is_active else "♻️ Включить"
                 actions_html = f"<a class='button' href='/options/{option_id}/edit'>✏️ Редактировать</a>"
                 actions_html += f" <form method='post' action='/options/{option_id}/toggle' style='display:inline; margin:0; padding:0;'><button class='button secondary' type='submit'>{toggle_text}</button></form>"
-                html += f"<tr><td>{option_id}</td><td>{label}</td><td>{weight_text}</td><td>{price:.2f}</td><td>{option_sort_order}</td><td><span class='status {option_status_class}'>{option_status}</span></td><td><div class='action-group'>{actions_html}</div></td></tr>"
+                html += f"<tr><td>{option_id}</td><td>{label}</td><td>{weight_text}</td><td>{price:.2f}</td><td>{option_stock_text}</td><td>{option_availability}</td><td>{option_sort_order}</td><td><span class='status {option_status_class}'>{option_status}</span></td><td><div class='action-group'>{actions_html}</div></td></tr>"
             html += """
             </table>
           </div>
             """
-        else:
+        elif pricing_mode == "options":
             html += "<p>Варианты ещё не добавлены.</p>"
         html += """
         </section>
@@ -4559,8 +4927,10 @@ async def new_product_option_form(product_id: int):
       <p><a href="/products/{product_id}/edit">← Назад к товару</a></p>
       <form class="admin-form" method="post" action="/products/{product_id}/options/new">
         <label>Название варианта <input name="label"/></label>
-        <label>Вес в граммах <input name="weight"/></label>
-        <label>Цена <input name="price"/></label>
+        <label>Вес в граммах <input name="weight" type="number" min="1"/></label>
+        <label>Цена <input name="price" type="number" min="0.01" step="0.01"/></label>
+        <label>Остаток в упаковках <input name="stock_quantity" type="number" min="0"/></label>
+        <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true"/></label>
         <label>Сортировка <input name="sort_order"/></label>
         <label>Активен <input type="checkbox" name="is_active" value="1"/></label>
         <div class="form-actions">
@@ -4578,16 +4948,37 @@ async def create_product_option(
     label: str = Form(...),
     weight: str = Form(None),
     price: str = Form(...),
+    stock_quantity: str = Form(""),
+    is_out_of_stock: bool = Form(False),
     sort_order: str = Form("0"),
     is_active: str = Form(None),
 ):
     active = True if is_active else False
-    weight_value = int(weight) if weight else None
-    sort_value = int(sort_order) if sort_order else 0
-    price_value = float(price)
+    try:
+        sort_value = int(sort_order) if sort_order else 0
+        (
+            label_value,
+            weight_value,
+            price_value,
+            stock_quantity_value,
+        ) = normalize_product_option(
+            label, weight, price, stock_quantity
+        )
+    except (TypeError, ValueError) as exc:
+        return admin_error_page(
+            "Некорректный вариант", escape(str(exc), quote=True)
+        )
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
+        cursor.execute("SELECT pricing_mode FROM products WHERE id = %s", (product_id,))
+        product_row = cursor.fetchone()
+        if not product_row or product_row[0] != "options":
+            conn.close()
+            return admin_error_page(
+                "Вариант не создан",
+                "Варианты можно добавлять только товарам в режиме options.",
+            )
         cursor.execute(
             """
             INSERT INTO product_options (
@@ -4596,11 +4987,16 @@ async def create_product_option(
                 weight,
                 price,
                 sort_order,
-                is_active
+                is_active,
+                stock_quantity,
+                is_out_of_stock
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (product_id, label, weight_value, price_value, sort_value, active),
+            (
+                product_id, label_value, weight_value, price_value, sort_value, active,
+                stock_quantity_value, is_out_of_stock,
+            ),
         )
         conn.commit()
         conn.close()
@@ -4628,7 +5024,8 @@ async def edit_product_option_form(option_id: int):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT product_id, label, weight, price, sort_order, is_active
+            SELECT product_id, label, weight, price, sort_order, is_active,
+                   stock_quantity, is_out_of_stock
             FROM product_options
             WHERE id = %s
             """,
@@ -4650,8 +5047,12 @@ async def edit_product_option_form(option_id: int):
                 """,
             )
 
-        product_id, label, weight, price, sort_order, is_active = row
+        (
+            product_id, label, weight, price, sort_order, is_active,
+            stock_quantity, is_out_of_stock,
+        ) = row
         checked = "checked" if is_active else ""
+        out_of_stock_checked = "checked" if is_out_of_stock else ""
         weight_value = weight if weight is not None else ""
         html = f"""
         <section class="admin-card">
@@ -4659,8 +5060,10 @@ async def edit_product_option_form(option_id: int):
           <p><a href="/products/{product_id}/edit">← Назад к товару</a></p>
           <form class="admin-form" method="post" action="/options/{option_id}/edit">
             <label>Название варианта <input name="label" value="{label}"/></label>
-            <label>Вес в граммах <input name="weight" value="{weight_value}"/></label>
-            <label>Цена <input name="price" value="{price}"/></label>
+            <label>Вес в граммах <input name="weight" type="number" min="1" value="{weight_value}"/></label>
+            <label>Цена <input name="price" type="number" min="0.01" step="0.01" value="{price}"/></label>
+            <label>Остаток в упаковках <input name="stock_quantity" type="number" min="0" value="{stock_quantity if stock_quantity is not None else ''}"/></label>
+            <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true" {out_of_stock_checked}/></label>
             <label>Сортировка <input name="sort_order" value="{sort_order}"/></label>
             <label>Активен <input type="checkbox" name="is_active" value="1" {checked}/></label>
             <div class="form-actions">
@@ -4680,13 +5083,26 @@ async def update_product_option(
     label: str = Form(...),
     weight: str = Form(None),
     price: str = Form(...),
+    stock_quantity: str = Form(""),
+    is_out_of_stock: bool = Form(False),
     sort_order: str = Form("0"),
     is_active: str = Form(None),
 ):
     active = True if is_active else False
-    weight_value = int(weight) if weight else None
-    sort_value = int(sort_order) if sort_order else 0
-    price_value = float(price)
+    try:
+        sort_value = int(sort_order) if sort_order else 0
+        (
+            label_value,
+            weight_value,
+            price_value,
+            stock_quantity_value,
+        ) = normalize_product_option(
+            label, weight, price, stock_quantity
+        )
+    except (TypeError, ValueError) as exc:
+        return admin_error_page(
+            "Некорректный вариант", escape(str(exc), quote=True)
+        )
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -4713,11 +5129,16 @@ async def update_product_option(
             SET label = %s,
                 weight = %s,
                 price = %s,
+                stock_quantity = %s,
+                is_out_of_stock = %s,
                 sort_order = %s,
                 is_active = %s
             WHERE id = %s
             """,
-            (label, weight_value, price_value, sort_value, active, option_id),
+            (
+                label_value, weight_value, price_value, stock_quantity_value,
+                is_out_of_stock, sort_value, active, option_id,
+            ),
         )
         conn.commit()
         conn.close()
@@ -4787,10 +5208,15 @@ async def update_product(
     product_id: int,
     category_id: int = Form(...),
     name: str = Form(...),
-    price_per_kg: float = Form(...),
+    pricing_mode: str = Form("per_kg"),
+    price_per_kg: str = Form(""),
+    fixed_price: str = Form(""),
+    sale_unit: str = Form(""),
+    unit_weight_grams: str = Form(""),
+    stock_quantity: str = Form(""),
     description: str = Form(''),
     image_url: str = Form(''),
-    stock_grams: int = Form(0),
+    stock_grams: str = Form("0"),
     low_stock_threshold_grams: str = Form("0"),
     sort_order: int = Form(0),
     is_active: str = Form(None),
@@ -4800,7 +5226,29 @@ async def update_product(
     promotion_sort_order: int = Form(0),
 ):
     active = True if is_active else False
-    stock_value = max(stock_grams, 0)
+    try:
+        (
+            pricing_mode_value,
+            price_per_kg_value,
+            fixed_price_value,
+            sale_unit_value,
+            unit_weight_value,
+            stock_quantity_value,
+        ) = normalize_product_pricing(
+            pricing_mode,
+            price_per_kg,
+            fixed_price,
+            sale_unit,
+            unit_weight_grams,
+            stock_quantity,
+        )
+        submitted_stock_value = (
+            normalize_product_stock_grams(pricing_mode_value, stock_grams)
+            if pricing_mode_value == "per_kg"
+            else None
+        )
+    except ValueError as exc:
+        return admin_error_page("Некорректная цена", escape(str(exc), quote=True))
     try:
         low_stock_threshold_value = max(int(low_stock_threshold_grams or 0), 0)
     except (TypeError, ValueError):
@@ -4808,10 +5256,20 @@ async def update_product(
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        cursor.execute("SELECT image_url, stock_grams FROM products WHERE id = %s", (product_id,))
+        cursor.execute(
+            "SELECT image_url, stock_grams FROM products WHERE id = %s",
+            (product_id,),
+        )
         row = cursor.fetchone()
         existing_image_url = row[0] if row else ""
         old_stock = int(row[1] or 0) if row else 0
+        stock_value = (
+            submitted_stock_value
+            if submitted_stock_value is not None
+            else normalize_product_stock_grams(
+                pricing_mode_value, stock_grams, existing_stock_grams=old_stock
+            )
+        )
         submitted_image_url = image_url.strip()
         saved_image_url = submitted_image_url if submitted_image_url else existing_image_url
         cursor.execute(
@@ -4820,6 +5278,11 @@ async def update_product(
             SET category_id = %s,
                 name = %s,
                 price_per_kg = %s,
+                pricing_mode = %s,
+                fixed_price = %s,
+                sale_unit = %s,
+                unit_weight_grams = %s,
+                stock_quantity = %s,
                 description = %s,
                 image_url = %s,
                 stock_grams = %s,
@@ -4832,7 +5295,13 @@ async def update_product(
                 promotion_sort_order = %s
             WHERE id = %s
             """,
-            (category_id, name, price_per_kg, description, saved_image_url, stock_value, low_stock_threshold_value, is_out_of_stock, sort_order, active, is_promotion, promotion_title or None, promotion_sort_order, product_id),
+            (
+                category_id, name, price_per_kg_value, pricing_mode_value,
+                fixed_price_value, sale_unit_value, unit_weight_value,
+                stock_quantity_value, description, saved_image_url, stock_value,
+                low_stock_threshold_value, is_out_of_stock, sort_order, active,
+                is_promotion, promotion_title or None, promotion_sort_order, product_id,
+            ),
         )
         if old_stock != stock_value:
             log_inventory_movement(

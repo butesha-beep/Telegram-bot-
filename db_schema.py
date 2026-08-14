@@ -191,6 +191,15 @@ def init_db():
     cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_promotion BOOLEAN NOT NULL DEFAULT FALSE")
     cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS promotion_title TEXT")
     cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS promotion_sort_order INTEGER NOT NULL DEFAULT 0")
+    cursor.execute(
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS "
+        "pricing_mode TEXT NOT NULL DEFAULT 'per_kg' "
+        "CHECK (pricing_mode IN ('fixed', 'per_kg', 'options'))"
+    )
+    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS fixed_price REAL")
+    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS sale_unit TEXT")
+    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS unit_weight_grams INTEGER")
+    cursor.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_quantity INTEGER")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS product_options (
             id SERIAL PRIMARY KEY,
@@ -202,6 +211,11 @@ def init_db():
             is_active BOOLEAN DEFAULT TRUE
         )
     """)
+    cursor.execute("ALTER TABLE product_options ADD COLUMN IF NOT EXISTS stock_quantity INTEGER")
+    cursor.execute(
+        "ALTER TABLE product_options ADD COLUMN IF NOT EXISTS "
+        "is_out_of_stock BOOLEAN DEFAULT FALSE"
+    )
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS inventory_movements (
             id SERIAL PRIMARY KEY,
@@ -266,37 +280,6 @@ def init_db():
     cursor.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_product_recommendations_unique
         ON product_recommendations (product_id, recommended_product_id, recommendation_type)
-    """)
-    cursor.execute("""
-        INSERT INTO product_options (
-            product_id,
-            label,
-            weight,
-            price,
-            sort_order,
-            is_active
-        )
-        SELECT
-            p.id,
-            option_data.label,
-            option_data.weight,
-            p.price_per_kg * option_data.weight / 1000,
-            option_data.weight,
-            TRUE
-        FROM products p
-        CROSS JOIN (
-            VALUES
-                ('50 г', 50),
-                ('100 г', 100),
-                ('200 г', 200),
-                ('500 г', 500)
-        ) AS option_data(label, weight)
-        WHERE p.is_active = TRUE
-          AND NOT EXISTS (
-              SELECT 1
-              FROM product_options po
-              WHERE po.product_id = p.id
-          )
     """)
     try:
         cursor.execute("ALTER TABLE orders ALTER COLUMN order_id TYPE BIGINT")

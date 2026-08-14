@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
 .env
 .venv/
 .vscode/
+staging/production_catalog_*.json
+staging/preview_catalog_backup_*.json
