@@ -31,7 +31,7 @@ except ValueError:
         raise RuntimeError("Database is unavailable")
 
 from shop_settings import ADMIN_PANEL_TITLE, CURRENCY_SYMBOL
-from storefront import router as storefront_router
+from storefront import router as storefront_router, safe_image_url
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
@@ -93,6 +93,7 @@ def admin_css():
     --accent-hover: #ea580c;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     min-height: 100vh;
@@ -219,8 +220,11 @@ def admin_css():
     gap: 16px;
     margin-bottom: 18px;
   }
+  .dash-grid > * { min-width: 0; }
   .dash-card {
     display: block;
+    min-width: 0;
+    max-width: 100%;
     min-height: 118px;
     padding: 18px;
     border: 1px solid var(--line);
@@ -251,7 +255,33 @@ def admin_css():
   }
   .stat-value { display: block; margin-top: 10px; font-size: 28px; font-weight: 700; color: var(--text); }
   .dash-section { margin-top: 22px; }
-  .dash-table-wrap { overflow-x: auto; }
+  .dash-table-wrap {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+  .analytics-mobile-list { display: none; }
+  .analytics-mobile-row {
+    min-width: 0;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .analytics-mobile-row:last-child { border-bottom: 0; }
+  .analytics-mobile-row dl { display: grid; gap: 8px; margin: 0; }
+  .analytics-mobile-field {
+    display: grid;
+    grid-template-columns: minmax(76px, 0.7fr) minmax(0, 1.3fr);
+    gap: 10px;
+  }
+  .analytics-mobile-field dt { color: var(--muted); font-size: 12px; }
+  .analytics-mobile-field dd {
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-weight: 700;
+  }
   .view-link { font-weight: 700; white-space: nowrap; }
   .detail-grid {
     display: grid;
@@ -293,6 +323,18 @@ def admin_css():
     border-radius: 6px;
     background: var(--panel-soft);
   }
+  .product-thumb-wrap { display: inline-block; }
+  .product-thumb-placeholder {
+    display: grid;
+    place-items: center;
+    padding: 4px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.15;
+    text-align: center;
+    white-space: normal;
+  }
   .status.active {
     border-color: rgba(34, 197, 94, 0.45);
     background: rgba(34, 197, 94, 0.12);
@@ -332,6 +374,48 @@ def admin_css():
     border-color: var(--accent);
     color: var(--accent);
   }
+  .mobile-quick-nav,
+  .mobile-products-list { display: none; }
+  .mobile-product-category { min-width: 0; }
+  .mobile-product-category h2 {
+    margin: 0 0 10px;
+    font-size: 17px;
+  }
+  .mobile-product-cards { display: grid; gap: 12px; }
+  .mobile-product-card {
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel-soft);
+  }
+  .mobile-product-head {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+  }
+  .mobile-product-name {
+    margin: 3px 0 0;
+    overflow-wrap: anywhere;
+    font-size: 17px;
+    line-height: 1.35;
+  }
+  .mobile-product-id { color: var(--muted); font-size: 12px; font-weight: 700; }
+  .mobile-product-details {
+    display: grid;
+    gap: 0;
+    margin: 14px 0;
+  }
+  .mobile-product-details div {
+    display: grid;
+    grid-template-columns: minmax(92px, 0.8fr) minmax(0, 1.2fr);
+    gap: 10px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .mobile-product-details dt { color: var(--muted); font-size: 13px; }
+  .mobile-product-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
   .categories-table {
     min-width: 640px;
   }
@@ -379,14 +463,76 @@ def admin_css():
     margin-top: 4px;
   }
   @media (max-width: 720px) {
+    body { overflow-x: hidden; }
+    .admin-shell, .admin-topbar, .admin-container, .admin-card {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .admin-card, .dash-card, .attention-banner, h1, h2, h3, p {
+      overflow-wrap: anywhere;
+    }
     .admin-nav { align-items: flex-start; flex-direction: column; padding: 14px 18px; }
+    .admin-links {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      flex-wrap: nowrap;
+      gap: 16px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+      overscroll-behavior-x: contain;
+    }
+    .admin-links a { flex: none; }
     .admin-container { padding: 22px 18px; }
     .admin-card { padding: 18px; }
     .dash-hero { align-items: flex-start; flex-direction: column; }
-    .dash-grid { grid-template-columns: 1fr; }
+    .dash-grid { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); }
+    .dash-grid > *, .dash-card > * { min-width: 0; max-width: 100%; }
     .detail-grid { grid-template-columns: 1fr; }
-    .action-group { flex-direction: column; max-width: 150px; }
-    table { display: block; overflow-x: auto; white-space: nowrap; }
+    .action-group { min-width: 0; max-width: 100%; flex-direction: column; }
+    .action-group form { min-width: 0; max-width: 100%; }
+    .action-group .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+    .dash-table-wrap {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .dash-table-wrap > table {
+      width: max-content;
+      min-width: 100%;
+      max-width: none;
+      white-space: nowrap;
+    }
+    .analytics-desktop-table { display: none; }
+    .analytics-mobile-list { display: grid; min-width: 0; max-width: 100%; }
+    .desktop-quick-nav,
+    .products-desktop-table { display: none; }
+    .mobile-quick-nav { display: flex; }
+    .mobile-quick-nav a { min-width: 0; overflow-wrap: anywhere; }
+    .mobile-products-list { display: grid; gap: 22px; }
+    .mobile-product-card .action-group {
+      display: grid;
+      width: 100%;
+      max-width: none;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    .mobile-product-card .action-group a,
+    .mobile-product-card .action-group form,
+    .mobile-product-card .action-group button {
+      width: 100%;
+      min-height: 44px;
+      margin: 0;
+      text-align: center;
+    }
+  }
+  @media (max-width: 380px) {
+    .admin-nav { padding-inline: 12px; }
+    .admin-container { padding: 18px 12px; }
+    .admin-card { padding: 14px; }
   }
 </style>
 """
@@ -782,6 +928,86 @@ def format_stock_grams(stock_grams):
     return f"{stock} г"
 
 
+def format_analytics_weight(value):
+    grams = int(value or 0)
+    if grams >= 1000:
+        return f"{grams / 1000:.1f} кг"
+    return f"{grams} г"
+
+
+def render_product_analytics(rows):
+    if not rows:
+        return "<p>Нет данных</p>"
+
+    table_rows = []
+    mobile_rows = []
+    for row in rows:
+        _, product_name, grams_sold, revenue, *_ = row
+        product_text = html.escape(str(product_name or "-"))
+        sold_text = format_analytics_weight(grams_sold)
+        revenue_text = f"€{float(revenue or 0):.2f}"
+        table_rows.append(
+            "<tr>"
+            f"<td>{product_text}</td>"
+            f"<td>{sold_text}</td>"
+            f"<td>{revenue_text}</td>"
+            "</tr>"
+        )
+        mobile_rows.append(
+            '<article class="analytics-mobile-row">'
+            '<dl>'
+            f'<div class="analytics-mobile-field"><dt>Товар</dt><dd>{product_text}</dd></div>'
+            f'<div class="analytics-mobile-field"><dt>Продано</dt><dd>{sold_text}</dd></div>'
+            f'<div class="analytics-mobile-field"><dt>Выручка</dt><dd>{revenue_text}</dd></div>'
+            '</dl></article>'
+        )
+    return (
+        '<div class="dash-table-wrap analytics-desktop-table">'
+        '<table class="analytics-table">'
+        '<tr><th>Товар</th><th>Продано</th><th>Выручка</th></tr>'
+        f'{"".join(table_rows)}</table></div>'
+        '<div class="analytics-mobile-list" aria-label="Аналитика товаров">'
+        f'{"".join(mobile_rows)}</div>'
+    )
+
+
+def render_customer_analytics(rows, orders_label):
+    if not rows:
+        return "<p>Нет данных</p>"
+
+    safe_orders_label = html.escape(str(orders_label))
+    table_rows = []
+    mobile_rows = []
+    for _, username, phone, orders_count, total_spent in rows:
+        customer = username if username and username != "-" else phone
+        customer_text = html.escape(str(customer or "-"))
+        orders_text = html.escape(str(orders_count))
+        total_text = f"€{float(total_spent or 0):.2f}"
+        table_rows.append(
+            "<tr>"
+            f"<td>{customer_text}</td>"
+            f"<td>{orders_text}</td>"
+            f"<td>{total_text}</td>"
+            "</tr>"
+        )
+        mobile_rows.append(
+            '<article class="analytics-mobile-row">'
+            '<dl>'
+            f'<div class="analytics-mobile-field"><dt>Клиент</dt><dd>{customer_text}</dd></div>'
+            f'<div class="analytics-mobile-field"><dt>{safe_orders_label}</dt><dd>{orders_text}</dd></div>'
+            f'<div class="analytics-mobile-field"><dt>Сумма</dt><dd>{total_text}</dd></div>'
+            '</dl></article>'
+        )
+    return (
+        '<div class="dash-table-wrap analytics-desktop-table">'
+        '<table class="analytics-table">'
+        f'<tr><th>Клиент</th><th>{safe_orders_label}</th><th>Сумма</th></tr>'
+        f'{"".join(table_rows)}</table></div>'
+        '<div class="analytics-mobile-list" aria-label="Аналитика клиентов">'
+        f'{"".join(mobile_rows)}</div>'
+    )
+
+
 PRICING_MODES = {"fixed", "per_kg", "options"}
 
 
@@ -895,7 +1121,8 @@ def admin_options_warning(pricing_mode, options):
     available_options = [
         option for option in active_options
         if not bool(option[7])
-        and (option[6] is None or int(option[6] or 0) > 0)
+        and option[6] is not None
+        and int(option[6] or 0) > 0
     ]
     if not active_options:
         return "Нет активных вариантов: товар недоступен в storefront."
@@ -913,6 +1140,27 @@ def format_admin_product_price(pricing_mode, price_per_kg, fixed_price, sale_uni
     if pricing_mode == "options":
         return "Варианты"
     return f"{float(price_per_kg or 0):.2f} {escape(CURRENCY_SYMBOL)}/кг"
+
+
+def render_admin_product_image(image_url, product_name):
+    placeholder = (
+        '<span class="product-thumb product-thumb-placeholder" '
+        'role="img" aria-label="Фотография отсутствует">Фото скоро</span>'
+    )
+    image = safe_image_url(image_url)
+    if not image:
+        return placeholder
+    escaped_image = escape(image, quote=True)
+    escaped_name = escape(str(product_name or ""), quote=True)
+    hidden_placeholder = placeholder.replace("<span ", "<span hidden ", 1)
+    return (
+        '<span class="product-thumb-wrap">'
+        f'<a href="{escaped_image}" target="_blank" rel="noopener noreferrer">'
+        f'<img class="product-thumb" src="{escaped_image}" alt="{escaped_name}" '
+        'referrerpolicy="no-referrer" '
+        'onerror="this.parentElement.hidden=true;this.parentElement.nextElementSibling.hidden=false">'
+        f'</a>{hidden_placeholder}</span>'
+    )
 
 
 def admin_event_type_label(event_type):
@@ -2057,59 +2305,6 @@ async def root():
         </div>
         """
 
-    def format_analytics_weight(value):
-        grams = int(value or 0)
-        if grams >= 1000:
-            return f"{grams / 1000:.1f} кг"
-        return f"{grams} г"
-
-    def product_analytics_rows(rows, include_units=False):
-        if not rows:
-            return "<p>Нет данных</p>"
-        rendered = ""
-        for row in rows:
-            if include_units:
-                _, product_name, grams_sold, revenue, _ = row
-            else:
-                _, product_name, grams_sold, revenue = row
-            rendered += f"""
-            <tr>
-              <td>{html.escape(str(product_name or '-'))}</td>
-              <td>{format_analytics_weight(grams_sold)}</td>
-              <td>€{float(revenue or 0):.2f}</td>
-            </tr>
-            """
-        return f"""
-        <div class="dash-table-wrap">
-          <table>
-            <tr><th>Товар</th><th>Продано</th><th>Выручка</th></tr>
-            {rendered}
-          </table>
-        </div>
-        """
-
-    def customer_analytics_rows(rows, orders_label):
-        if not rows:
-            return "<p>Нет данных</p>"
-        rendered = ""
-        for _, username, phone, orders_count, total_spent in rows:
-            customer = username if username and username != "-" else phone
-            rendered += f"""
-            <tr>
-              <td>{html.escape(str(customer or '-'))}</td>
-              <td>{orders_count}</td>
-              <td>€{float(total_spent or 0):.2f}</td>
-            </tr>
-            """
-        return f"""
-        <div class="dash-table-wrap">
-          <table>
-            <tr><th>Клиент</th><th>{orders_label}</th><th>Сумма</th></tr>
-            {rendered}
-          </table>
-        </div>
-        """
-
     low_stock_rows = ""
     for product_id, name, stock_grams, low_stock_threshold_grams in low_stock_products:
         low_stock_rows += f"""
@@ -2173,19 +2368,19 @@ async def root():
           <div class="dash-grid">
             <div class="dash-card">
               <strong>Топ товары</strong>
-              {product_analytics_rows(top_products)}
+              {render_product_analytics(top_products)}
             </div>
             <div class="dash-card">
               <strong>Слабые товары</strong>
-              {product_analytics_rows(worst_products, include_units=True)}
+              {render_product_analytics(worst_products)}
             </div>
             <div class="dash-card">
               <strong>Лучшие клиенты</strong>
-              {customer_analytics_rows(best_customers, "Заказов")}
+              {render_customer_analytics(best_customers, "Заказов")}
             </div>
             <div class="dash-card">
               <strong>Повторные клиенты</strong>
-              {customer_analytics_rows(repeat_customers, "Заказов")}
+              {render_customer_analytics(repeat_customers, "Заказов")}
             </div>
           </div>
         </section>
@@ -4314,9 +4509,9 @@ async def products(filter: str = "", days: int = 14):
                        SELECT COUNT(*)
                        FROM product_options po
                        WHERE po.product_id = p.id
-                         AND po.is_active = TRUE
-                         AND po.is_out_of_stock = FALSE
-                         AND (po.stock_quantity IS NULL OR po.stock_quantity > 0)
+                          AND po.is_active = TRUE
+                          AND po.is_out_of_stock = FALSE
+                          AND po.stock_quantity > 0
                    ) AS available_option_count
             FROM products p
             LEFT JOIN categories c ON c.id = p.category_id
@@ -4361,14 +4556,22 @@ async def products(filter: str = "", days: int = 14):
             html += "<p>Нет товаров по выбранному фильтру.</p></section>"
             return admin_layout("🛒 Товары", html)
 
-        html += "<div class='quick-nav'><a href='#all-products'>Все товары</a>"
+        html += "<div class='quick-nav desktop-quick-nav'><a href='#all-products'>Все товары</a>"
         for category_label in category_order:
-            html += f"<a href='#{category_anchors[category_label]}'>📁 {category_label}</a>"
-        html += "</div><div class='dash-table-wrap'><table class='products-table'>"
+            category_text = escape(category_label, quote=True)
+            html += f"<a href='#{category_anchors[category_label]}-desktop'>📁 {category_text}</a>"
+        html += "</div><div class='quick-nav mobile-quick-nav'><a href='#all-products'>Все товары</a>"
+        for category_label in category_order:
+            category_text = escape(category_label, quote=True)
+            html += f"<a href='#{category_anchors[category_label]}-mobile'>📁 {category_text}</a>"
+        html += "</div><div class='dash-table-wrap products-desktop-table'><table class='products-table'>"
         html += "<tr><th>ID</th><th>Название</th><th>Цена</th><th>Фото</th><th>Статус</th><th>Категория</th><th>Остаток</th><th>Наличие</th><th>Действия</th></tr>"
+        mobile_sections = []
 
         for category_label in category_order:
-            html += f"<tr class='category-row' id='{category_anchors[category_label]}'><td colspan='9'>📁 {category_label}</td></tr>"
+            category_text = escape(category_label, quote=True)
+            html += f"<tr class='category-row' id='{category_anchors[category_label]}-desktop'><td colspan='9'>📁 {category_text}</td></tr>"
+            mobile_cards = []
             for row in grouped_products[category_label]:
                 (
                     pid, name, price, image_url, is_active, category_name,
@@ -4376,11 +4579,7 @@ async def products(filter: str = "", days: int = 14):
                     is_promotion, pricing_mode, fixed_price, sale_unit, stock_quantity,
                     active_option_count, available_option_count,
                 ) = row
-                if image_url:
-                    escaped_image_url = escape(str(image_url), quote=True)
-                    img_html = f"<a href=\"{escaped_image_url}\" target=\"_blank\" rel=\"noopener noreferrer\"><img class=\"product-thumb\" src=\"{escaped_image_url}\" referrerpolicy=\"no-referrer\"/></a>"
-                else:
-                    img_html = "-"
+                img_html = render_admin_product_image(image_url, name)
                 active_text = "Активен" if is_active else "Выключен"
                 status_class = "active" if is_active else "inactive"
                 actions_html = f"<a class=\"button\" href=\"/products/{pid}/edit\">Редактировать</a>"
@@ -4390,7 +4589,7 @@ async def products(filter: str = "", days: int = 14):
                     actions_html += f" <form method=\"post\" action=\"/products/{pid}/activate\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">Включить</button></form>"
                 actions_html = f"<div class=\"action-group\">{actions_html}</div>"
                 if pricing_mode == "fixed":
-                    inventory_empty = stock_quantity is not None and int(stock_quantity or 0) <= 0
+                    inventory_empty = stock_quantity is None or int(stock_quantity or 0) <= 0
                     stock_text = f"{max(int(stock_quantity or 0), 0)} шт." if stock_quantity is not None else "—"
                 elif pricing_mode == "options":
                     inventory_empty = int(available_option_count or 0) <= 0
@@ -4403,12 +4602,31 @@ async def products(filter: str = "", days: int = 14):
                     stock_text = format_stock_grams(stock_grams)
                 availability_text = "Нет в наличии" if is_out_of_stock or inventory_empty else "В наличии"
                 availability_class = "inactive" if availability_text == "Нет в наличии" else "active"
-                name_text = f"🔥 {name}" if is_promotion else name
+                safe_name = escape(str(name or ""), quote=True)
+                name_text = f"🔥 {safe_name}" if is_promotion else safe_name
                 price_text = format_admin_product_price(
                     pricing_mode, price, fixed_price, sale_unit
                 )
-                html += f"<tr><td>{pid}</td><td>{name_text}</td><td>{price_text}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_label}</td><td>{stock_text}</td><td><span class='status {availability_class}'>{availability_text}</span></td><td>{actions_html}</td></tr>"
-        html += "</table></div></section>"
+                html += f"<tr><td>{pid}</td><td>{name_text}</td><td>{price_text}</td><td>{img_html}</td><td><span class='status {status_class}'>{active_text}</span></td><td>{category_text}</td><td>{stock_text}</td><td><span class='status {availability_class}'>{availability_text}</span></td><td>{actions_html}</td></tr>"
+                mobile_cards.append(
+                    "<article class='mobile-product-card'>"
+                    "<div class='mobile-product-head'>"
+                    f"{img_html}<div><span class='mobile-product-id'>ID {pid}</span>"
+                    f"<h3 class='mobile-product-name'>{name_text}</h3></div></div>"
+                    "<dl class='mobile-product-details'>"
+                    f"<div><dt>Цена</dt><dd>{price_text}</dd></div>"
+                    f"<div><dt>Статус</dt><dd><span class='status {status_class}'>{active_text}</span></dd></div>"
+                    f"<div><dt>Категория</dt><dd>{category_text}</dd></div>"
+                    f"<div><dt>Остаток</dt><dd>{stock_text}</dd></div>"
+                    f"<div><dt>Наличие</dt><dd><span class='status {availability_class}'>{availability_text}</span></dd></div>"
+                    f"</dl>{actions_html}</article>"
+                )
+            mobile_sections.append(
+                f"<section class='mobile-product-category' id='{category_anchors[category_label]}-mobile'>"
+                f"<h2>📁 {category_text}</h2><div class='mobile-product-cards'>"
+                f"{''.join(mobile_cards)}</div></section>"
+            )
+        html += f"</table></div><div class='mobile-products-list'>{''.join(mobile_sections)}</div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception as e:
         log_admin_error("/products", "list_products", e)
@@ -4752,7 +4970,8 @@ async def edit_product_form(product_id: int):
                 option_availability = (
                     "Нет в наличии"
                     if option_is_out_of_stock
-                    or (option_stock_quantity is not None and int(option_stock_quantity or 0) <= 0)
+                    or option_stock_quantity is None
+                    or int(option_stock_quantity or 0) <= 0
                     else "В наличии"
                 )
                 toggle_text = "👁 Скрыть" if option_is_active else "♻️ Включить"
@@ -4945,9 +5164,9 @@ async def new_product_option_form(product_id: int):
 @app.post("/products/{product_id}/options/new", response_class=HTMLResponse)
 async def create_product_option(
     product_id: int,
-    label: str = Form(...),
+    label: str = Form(""),
     weight: str = Form(None),
-    price: str = Form(...),
+    price: str = Form(""),
     stock_quantity: str = Form(""),
     is_out_of_stock: bool = Form(False),
     sort_order: str = Form("0"),
@@ -5080,9 +5299,9 @@ async def edit_product_option_form(option_id: int):
 @app.post("/options/{option_id}/edit", response_class=HTMLResponse)
 async def update_product_option(
     option_id: int,
-    label: str = Form(...),
+    label: str = Form(""),
     weight: str = Form(None),
-    price: str = Form(...),
+    price: str = Form(""),
     stock_quantity: str = Form(""),
     is_out_of_stock: bool = Form(False),
     sort_order: str = Form("0"),

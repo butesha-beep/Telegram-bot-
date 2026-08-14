@@ -307,10 +307,13 @@ class DisposablePostgresImportTests(unittest.TestCase):
             self.assertEqual(category_by_id[category_id]["products"], [])
         self.assertNotIn(5, category_by_id)
         page = storefront.render_catalog_page(catalog, currency_symbol="EUR")
+        self.assertEqual(page.count('<article class="product-card">'), 14)
+        self.assertEqual(page.count('<section class="category-section"'), 3)
         plan = import_catalog.load_and_validate_plan()
         category_by_plan_id = {category["id"]: category for category in plan["categories"]}
         self.assertNotIn(html.escape(category_by_plan_id[5]["name"]), page)
         product_by_id = {product["id"]: product for product in plan["products"]}
+        self.assertNotIn(html.escape(product_by_id[11]["name"]), page)
         self.assertNotIn(html.escape(product_by_id[13]["name"]), page)
         self.assertNotIn(html.escape(product_by_id[17]["name"]), page)
 

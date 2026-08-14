@@ -134,11 +134,15 @@ class AdminPricingValidationTests(unittest.TestCase):
         available = (1, "100 г", 100, 3.5, 0, True, 2, False)
         unavailable = (2, "200 г", 200, 7, 0, True, 0, False)
         inactive = (3, "300 г", 300, 10.5, 0, False, 2, False)
+        missing_stock = (4, "400 г", 400, 14, 0, True, None, False)
 
         self.assertIn("игнорируются", admin_app.admin_options_warning("per_kg", [available]))
         self.assertIn("Нет активных", admin_app.admin_options_warning("options", [inactive]))
         self.assertIn(
             "Нет доступных", admin_app.admin_options_warning("options", [unavailable])
+        )
+        self.assertIn(
+            "Нет доступных", admin_app.admin_options_warning("options", [missing_stock])
         )
         self.assertEqual(admin_app.admin_options_warning("options", [available]), "")
 
@@ -189,17 +193,25 @@ class AdminPricingValidationTests(unittest.TestCase):
 
         self.assertIn("/products/1/edit", page)
         self.assertIn("100 г", page)
+        self.assertIn("products-desktop-table", page)
+        self.assertIn("mobile-products-list", page)
+        self.assertIn("mobile-product-card", page)
+        self.assertIn("ID 1", page)
+        self.assertIn("Фото скоро", page)
         self.assertNotIn("Не удалось выполнить операцию", page)
 
 
 class StorefrontPricingTests(unittest.TestCase):
-    def test_unknown_mode_is_rejected_without_per_kg_fallback(self):
+    def test_unknown_mode_is_logged_and_hidden_without_per_kg_fallback(self):
         row = (
             1, 1, "Товар", "", 35, "", False, 100, 0, True,
             "legacy", None, None, None, None,
         )
-        with self.assertRaisesRegex(ValueError, "Unknown pricing_mode"):
-            catalog_with_product(row)
+        with self.assertLogs("storefront", level="ERROR") as logs:
+            catalog = catalog_with_product(row)
+        self.assertEqual(catalog[0]["products"], [])
+        self.assertIn("Hiding product 1", "\n".join(logs.output))
+        self.assertNotIn("Товар", storefront.render_catalog_page(catalog))
 
     def test_invalid_mode_specific_product_values_are_rejected(self):
         invalid_rows = (

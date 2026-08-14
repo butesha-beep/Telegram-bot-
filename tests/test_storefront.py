@@ -331,6 +331,18 @@ class StorefrontTests(unittest.TestCase):
         self.assertNotIn("Товар скрытой категории", page)
         self.assertNotIn("Скрытый вариант", page)
 
+    def test_empty_categories_are_not_rendered(self):
+        catalog = self.sample_catalog()
+        catalog.append({
+            "id": 99,
+            "name": "Пустая публичная категория",
+            "sort_order": 99,
+            "products": [],
+        })
+        page = storefront.render_catalog_page(catalog)
+        self.assertNotIn("Пустая публичная категория", page)
+        self.assertNotIn("В этой категории пока нет доступных товаров", page)
+
     def test_prices_and_active_variant_are_rendered(self):
         page = storefront.render_catalog_page(self.sample_catalog(), currency_symbol="EUR", support_username="")
         self.assertIn("24.00 EUR", page)
@@ -366,11 +378,59 @@ class StorefrontTests(unittest.TestCase):
         self.assertNotIn("Скрытый вариант", options_card)
         self.assertNotIn("за кг", options_card)
 
-    def test_zero_stock_and_explicit_flag_are_marked_out_of_stock(self):
+    def test_zero_stock_and_explicit_flag_are_hidden(self):
         page = storefront.render_catalog_page(self.sample_catalog(), currency_symbol="EUR", support_username="")
-        self.assertIn("Нет на складе", page)
-        self.assertIn("Нет по статусу", page)
-        self.assertEqual(page.count('class="stock-status out"'), 2)
+        self.assertNotIn("Нет на складе", page)
+        self.assertNotIn("Нет по статусу", page)
+        self.assertNotIn('class="stock-status out"', page)
+
+    def test_fixed_zero_stock_is_hidden(self):
+        catalog = self.sample_catalog()
+        fixed = next(
+            product for product in catalog[0]["products"] if product["id"] == 15
+        )
+        fixed["stock_quantity"] = 0
+        page = storefront.render_catalog_page(catalog)
+        self.assertNotIn("Фиксированный товар", page)
+
+    def test_options_require_at_least_one_available_variant(self):
+        catalog = self.sample_catalog()
+        options_product = catalog[0]["products"][0]
+        for option in options_product["options"]:
+            option["stock_quantity"] = 0
+        page = storefront.render_catalog_page(catalog)
+        self.assertNotIn("Активный &lt;товар&gt;", page)
+
+        options_product["options"][0]["stock_quantity"] = 1
+        page = storefront.render_catalog_page(catalog)
+        self.assertIn("Активный &lt;товар&gt;", page)
+
+    def test_category_with_only_unavailable_products_is_hidden(self):
+        catalog = self.sample_catalog()
+        catalog.append({
+            "id": 98,
+            "name": "Категория без доступных товаров",
+            "sort_order": 98,
+            "products": [{
+                "id": 98,
+                "name": "Недоступный фиксированный",
+                "description": "",
+                "price_per_kg": 0,
+                "image_url": "",
+                "is_out_of_stock": False,
+                "stock_grams": 0,
+                "sort_order": 1,
+                "pricing_mode": "fixed",
+                "fixed_price": 1,
+                "sale_unit": "за штуку",
+                "unit_weight_grams": None,
+                "stock_quantity": 0,
+                "options": [],
+            }],
+        })
+        page = storefront.render_catalog_page(catalog)
+        self.assertNotIn("Категория без доступных товаров", page)
+        self.assertNotIn("Недоступный фиксированный", page)
 
     def test_database_content_is_html_escaped(self):
         page = storefront.render_catalog_page(self.sample_catalog(), currency_symbol="EUR", support_username="")
@@ -385,6 +445,78 @@ class StorefrontTests(unittest.TestCase):
         self.assertGreaterEqual(page.count("Фото скоро"), 2)
         self.assertEqual(storefront.safe_image_url(""), "")
         self.assertEqual(storefront.safe_image_url("data:image/png;base64,AAAA"), "")
+
+    def test_external_images_fall_back_to_placeholder_on_error(self):
+        catalog = self.sample_catalog()
+        product = catalog[0]["products"][0]
+        product["image_url"] = "https://images.example/missing.jpg"
+        page = storefront.render_catalog_page(catalog)
+        self.assertIn(
+            'onerror="this.hidden=true;this.nextElementSibling.hidden=false"', page
+        )
+        self.assertIn("Фото скоро", page)
+        self.assertIn("hidden", page)
+
+    def test_admin_images_use_the_same_safe_fallback(self):
+        empty = admin_app.render_admin_product_image("", "Товар")
+        broken = admin_app.render_admin_product_image(
+            "https://images.example/missing.jpg", "Товар"
+        )
+        unsafe = admin_app.render_admin_product_image("javascript:alert(1)", "Товар")
+        self.assertIn("Фото скоро", empty)
+        self.assertIn("Фото скоро", broken)
+        self.assertIn("onerror=", broken)
+        self.assertNotIn("javascript:", unsafe)
+
+    def test_long_descriptions_open_in_accessible_modal(self):
+        catalog = self.sample_catalog()
+        product = catalog[0]["products"][0]
+        full_description = "Первая строка 😊\n" + ("Очень длинное описание " * 20)
+        product["description"] = full_description
+        page = storefront.render_catalog_page(catalog)
+        self.assertIn("-webkit-line-clamp: 4", storefront.PAGE_STYLE)
+        self.assertIn('class="description-toggle"', page)
+        self.assertIn('hidden aria-haspopup="dialog"', page)
+        self.assertIn("Подробнее", page)
+        self.assertNotIn("classList.toggle('expanded')", page)
+        self.assertNotIn("product-description expanded", page)
+        self.assertIn('<dialog class="product-modal"', page)
+        self.assertIn('aria-modal="true"', page)
+        self.assertIn('aria-labelledby="product-modal-10-title"', page)
+        self.assertIn('aria-describedby="product-modal-10-description"', page)
+        self.assertIn("Первая строка 😊\n", page)
+        self.assertIn("2.50 €", page)
+        self.assertIn("Связаться для заказа", page)
+        self.assertIn("dialog.showModal()", storefront.PAGE_SCRIPT)
+        self.assertIn("dialog.close()", storefront.PAGE_SCRIPT)
+        self.assertIn("trigger.focus()", storefront.PAGE_SCRIPT)
+        self.assertIn("modal-open", storefront.PAGE_SCRIPT)
+
+    def test_modal_escapes_user_description_without_inner_html(self):
+        catalog = self.sample_catalog()
+        product = catalog[0]["products"][0]
+        product["description"] = '</dialog><script>window.bad = true</script> 😊'
+        page = storefront.render_catalog_page(catalog)
+        self.assertIn(
+            "&lt;/dialog&gt;&lt;script&gt;window.bad = true&lt;/script&gt; 😊",
+            page,
+        )
+        self.assertNotIn("<script>window.bad = true</script>", page)
+        self.assertNotIn("innerHTML", storefront.PAGE_SCRIPT)
+
+    def test_responsive_breakpoints_keep_three_two_one_columns(self):
+        self.assertIn("grid-template-columns: 1fr", storefront.PAGE_STYLE)
+        self.assertIn("@media (min-width: 640px)", storefront.PAGE_STYLE)
+        self.assertIn("repeat(2, minmax(0, 1fr))", storefront.PAGE_STYLE)
+        self.assertIn("@media (min-width: 980px)", storefront.PAGE_STYLE)
+        self.assertIn("repeat(3, minmax(0, 1fr))", storefront.PAGE_STYLE)
+        self.assertIn("@media (max-width: 639px)", storefront.PAGE_STYLE)
+        self.assertIn(".contact-button { width: 100%; }", storefront.PAGE_STYLE)
+        admin_style = admin_app.admin_css()
+        self.assertIn("@media (max-width: 720px)", admin_style)
+        self.assertIn(".products-desktop-table { display: none; }", admin_style)
+        self.assertIn(".mobile-products-list { display: grid", admin_style)
+        self.assertIn("body { overflow-x: hidden; }", admin_style)
 
     def test_http_and_https_images_are_allowed(self):
         self.assertEqual(storefront.safe_image_url("https://images.example/product.jpg"), "https://images.example/product.jpg")

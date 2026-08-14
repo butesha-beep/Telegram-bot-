@@ -1,4 +1,5 @@
 import html
+import logging
 import os
 import re
 from decimal import Decimal, InvalidOperation
@@ -12,6 +13,7 @@ from shop_settings import BRAND_NAME, CURRENCY_SYMBOL, SUPPORT_USERNAME
 
 router = APIRouter()
 PRICING_MODES = {"fixed", "per_kg", "options"}
+logger = logging.getLogger(__name__)
 
 
 PAGE_STYLE = """
@@ -29,6 +31,7 @@ PAGE_STYLE = """
     --warning-bg: #fff3e8;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     background: var(--page);
@@ -78,9 +81,17 @@ PAGE_STYLE = """
     border: 1px solid var(--line);
     border-radius: 8px;
   }
-  .product-media {
+  .product-media-wrap {
+    position: relative;
     width: 100%;
     aspect-ratio: 4 / 3;
+    overflow: hidden;
+    background: #e7ebe7;
+  }
+  .product-media {
+    display: block;
+    width: 100%;
+    height: 100%;
     background: #e7ebe7;
     object-fit: cover;
   }
@@ -92,8 +103,84 @@ PAGE_STYLE = """
     font-weight: 700;
   }
   .product-body { display: flex; flex: 1; flex-direction: column; padding: 18px; }
-  .product-name { margin-bottom: 8px; font-size: 19px; line-height: 1.3; }
-  .product-description { margin-bottom: 15px; color: var(--muted); line-height: 1.5; }
+  .product-name {
+    margin-bottom: 8px;
+    overflow-wrap: anywhere;
+    font-size: 19px;
+    line-height: 1.3;
+  }
+  .product-description {
+    display: -webkit-box;
+    max-height: 6em;
+    margin-bottom: 8px;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    color: var(--muted);
+    line-height: 1.5;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+  }
+  .description-toggle {
+    align-self: flex-start;
+    margin: 0 0 15px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .description-toggle:hover { color: var(--accent-hover); }
+  body.modal-open { overflow: hidden; }
+  .product-modal {
+    width: min(100% - 32px, 680px);
+    max-height: min(88vh, 760px);
+    margin: auto;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+  }
+  .product-modal::backdrop { background: rgb(18 27 22 / 68%); }
+  .product-modal-inner {
+    display: flex;
+    max-height: min(88vh, 760px);
+    flex-direction: column;
+  }
+  .modal-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 1;
+    display: grid;
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 26px;
+    line-height: 1;
+  }
+  .product-modal-scroll { overflow-y: auto; overscroll-behavior: contain; }
+  .product-modal .product-media-wrap { max-height: 310px; }
+  .product-modal-content { padding: 22px; }
+  .product-modal-description {
+    margin-bottom: 18px;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    color: var(--muted);
+    line-height: 1.55;
+  }
+  .product-modal .product-purchase { margin-top: 0; }
+  .product-purchase { margin-top: auto; }
   .price-line { margin-bottom: 14px; font-size: 18px; font-weight: 700; }
   .price-label { color: var(--muted); font-size: 13px; font-weight: 400; }
   .price-note { margin: -6px 0 14px; color: var(--muted); font-size: 13px; line-height: 1.4; }
@@ -109,7 +196,13 @@ PAGE_STYLE = """
   .variant-price { flex: none; font-weight: 700; }
   .variant-status { display: block; margin-top: 3px; color: var(--accent); font-size: 12px; }
   .variant-status.out { color: var(--warning); }
-  .product-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; }
+  .product-footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
   .stock-status {
     font-size: 13px;
     font-weight: 700;
@@ -118,7 +211,7 @@ PAGE_STYLE = """
   .stock-status.out { color: var(--warning); }
   .contact-button {
     display: inline-flex;
-    min-height: 42px;
+    min-height: 44px;
     align-items: center;
     justify-content: center;
     padding: 10px 13px;
@@ -149,7 +242,72 @@ PAGE_STYLE = """
   @media (min-width: 980px) {
     .product-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   }
+  @media (max-width: 639px) {
+    .shop-header-inner, .shop-main { width: min(100% - 24px, 1120px); }
+    .product-body { padding: 16px; }
+    .product-footer { align-items: stretch; flex-direction: column; }
+    .contact-button { width: 100%; }
+    .product-modal {
+      width: calc(100% - 16px);
+      max-height: calc(100dvh - 16px);
+    }
+    .product-modal-inner { max-height: calc(100dvh - 16px); }
+    .product-modal-content { padding: 18px 16px; }
+  }
 </style>
+"""
+
+
+PAGE_SCRIPT = """
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    var returnFocus = new WeakMap();
+
+    function syncDescriptionButton(button) {
+      var description = document.getElementById(button.dataset.descriptionId);
+      button.hidden = !description || description.scrollHeight <= description.clientHeight + 1;
+    }
+
+    var descriptionButtons = document.querySelectorAll('.description-toggle');
+    descriptionButtons.forEach(syncDescriptionButton);
+    window.addEventListener('resize', function () {
+      descriptionButtons.forEach(syncDescriptionButton);
+    });
+
+    document.querySelectorAll('[data-modal-target]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var dialog = document.getElementById(button.dataset.modalTarget);
+        if (!dialog || typeof dialog.showModal !== 'function') return;
+        returnFocus.set(dialog, button);
+        document.body.classList.add('modal-open');
+        dialog.showModal();
+        var closeButton = dialog.querySelector('.modal-close');
+        if (closeButton) closeButton.focus();
+      });
+    });
+
+    document.querySelectorAll('.product-modal').forEach(function (dialog) {
+      var closeButton = dialog.querySelector('.modal-close');
+      if (closeButton) {
+        closeButton.addEventListener('click', function () { dialog.close(); });
+      }
+      dialog.addEventListener('click', function (event) {
+        if (event.target !== dialog) return;
+        var bounds = dialog.getBoundingClientRect();
+        var inside = event.clientX >= bounds.left && event.clientX <= bounds.right &&
+          event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+        if (!inside) dialog.close();
+      });
+      dialog.addEventListener('close', function () {
+        if (!document.querySelector('.product-modal[open]')) {
+          document.body.classList.remove('modal-open');
+        }
+        var trigger = returnFocus.get(dialog);
+        if (trigger) trigger.focus();
+      });
+    });
+  });
+</script>
 """
 
 
@@ -297,6 +455,13 @@ def assemble_catalog(category_rows, product_rows, option_rows):
         ) = row
         category = categories_by_id.get(category_id)
         if not is_active or not category:
+            continue
+        if pricing_mode not in PRICING_MODES:
+            logger.error(
+                "Hiding product %s with unsupported pricing mode %r",
+                product_id,
+                pricing_mode,
+            )
             continue
         (
             price_per_kg,
@@ -454,21 +619,29 @@ def _option_is_out_of_stock(option):
     if option["is_out_of_stock"]:
         return True
     stock_quantity = option["stock_quantity"]
-    return stock_quantity is not None and int(stock_quantity or 0) <= 0
+    return stock_quantity is None or int(stock_quantity or 0) <= 0
 
 
 def _product_is_out_of_stock(product):
     if product["is_out_of_stock"]:
         return True
-    if product["pricing_mode"] == "fixed":
+    pricing_mode = product.get("pricing_mode")
+    if pricing_mode not in PRICING_MODES:
+        logger.error(
+            "Hiding product %s with unsupported pricing mode %r",
+            product.get("id"),
+            pricing_mode,
+        )
+        return True
+    if pricing_mode == "fixed":
         stock_quantity = product["stock_quantity"]
-        return stock_quantity is not None and int(stock_quantity or 0) <= 0
-    if product["pricing_mode"] == "options":
+        return stock_quantity is None or int(stock_quantity or 0) <= 0
+    if pricing_mode == "options":
         return not product["options"] or all(
             _option_is_out_of_stock(option) for option in product["options"]
         )
     stock_grams = product["stock_grams"]
-    return stock_grams is not None and int(stock_grams or 0) <= 0
+    return stock_grams is None or int(stock_grams or 0) <= 0
 
 
 def _format_weight(value):
@@ -499,22 +672,43 @@ def render_catalog_page(categories, brand_name=BRAND_NAME, currency_symbol=CURRE
     for category in categories:
         product_cards = []
         for product in category["products"]:
+            if _product_is_out_of_stock(product):
+                continue
             product_name = _escape(product["name"])
             image_url = safe_image_url(product["image_url"])
+            placeholder_html = (
+                '<div class="product-media product-placeholder" '
+                'role="img" aria-label="Фотография отсутствует"><span>Фото скоро</span></div>'
+            )
             if image_url:
                 media_html = (
+                    '<div class="product-media-wrap">'
                     f'<img class="product-media" src="{_escape(image_url)}" '
-                    f'alt="{product_name}" loading="lazy" referrerpolicy="no-referrer">'
+                    f'alt="{product_name}" loading="lazy" referrerpolicy="no-referrer" '
+                    'onerror="this.hidden=true;this.nextElementSibling.hidden=false">'
+                    f'{placeholder_html.replace("<div ", "<div hidden ", 1)}</div>'
                 )
             else:
                 media_html = (
-                    '<div class="product-media product-placeholder" '
-                    'role="img" aria-label="Фотография отсутствует"><span>Фото скоро</span></div>'
+                    f'<div class="product-media-wrap">{placeholder_html}</div>'
                 )
 
             description_html = ""
+            description = ""
+            description_id = f'product-description-{_escape(product["id"])}'
+            modal_id = f'product-modal-{_escape(product["id"])}'
             if product["description"]:
-                description_html = f'<p class="product-description">{_escape(product["description"])}</p>'
+                description = str(product["description"])
+                toggle_html = (
+                    f'<button class="description-toggle" type="button" hidden '
+                    f'aria-haspopup="dialog" aria-controls="{modal_id}" '
+                    f'data-description-id="{description_id}" '
+                    f'data-modal-target="{modal_id}">Подробнее</button>'
+                )
+                description_html = (
+                    f'<p class="product-description" id="{description_id}">'
+                    f'{_escape(description)}</p>{toggle_html}'
+                )
 
             price_html = ""
             variants_html = ""
@@ -554,26 +748,42 @@ def render_catalog_page(categories, brand_name=BRAND_NAME, currency_symbol=CURRE
             elif pricing_mode == "options":
                 variants_html = '<p class="price-note">Варианты временно недоступны.</p>'
 
-            is_out_of_stock = _product_is_out_of_stock(product)
-            stock_class = "stock-status out" if is_out_of_stock else "stock-status"
-            stock_text = "Нет в наличии" if is_out_of_stock else "В наличии"
+            stock_class = "stock-status"
+            stock_text = "В наличии"
+            modal_html = ""
+            if description:
+                modal_html = (
+                    f'<dialog class="product-modal" id="{modal_id}" '
+                    'aria-modal="true" '
+                    f'aria-labelledby="{modal_id}-title" aria-describedby="{modal_id}-description">'
+                    '<div class="product-modal-inner">'
+                    '<button class="modal-close" type="button" aria-label="Закрыть">&times;</button>'
+                    '<div class="product-modal-scroll">'
+                    f'{media_html}'
+                    '<div class="product-modal-content">'
+                    f'<h2 class="product-name" id="{modal_id}-title">{product_name}</h2>'
+                    f'<p class="product-modal-description" id="{modal_id}-description">{_escape(description)}</p>'
+                    f'<div class="product-purchase">{price_html}{variants_html}'
+                    '<div class="product-footer">'
+                    f'<span class="{stock_class}">{stock_text}</span>'
+                    f'{_contact_element(contact_url)}'
+                    '</div></div></div></div></div></dialog>'
+                )
             product_cards.append(
                 '<article class="product-card">'
                 f'{media_html}'
                 '<div class="product-body">'
                 f'<h3 class="product-name">{product_name}</h3>'
-                f'{description_html}{price_html}{variants_html}'
+                f'{description_html}<div class="product-purchase">{price_html}{variants_html}'
                 '<div class="product-footer">'
                 f'<span class="{stock_class}">{stock_text}</span>'
                 f'{_contact_element(contact_url)}'
-                '</div></div></article>'
+                f'</div></div></div></article>{modal_html}'
             )
 
-        products_html = (
-            f'<div class="product-grid">{"".join(product_cards)}</div>'
-            if product_cards
-            else '<p class="empty-message">В этой категории пока нет доступных товаров.</p>'
-        )
+        if not product_cards:
+            continue
+        products_html = f'<div class="product-grid">{"".join(product_cards)}</div>'
         category_sections.append(
             f'<section class="category-section" id="category-{_escape(category["id"])}">'
             f'<h2 class="category-title">{_escape(category["name"])}</h2>'
@@ -603,6 +813,7 @@ def render_catalog_page(categories, brand_name=BRAND_NAME, currency_symbol=CURRE
     </div>
   </header>
   <main class="shop-main">{catalog_html}</main>
+  {PAGE_SCRIPT}
 </body>
 </html>"""
 
