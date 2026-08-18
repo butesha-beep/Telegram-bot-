@@ -93,6 +93,7 @@ Required env:
 - `BOT_TOKEN`
 - `ADMIN_PASSWORD`
 - `ADMIN_SESSION_SECRET`
+- `CSRF_SECRET`
 - `ADMIN_ID`
 - `TELEGRAM_CHANNEL_ID`
 
@@ -103,6 +104,7 @@ BOT_TOKEN=
 DATABASE_URL=
 ADMIN_PASSWORD=
 ADMIN_SESSION_SECRET=
+CSRF_SECRET=
 ADMIN_ID=
 TELEGRAM_CHANNEL_ID=
 ```
@@ -131,7 +133,11 @@ Examples:
 
 1. Choose a strong `ADMIN_PASSWORD`.
 2. Generate a long random `ADMIN_SESSION_SECRET`.
-3. Set `ADMIN_ID` only when Telegram actions are explicitly enabled. It is
+3. Generate a separate high-entropy `CSRF_SECRET` of at least 32 characters.
+   Do not reuse an admin password, session secret, bot token, or preview-gate
+   password. Preview and production startup fail closed when it is absent or
+   invalid.
+4. Set `ADMIN_ID` only when Telegram actions are explicitly enabled. It is
    read only from the process environment; `config.json.admin_id` is not a
    recipient fallback.
 
@@ -153,6 +159,31 @@ Why:
 - No automatic initialization or catalog seed exists.
 - `RUN_DB_INIT` and `RUN_DB_SEED` do not enable writable startup behavior.
 - No writable maintenance command is currently exposed.
+
+### Web session security schema
+
+Admin and master authentication now use shared PostgreSQL-backed session state.
+The database must contain compatible `web_sessions` and
+`consumed_login_nonces` tables, including the required constraints and indexes,
+before either administrative interface is considered ready. Raw session
+credentials and pre-authentication nonces are never stored; only
+domain-separated cryptographic hashes are persisted. A successful re-login
+revokes the previous role/account session, and POST logout revokes the exact
+current session before its browser cookie is deleted.
+
+Ordinary startup only checks this schema in a read-only transaction. It does
+not create or alter these tables. Provisioning them requires a separately
+authorized schema-maintenance step; this repository does not currently expose
+such a runtime command.
+
+### CSRF form behavior
+
+Ordinary URL-encoded admin forms submit one hidden CSRF token. JSON requests
+and multipart uploads require the same token in the `X-CSRF-Token` header.
+The order-weighing photo form uses same-origin JavaScript to add that header
+before the multipart body is parsed. With JavaScript disabled, the rendered
+`noscript` fallback still permits a URL-encoded weight-only submission; photo
+upload is intentionally unavailable in that fallback.
 
 ## Clean DB Launch
 

@@ -6,6 +6,11 @@ from unittest.mock import patch
 
 import psycopg2
 
+
+os.environ.setdefault(
+    "DATABASE_URL", "postgresql://unit-test.invalid/admin-crud-import"
+)
+
 import admin_app
 import db_schema
 import storefront

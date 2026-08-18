@@ -20,7 +20,7 @@ class DashboardCursor:
         self.query = query
 
     def fetchone(self):
-        if "COALESCE(SUM(CASE WHEN status = 'pending'" in self.query:
+        if "COALESCE(SUM(CASE WHEN payment_status = 'unpaid' AND payment_method IS NULL" in self.query:
             return (10, 1, 1, 1, 1, 1, 1, 4, 0, 2, 100, 10, 40)
         return (0,)
 

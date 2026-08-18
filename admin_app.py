@@ -15,7 +15,9 @@ import secrets
 import time
 import urllib.parse
 import urllib.request
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 import psycopg2
 
@@ -24,6 +26,10 @@ try:
         DATABASE_URL,
         catalog_schema_is_compatible,
         get_db_connection,
+        ORDER_PAYMENT_STATUS_VALUES,
+        ORDER_FULFILLMENT_STATUS_VALUES,
+        ORDER_SOURCE_VALUES,
+        ORDER_DELIVERY_METHOD_VALUES,
     )
 except ValueError:
     if os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL"):
@@ -36,7 +42,25 @@ except ValueError:
     def catalog_schema_is_compatible():
         return False
 
+    ORDER_PAYMENT_STATUS_VALUES = ("unpaid", "payment_reported", "paid", "refunded")
+    ORDER_FULFILLMENT_STATUS_VALUES = (
+        "new", "confirmed", "picking", "packed",
+        "ready_to_ship", "shipped", "delivered", "cancelled",
+    )
+    ORDER_SOURCE_VALUES = (
+        "telegram", "website", "instagram", "tiktok",
+        "whatsapp", "viber", "in_person", "other",
+    )
+    ORDER_DELIVERY_METHOD_VALUES = ("pickup", "delivery")
+
 from runtime_settings import env_flag_enabled, get_app_env
+from csrf_security import (
+    csrf_token_timestamps,
+    issue_csrf_token,
+    validate_csrf_configuration,
+    validate_csrf_token,
+)
+from order_creation import OrderCreationError, insert_order, price_single_line
 from shop_settings import ADMIN_PANEL_TITLE, CURRENCY_SYMBOL
 from storefront import router as storefront_router, safe_image_url
 
@@ -48,10 +72,33 @@ ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_MAX_AGE = 86400
 MASTER_SESSION_COOKIE = "master_session"
 MASTER_SESSION_MAX_AGE = 86400
+ADMIN_PREAUTH_CSRF_COOKIE = "admin_preauth_csrf"
+MASTER_PREAUTH_CSRF_COOKIE = "master_preauth_csrf"
+PREAUTH_CSRF_MAX_AGE = 600
+AUTHENTICATED_CSRF_MAX_AGE = 3600
+CSRF_FORM_FIELD = "csrf_token"
+CSRF_HEADER = "X-CSRF-Token"
+CSRF_TOKEN_MAX_LENGTH = 256
+URLENCODED_BODY_MAX_LENGTH = 262144
+URLENCODED_FORM_MAX_FIELDS = 128
+UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_CURRENT_REQUEST = ContextVar("admin_current_request", default=None)
+SESSION_ACCOUNT_KEY = "primary"
+SESSION_CREDENTIAL_PREFIX = "ws1."
+SESSION_CREDENTIAL_RANDOM_LENGTH = 64
+SESSION_CREDENTIAL_PATTERN = re.compile(r"ws1\.[A-Za-z0-9_-]{64}")
+PREAUTH_NONCE_PREFIX = "pn1."
+PREAUTH_NONCE_RANDOM_LENGTH = 43
+PREAUTH_NONCE_PATTERN = re.compile(r"pn1\.[A-Za-z0-9_-]{43}")
+SECURITY_CLEANUP_BATCH_SIZE = 100
 PREVIEW_GATE_REALM = "Deal Market Preview"
 LOW_STOCK_SYNC_FAILED = "low_stock_sync_failed"
 ORDER_NOTIFICATION_FAILED = "order_notification_failed"
-ORDER_STATUS_UPDATE_FAILED = "order_status_update_failed"
+ORDER_PAYMENT_UPDATE_FAILED = "order_payment_update_failed"
+ORDER_FULFILLMENT_UPDATE_FAILED = "order_fulfillment_update_failed"
+MANUAL_ORDER_CREATE_FAILED = "manual_order_create_failed"
+MANUAL_ORDER_FORM_FAILED = "manual_order_form_failed"
+PICKING_WORKSPACE_LOAD_FAILED = "picking_workspace_load_failed"
 WEIGHING_UPDATE_FAILED = "weighing_update_failed"
 WEIGHING_NOTIFICATION_FAILED = "weighing_notification_failed"
 ORDER_NOTE_UPDATE_FAILED = "order_note_update_failed"
@@ -61,10 +108,87 @@ ADMIN_ERROR_LOG_WRITE_FAILED = "admin_error_log_write_failed"
 TELEGRAM_OPERATION_FAILED = "telegram_operation_failed"
 INTERNAL_OPERATION_FAILED = "internal_operation_failed"
 DASHBOARD_LOAD_FAILED = "dashboard_load_failed"
+WEB_SESSION_LOOKUP_FAILED = "web_session_lookup_failed"
+WEB_SESSION_CREATE_FAILED = "web_session_create_failed"
+WEB_SESSION_REVOKE_FAILED = "web_session_revoke_failed"
+
+SECURITY_SESSION_CLEANUP_SQL = """
+    WITH expired AS (
+        SELECT id
+        FROM web_sessions
+        WHERE expires_at <= CURRENT_TIMESTAMP
+        ORDER BY expires_at, id
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+    )
+    DELETE FROM web_sessions
+    WHERE id IN (SELECT id FROM expired)
+"""
+SECURITY_NONCE_CLEANUP_SQL = """
+    WITH expired AS (
+        SELECT id
+        FROM consumed_login_nonces
+        WHERE expires_at <= CURRENT_TIMESTAMP
+        ORDER BY expires_at, id
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+    )
+    DELETE FROM consumed_login_nonces
+    WHERE id IN (SELECT id FROM expired)
+"""
+SECURITY_SESSION_CREATE_SQL = """
+    WITH consumed AS (
+        INSERT INTO consumed_login_nonces (
+            role, nonce_hash, issued_at, expires_at, consumed_at
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (role, nonce_hash) DO NOTHING
+        RETURNING id
+    ), revoked AS (
+        UPDATE web_sessions
+        SET revoked_at = CURRENT_TIMESTAMP
+        WHERE role = %s
+          AND account_key = %s
+          AND revoked_at IS NULL
+          AND EXISTS (SELECT 1 FROM consumed)
+        RETURNING id
+    )
+    INSERT INTO web_sessions (
+        role, account_key, token_hash, issued_at, expires_at
+    )
+    SELECT %s, %s, %s, %s, %s
+    FROM consumed
+    WHERE (SELECT COUNT(*) FROM revoked) >= 0
+    RETURNING id
+"""
+SECURITY_SESSION_LOOKUP_SQL = """
+    SELECT id
+    FROM web_sessions
+    WHERE role = %s
+      AND account_key = %s
+      AND token_hash = %s
+      AND revoked_at IS NULL
+      AND expires_at > CURRENT_TIMESTAMP
+    LIMIT 1
+"""
+SECURITY_SESSION_REVOKE_SQL = """
+    UPDATE web_sessions
+    SET revoked_at = CURRENT_TIMESTAMP
+    WHERE role = %s
+      AND account_key = %s
+      AND token_hash = %s
+      AND revoked_at IS NULL
+      AND expires_at > CURRENT_TIMESTAMP
+    RETURNING id
+"""
 ADMIN_OPERATION_ERROR_CODES = frozenset({
     LOW_STOCK_SYNC_FAILED,
     ORDER_NOTIFICATION_FAILED,
-    ORDER_STATUS_UPDATE_FAILED,
+    ORDER_PAYMENT_UPDATE_FAILED,
+    ORDER_FULFILLMENT_UPDATE_FAILED,
+    MANUAL_ORDER_CREATE_FAILED,
+    MANUAL_ORDER_FORM_FAILED,
+    PICKING_WORKSPACE_LOAD_FAILED,
     WEIGHING_UPDATE_FAILED,
     WEIGHING_NOTIFICATION_FAILED,
     ORDER_NOTE_UPDATE_FAILED,
@@ -84,6 +208,8 @@ ADMIN_OPERATION_ERROR_CODES = frozenset({
     INTERNAL_OPERATION_FAILED,
     "master_dashboard_load_failed",
     "master_shop_detail_load_failed",
+    "master_shop_seed_failed",
+    "master_snapshot_failed",
     "error_log_list_failed",
     "error_log_detail_failed",
     "order_list_failed",
@@ -101,6 +227,7 @@ async def startup_db_init():
     global DATABASE_READY
     DATABASE_READY = False
     validate_preview_gate_configuration()
+    validate_csrf_configuration()
     if not DATABASE_URL:
         refresh_database_readiness()
         logger.error("Database is not configured")
@@ -169,6 +296,17 @@ def admin_css():
   .admin-links { display: flex; flex-wrap: wrap; gap: 14px; }
   .admin-links a { color: var(--muted); font-size: 14px; }
   .admin-links a:hover { color: var(--accent); }
+  .nav-logout-form { display: inline-flex; margin: 0; padding: 0; }
+  .nav-logout-button {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 400;
+  }
+  .nav-logout-button:hover { color: var(--accent); }
   .admin-container {
     max-width: 1180px;
     margin: 0 auto;
@@ -342,6 +480,17 @@ def admin_css():
     border-radius: 8px;
     background: var(--panel-soft);
   }
+  .picking-queue {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .picking-order-card { margin: 0; }
+  .picking-items {
+    margin: 14px 0;
+    padding-left: 18px;
+  }
+  .picking-items li { margin-bottom: 6px; }
   .detail-field strong {
     display: block;
     margin-bottom: 6px;
@@ -586,11 +735,64 @@ def admin_css():
 """
 
 
+def _csrf_hidden_input(role):
+    request = _CURRENT_REQUEST.get()
+    token = authenticated_csrf_token(request, role) if request is not None else ""
+    return (
+        f'<input type="hidden" name="{CSRF_FORM_FIELD}" '
+        f'value="{html.escape(token, quote=True)}">'
+    )
+
+
+def _protect_post_forms(page, role):
+    hidden_input = _csrf_hidden_input(role)
+    post_form = re.compile(
+        r"(<form\b(?=[^>]*\bmethod\s*=\s*(['\"])post\2)[^>]*>)",
+        re.IGNORECASE,
+    )
+    return post_form.sub(lambda match: match.group(1) + hidden_input, page)
+
+
+def csrf_multipart_script():
+    return f"""
+<script>
+document.addEventListener("submit", async function (event) {{
+  const form = event.target.closest('form[data-csrf-multipart="header"]');
+  if (!form) return;
+  event.preventDefault();
+  const tokenInput = form.querySelector('input[name="{CSRF_FORM_FIELD}"]');
+  if (!tokenInput || !tokenInput.value) return;
+  const submitButton = form.querySelector('button[type="submit"]');
+  if (submitButton) submitButton.disabled = true;
+  try {{
+    const response = await fetch(form.action, {{
+      method: "POST",
+      body: new FormData(form),
+      credentials: "same-origin",
+      headers: {{ "{CSRF_HEADER}": tokenInput.value }}
+    }});
+    if (response.redirected) {{
+      window.location.assign(response.url);
+      return;
+    }}
+    const page = await response.text();
+    document.open();
+    document.write(page);
+    document.close();
+  }} catch (_error) {{
+    window.alert("Request failed. Please try again.");
+    if (submitButton) submitButton.disabled = false;
+  }}
+}});
+</script>
+"""
+
+
 def admin_layout(title, content, refresh_seconds=None):
     refresh_meta = ""
     if refresh_seconds:
         refresh_meta = f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
-    return f"""<!doctype html>
+    page = f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -606,20 +808,25 @@ def admin_layout(title, content, refresh_seconds=None):
         <a class="admin-brand" href="/admin">🏠 Главная</a>
         <div class="admin-links">
           <a href="/orders">📦 Заказы</a>
+          <a href="/picking">📦 Сборка</a>
           <a href="/products">🛒 Товары</a>
           <a href="/categories">🗂 Категории</a>
           <a href="/clients">👥 Клиенты</a>
           <a href="/broadcasts">📨 Рассылка</a>
           <a href="/channel">📢 Канал</a>
           <a href="/logs">🧾 Логи</a>
-          <a href="/logout">Выйти</a>
+          <form class="nav-logout-form" method="post" action="/logout">
+            <button class="nav-logout-button" type="submit">Выйти</button>
+          </form>
         </div>
       </nav>
     </header>
     <main class="admin-container">{content}</main>
   </div>
+  {csrf_multipart_script()}
 </body>
 </html>"""
+    return _protect_post_forms(page, "admin")
 
 
 def admin_error_page(title, message):
@@ -637,7 +844,7 @@ def master_layout(title, content, refresh_seconds=None):
     refresh_meta = ""
     if refresh_seconds:
         refresh_meta = f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
-    return f"""<!doctype html>
+    page = f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -653,7 +860,9 @@ def master_layout(title, content, refresh_seconds=None):
         <a class="admin-brand" href="/master">Master Admin</a>
         <div class="admin-links">
           <a href="/master">Shops</a>
-          <a href="/master/logout">Logout</a>
+          <form class="nav-logout-form" method="post" action="/master/logout">
+            <button class="nav-logout-button" type="submit">Logout</button>
+          </form>
         </div>
       </nav>
     </header>
@@ -661,6 +870,7 @@ def master_layout(title, content, refresh_seconds=None):
   </div>
 </body>
 </html>"""
+    return _protect_post_forms(page, "master")
 
 
 def master_error_page(title, message):
@@ -847,81 +1057,463 @@ def master_auth_configured():
     return bool(os.getenv("MASTER_ADMIN_PASSWORD") and os.getenv("MASTER_ADMIN_SESSION_SECRET"))
 
 
+def _session_secret_for_role(role):
+    if role == "admin":
+        return os.getenv("ADMIN_SESSION_SECRET", "")
+    if role == "master":
+        return os.getenv("MASTER_ADMIN_SESSION_SECRET", "")
+    return ""
+
+
+def _security_value_hash(kind, role, value):
+    secret = _session_secret_for_role(role)
+    if kind not in {"session", "preauth-nonce"} or not secret or not value:
+        raise ValueError("Invalid security value")
+    message = (
+        b"dealmarket:web-security:v1\0"
+        + kind.encode("ascii")
+        + b"\0"
+        + role.encode("ascii")
+        + b"\0"
+        + value.encode("ascii")
+    )
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).digest()
+
+
+def _new_session_credential():
+    random_value = secrets.token_urlsafe(48)
+    if len(random_value) != SESSION_CREDENTIAL_RANDOM_LENGTH:
+        raise RuntimeError("Session generation failed")
+    return SESSION_CREDENTIAL_PREFIX + random_value
+
+
 def sign_admin_session():
-    secret = os.getenv("ADMIN_SESSION_SECRET", "")
-    expires_at = int(time.time()) + ADMIN_SESSION_MAX_AGE
-    payload = f"admin:{expires_at}:{secrets.token_urlsafe(16)}"
-    signature = hmac.new(
-        secret.encode("utf-8"),
-        payload.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    return f"{payload}:{signature}"
+    return _new_session_credential()
 
 
 def sign_master_session():
-    secret = os.getenv("MASTER_ADMIN_SESSION_SECRET", "")
-    expires_at = int(time.time()) + MASTER_SESSION_MAX_AGE
-    payload = f"master:{expires_at}:{secrets.token_urlsafe(16)}"
-    signature = hmac.new(
-        secret.encode("utf-8"),
-        payload.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    return f"{payload}:{signature}"
+    return _new_session_credential()
+
+
+def session_credential_is_well_formed(value):
+    return isinstance(value, str) and bool(SESSION_CREDENTIAL_PATTERN.fullmatch(value))
+
+
+def server_session_is_active(role, value, connection_factory=None):
+    if role not in {"admin", "master"} or not session_credential_is_well_formed(value):
+        return False
+    if not _session_secret_for_role(role):
+        return False
+    if connection_factory is None:
+        connection_factory = get_db_connection
+    connection = None
+    cursor = None
+    try:
+        token_hash = _security_value_hash("session", role, value)
+        connection = connection_factory()
+        connection.set_session(readonly=True, autocommit=False)
+        cursor = connection.cursor()
+        cursor.execute("BEGIN TRANSACTION READ ONLY")
+        cursor.execute("SET LOCAL statement_timeout = '3000ms'")
+        cursor.execute("SET LOCAL lock_timeout = '1000ms'")
+        cursor.execute(
+            SECURITY_SESSION_LOOKUP_SQL,
+            (role, SESSION_ACCOUNT_KEY, token_hash),
+        )
+        return cursor.fetchone() is not None
+    except Exception:
+        logger.error(WEB_SESSION_LOOKUP_FAILED)
+        return False
+    finally:
+        if connection is not None:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def verify_admin_session(value):
-    if not value or not admin_auth_configured():
-        return False
-    secret = os.getenv("ADMIN_SESSION_SECRET", "")
-    try:
-        payload, signature = value.rsplit(":", 1)
-        expected = hmac.new(
-            secret.encode("utf-8"),
-            payload.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            return False
-        parts = payload.split(":")
-        if len(parts) < 3 or parts[0] != "admin":
-            return False
-        return int(parts[1]) >= int(time.time())
-    except Exception:
-        return False
+    return admin_auth_configured() and server_session_is_active("admin", value)
 
 
 def verify_master_session(value):
-    if not value or not master_auth_configured():
-        return False
-    secret = os.getenv("MASTER_ADMIN_SESSION_SECRET", "")
-    try:
-        payload, signature = value.rsplit(":", 1)
-        expected = hmac.new(
-            secret.encode("utf-8"),
-            payload.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            return False
-        parts = payload.split(":")
-        if len(parts) < 3 or parts[0] != "master":
-            return False
-        return int(parts[1]) >= int(time.time())
-    except Exception:
-        return False
+    return master_auth_configured() and server_session_is_active("master", value)
+
+
+def _request_session_value(request, role):
+    checked_name = f"_{role}_session_checked"
+    value_name = f"_{role}_session_value"
+    if getattr(request.state, checked_name, False):
+        return getattr(request.state, value_name, "")
+    cookie_name = ADMIN_SESSION_COOKIE if role == "admin" else MASTER_SESSION_COOKIE
+    value = request.cookies.get(cookie_name, "")
+    active = server_session_is_active(role, value)
+    setattr(request.state, checked_name, True)
+    setattr(request.state, value_name, value if active else "")
+    return value if active else ""
 
 
 def is_admin_authenticated(request):
-    return verify_admin_session(request.cookies.get(ADMIN_SESSION_COOKIE))
+    return bool(admin_auth_configured() and _request_session_value(request, "admin"))
 
 
 def is_master_authenticated(request):
-    return verify_master_session(request.cookies.get(MASTER_SESSION_COOKIE))
+    return bool(master_auth_configured() and _request_session_value(request, "master"))
 
 
-def login_page(message=""):
+def csrf_cookie_secure():
+    return get_app_env() in {"preview", "production"}
+
+
+def _csrf_session_value(request, role):
+    if role not in {"admin", "master"}:
+        return ""
+    return _request_session_value(request, role)
+
+
+def create_authenticated_session(
+    role,
+    preauth_nonce,
+    preauth_issued_at,
+    preauth_expires_at,
+    connection_factory=None,
+    current_time=None,
+):
+    now_timestamp = int(time.time() if current_time is None else current_time)
+    if role not in {"admin", "master"}:
+        return "failed", None
+    if not isinstance(preauth_nonce, str) or not PREAUTH_NONCE_PATTERN.fullmatch(
+        preauth_nonce
+    ):
+        return "failed", None
+    if not (
+        isinstance(preauth_issued_at, int)
+        and isinstance(preauth_expires_at, int)
+        and preauth_issued_at <= now_timestamp < preauth_expires_at
+        and preauth_expires_at - preauth_issued_at <= PREAUTH_CSRF_MAX_AGE
+    ):
+        return "failed", None
+    if connection_factory is None:
+        connection_factory = get_db_connection
+
+    connection = None
+    cursor = None
+    try:
+        credential = _new_session_credential()
+        nonce_hash = _security_value_hash("preauth-nonce", role, preauth_nonce)
+        session_hash = _security_value_hash("session", role, credential)
+        preauth_issued = datetime.fromtimestamp(preauth_issued_at, timezone.utc)
+        preauth_expires = datetime.fromtimestamp(preauth_expires_at, timezone.utc)
+        session_issued = datetime.fromtimestamp(now_timestamp, timezone.utc)
+        session_max_age = (
+            ADMIN_SESSION_MAX_AGE if role == "admin" else MASTER_SESSION_MAX_AGE
+        )
+        session_expires = session_issued + timedelta(seconds=session_max_age)
+
+        connection = connection_factory()
+        connection.set_session(readonly=False, autocommit=False)
+        cursor = connection.cursor()
+        cursor.execute("SET LOCAL statement_timeout = '3000ms'")
+        cursor.execute("SET LOCAL lock_timeout = '1000ms'")
+        cursor.execute(
+            SECURITY_SESSION_CLEANUP_SQL,
+            (SECURITY_CLEANUP_BATCH_SIZE,),
+        )
+        cursor.execute(
+            SECURITY_NONCE_CLEANUP_SQL,
+            (SECURITY_CLEANUP_BATCH_SIZE,),
+        )
+        cursor.execute(
+            SECURITY_SESSION_CREATE_SQL,
+            (
+                role,
+                nonce_hash,
+                preauth_issued,
+                preauth_expires,
+                session_issued,
+                role,
+                SESSION_ACCOUNT_KEY,
+                role,
+                SESSION_ACCOUNT_KEY,
+                session_hash,
+                session_issued,
+                session_expires,
+            ),
+        )
+        if cursor.fetchone() is None:
+            connection.rollback()
+            return "replayed", None
+        connection.commit()
+        return "created", credential
+    except Exception:
+        if connection is not None:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+        logger.error(WEB_SESSION_CREATE_FAILED)
+        return "failed", None
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+def revoke_authenticated_session(role, credential, connection_factory=None):
+    if role not in {"admin", "master"} or not session_credential_is_well_formed(
+        credential
+    ):
+        return False
+    if connection_factory is None:
+        connection_factory = get_db_connection
+    connection = None
+    cursor = None
+    try:
+        token_hash = _security_value_hash("session", role, credential)
+        connection = connection_factory()
+        connection.set_session(readonly=False, autocommit=False)
+        cursor = connection.cursor()
+        cursor.execute("SET LOCAL statement_timeout = '3000ms'")
+        cursor.execute("SET LOCAL lock_timeout = '1000ms'")
+        cursor.execute(
+            SECURITY_SESSION_REVOKE_SQL,
+            (role, SESSION_ACCOUNT_KEY, token_hash),
+        )
+        if cursor.fetchone() is None:
+            connection.rollback()
+            return False
+        connection.commit()
+        return True
+    except Exception:
+        if connection is not None:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+        logger.error(WEB_SESSION_REVOKE_FAILED)
+        return False
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+def authenticated_csrf_token(request, role):
+    if request is None:
+        return ""
+    session_value = _csrf_session_value(request, role)
+    if not session_value:
+        return ""
+    try:
+        return issue_csrf_token(
+            f"authenticated:{role}",
+            session_value,
+            AUTHENTICATED_CSRF_MAX_AGE,
+        )
+    except (RuntimeError, ValueError):
+        return ""
+
+
+def _header_csrf_token(request):
+    values = request.headers.getlist(CSRF_HEADER)
+    if len(values) != 1:
+        return ""
+    token = values[0]
+    if not isinstance(token, str) or not 1 <= len(token) <= CSRF_TOKEN_MAX_LENGTH:
+        return ""
+    return token
+
+
+async def _limited_urlencoded_body(request):
+    try:
+        if hasattr(request, "_body"):
+            body = request._body
+            return body if len(body) <= URLENCODED_BODY_MAX_LENGTH else None
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            declared_length = int(content_length)
+            if declared_length < 0 or declared_length > URLENCODED_BODY_MAX_LENGTH:
+                return None
+        body_parts = []
+        total_length = 0
+        async for chunk in request.stream():
+            total_length += len(chunk)
+            if total_length > URLENCODED_BODY_MAX_LENGTH:
+                return None
+            body_parts.append(chunk)
+        body = b"".join(body_parts)
+        request._body = body
+        return body
+    except (RuntimeError, TypeError, ValueError):
+        return None
+
+
+async def _submitted_csrf_token(request):
+    content_type = (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    )
+    if content_type in {"application/json", "multipart/form-data"}:
+        return _header_csrf_token(request)
+    if content_type != "application/x-www-form-urlencoded":
+        return ""
+    body = await _limited_urlencoded_body(request)
+    if body is None:
+        return ""
+    try:
+        parsed = urllib.parse.parse_qs(
+            body.decode("utf-8"),
+            keep_blank_values=True,
+            strict_parsing=False,
+            max_num_fields=URLENCODED_FORM_MAX_FIELDS,
+        )
+    except (UnicodeDecodeError, ValueError):
+        return ""
+    values = parsed.get(CSRF_FORM_FIELD, [])
+    if len(values) != 1:
+        return ""
+    token = values[0]
+    if not isinstance(token, str) or not 1 <= len(token) <= CSRF_TOKEN_MAX_LENGTH:
+        return ""
+    return token
+
+
+def _reject_csrf():
+    raise HTTPException(status_code=403, detail="Forbidden")
+
+
+async def _require_authenticated_csrf(request, role):
+    validation_key = f"authenticated:{role}"
+    if getattr(request.state, "csrf_validation_key", "") == validation_key:
+        return
+    session_value = _csrf_session_value(request, role)
+    if not session_value:
+        _reject_csrf()
+    token = await _submitted_csrf_token(request)
+    if not validate_csrf_token(
+        token,
+        f"authenticated:{role}",
+        session_value,
+        AUTHENTICATED_CSRF_MAX_AGE,
+    ):
+        _reject_csrf()
+    request.state.csrf_validation_key = validation_key
+
+
+async def require_admin_csrf(request: Request):
+    await _require_authenticated_csrf(request, "admin")
+
+
+async def require_master_csrf(request: Request):
+    await _require_authenticated_csrf(request, "master")
+
+
+def _preauth_cookie_name(role):
+    if role == "admin":
+        return ADMIN_PREAUTH_CSRF_COOKIE
+    if role == "master":
+        return MASTER_PREAUTH_CSRF_COOKIE
+    raise ValueError("Invalid pre-authentication flow")
+
+
+def _preauth_cookie_path(role):
+    return "/login" if role == "admin" else "/master/login"
+
+
+def _new_preauth_token(role):
+    random_value = secrets.token_urlsafe(32)
+    if len(random_value) != PREAUTH_NONCE_RANDOM_LENGTH:
+        raise RuntimeError("Pre-authentication generation failed")
+    nonce = PREAUTH_NONCE_PREFIX + random_value
+    token = issue_csrf_token(
+        f"preauth:{role}", nonce, PREAUTH_CSRF_MAX_AGE
+    )
+    return nonce, token
+
+
+async def _require_preauth_csrf(request, role):
+    validation_key = f"preauth:{role}"
+    if getattr(request.state, "csrf_validation_key", "") == validation_key:
+        return
+    nonce = request.cookies.get(_preauth_cookie_name(role), "")
+    if not isinstance(nonce, str) or not PREAUTH_NONCE_PATTERN.fullmatch(nonce):
+        _reject_csrf()
+    token = await _submitted_csrf_token(request)
+    if not validate_csrf_token(
+        token,
+        f"preauth:{role}",
+        nonce,
+        PREAUTH_CSRF_MAX_AGE,
+    ):
+        _reject_csrf()
+    timestamps = csrf_token_timestamps(token)
+    if timestamps is None:
+        _reject_csrf()
+    request.state.preauth_role = role
+    request.state.preauth_nonce = nonce
+    request.state.preauth_issued_at = timestamps[0]
+    request.state.preauth_expires_at = timestamps[1]
+    request.state.csrf_validation_key = validation_key
+
+
+async def require_admin_login_csrf(request: Request):
+    await _require_preauth_csrf(request, "admin")
+
+
+async def require_master_login_csrf(request: Request):
+    await _require_preauth_csrf(request, "master")
+
+
+def _preauth_login_response(role, message=""):
+    nonce, token = _new_preauth_token(role)
+    page = login_page(message, token) if role == "admin" else master_login_page(message, token)
+    response = HTMLResponse(page)
+    response.set_cookie(
+        _preauth_cookie_name(role),
+        nonce,
+        max_age=PREAUTH_CSRF_MAX_AGE,
+        httponly=True,
+        secure=csrf_cookie_secure(),
+        samesite="strict",
+        path=_preauth_cookie_path(role),
+    )
+    return response
+
+
+def _delete_preauth_cookie(response, role):
+    response.delete_cookie(
+        _preauth_cookie_name(role),
+        path=_preauth_cookie_path(role),
+        secure=csrf_cookie_secure(),
+        httponly=True,
+        samesite="strict",
+    )
+
+
+def login_page(message="", csrf_token=""):
     message_html = f"<p>{html.escape(message)}</p>" if message else ""
     return f"""<!doctype html>
 <html>
@@ -937,6 +1529,7 @@ def login_page(message=""):
       <h1>Вход в админ-панель</h1>
       {message_html}
       <form class="admin-form" method="post" action="/login">
+        <input type="hidden" name="{CSRF_FORM_FIELD}" value="{html.escape(csrf_token, quote=True)}">
         <label>Пароль
           <input type="password" name="password" autocomplete="current-password" required>
         </label>
@@ -950,7 +1543,7 @@ def login_page(message=""):
 </html>"""
 
 
-def master_login_page(message=""):
+def master_login_page(message="", csrf_token=""):
     message_html = f"<p>{html.escape(message)}</p>" if message else ""
     return f"""<!doctype html>
 <html>
@@ -966,6 +1559,7 @@ def master_login_page(message=""):
       <h1>Master Admin Login</h1>
       {message_html}
       <form class="admin-form" method="post" action="/master/login">
+        <input type="hidden" name="{CSRF_FORM_FIELD}" value="{html.escape(csrf_token, quote=True)}">
         <label>Password
           <input type="password" name="password" autocomplete="current-password" required>
         </label>
@@ -990,8 +1584,27 @@ def database_service_unavailable():
     )
 
 
+async def csrf_rejection_before_dispatch(request, role, preauth=False):
+    try:
+        if preauth:
+            await _require_preauth_csrf(request, role)
+        else:
+            await _require_authenticated_csrf(request, role)
+    except HTTPException:
+        return JSONResponse({"detail": "Forbidden"}, status_code=403)
+    return None
+
+
 @app.middleware("http")
 async def require_admin_login(request: Request, call_next):
+    context_token = _CURRENT_REQUEST.set(request)
+    try:
+        return await _apply_request_access_policy(request, call_next)
+    finally:
+        _CURRENT_REQUEST.reset(context_token)
+
+
+async def _apply_request_access_policy(request, call_next):
     path = request.url.path
     if path not in {"/health", "/ready"}:
         try:
@@ -1003,10 +1616,26 @@ async def require_admin_login(request: Request, call_next):
         if gate_required and not preview_gate_authenticated(request):
             return preview_gate_unauthorized()
 
+    if request.method in {"GET", "HEAD"} and path in {"/logout", "/master/logout"}:
+        return await call_next(request)
+
     if path.startswith("/master") and not master_admin_enabled():
         return generic_not_found()
     if telegram_write_route_disabled(request):
         return generic_not_found()
+
+    if request.method in UNSAFE_HTTP_METHODS and path == "/login":
+        rejection = await csrf_rejection_before_dispatch(
+            request, "admin", preauth=True
+        )
+        if rejection is not None:
+            return rejection
+    if request.method in UNSAFE_HTTP_METHODS and path == "/master/login":
+        rejection = await csrf_rejection_before_dispatch(
+            request, "master", preauth=True
+        )
+        if rejection is not None:
+            return rejection
 
     if path in {"/", "/shop", "/shop/"}:
         return await call_next(request)
@@ -1018,6 +1647,10 @@ async def require_admin_login(request: Request, call_next):
         if is_master_authenticated(request):
             if path != "/master/logout" and not DATABASE_READY:
                 return database_service_unavailable()
+            if request.method in UNSAFE_HTTP_METHODS:
+                rejection = await csrf_rejection_before_dispatch(request, "master")
+                if rejection is not None:
+                    return rejection
             return await call_next(request)
         return RedirectResponse("/master/login", status_code=303)
 
@@ -1027,6 +1660,10 @@ async def require_admin_login(request: Request, call_next):
     if is_admin_authenticated(request):
         if path != "/logout" and not DATABASE_READY:
             return database_service_unavailable()
+        if request.method in UNSAFE_HTTP_METHODS:
+            rejection = await csrf_rejection_before_dispatch(request, "admin")
+            if rejection is not None:
+                return rejection
         return await call_next(request)
     return RedirectResponse("/login", status_code=303)
 
@@ -1034,68 +1671,120 @@ async def require_admin_login(request: Request, call_next):
 @app.get("/login", response_class=HTMLResponse)
 async def login_form():
     if not admin_auth_configured():
-        return login_page("Admin auth is not configured.")
-    return login_page()
+        return _preauth_login_response("admin", "Admin auth is not configured.")
+    return _preauth_login_response("admin")
 
 
-@app.post("/login", response_class=HTMLResponse)
-async def login(password: str = Form(...)):
+@app.post(
+    "/login",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_login_csrf)],
+)
+async def login(request: Request, password: str = Form(...)):
     admin_password = os.getenv("ADMIN_PASSWORD", "")
     if not admin_auth_configured():
-        return login_page("Admin auth is not configured.")
+        return _preauth_login_response("admin", "Admin auth is not configured.")
     if not secrets.compare_digest(password, admin_password):
-        return login_page("Неверный пароль.")
+        return _preauth_login_response("admin", "Неверный пароль.")
+
+    result, credential = create_authenticated_session(
+        "admin",
+        getattr(request.state, "preauth_nonce", ""),
+        getattr(request.state, "preauth_issued_at", None),
+        getattr(request.state, "preauth_expires_at", None),
+    )
+    if result == "replayed":
+        return PlainTextResponse("Forbidden", status_code=403)
+    if result != "created" or credential is None:
+        return PlainTextResponse("Service unavailable", status_code=503)
 
     response = RedirectResponse("/admin", status_code=303)
     response.set_cookie(
         ADMIN_SESSION_COOKIE,
-        sign_admin_session(),
+        credential,
         max_age=ADMIN_SESSION_MAX_AGE,
         httponly=True,
         secure=True,
         samesite="lax",
+        path="/",
     )
+    _delete_preauth_cookie(response, "admin")
     return response
 
 
-@app.get("/logout")
-async def logout():
+@app.post("/logout", dependencies=[Depends(require_admin_csrf)])
+async def logout(request: Request):
+    credential = _csrf_session_value(request, "admin")
+    if not credential or not revoke_authenticated_session("admin", credential):
+        return PlainTextResponse("Service unavailable", status_code=503)
     response = RedirectResponse("/login", status_code=303)
-    response.delete_cookie(ADMIN_SESSION_COOKIE)
+    response.delete_cookie(
+        ADMIN_SESSION_COOKIE,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
     return response
 
 
 @app.get("/master/login", response_class=HTMLResponse)
 async def master_login_form():
     if not master_auth_configured():
-        return master_login_page("Master admin auth is not configured.")
-    return master_login_page()
+        return _preauth_login_response("master", "Master admin auth is not configured.")
+    return _preauth_login_response("master")
 
 
-@app.post("/master/login", response_class=HTMLResponse)
-async def master_login(password: str = Form(...)):
+@app.post(
+    "/master/login",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_master_login_csrf)],
+)
+async def master_login(request: Request, password: str = Form(...)):
     master_password = os.getenv("MASTER_ADMIN_PASSWORD", "")
     if not master_auth_configured():
-        return master_login_page("Master admin auth is not configured.")
+        return _preauth_login_response("master", "Master admin auth is not configured.")
     if not secrets.compare_digest(password, master_password):
-        return master_login_page("Invalid password.")
+        return _preauth_login_response("master", "Invalid password.")
+
+    result, credential = create_authenticated_session(
+        "master",
+        getattr(request.state, "preauth_nonce", ""),
+        getattr(request.state, "preauth_issued_at", None),
+        getattr(request.state, "preauth_expires_at", None),
+    )
+    if result == "replayed":
+        return PlainTextResponse("Forbidden", status_code=403)
+    if result != "created" or credential is None:
+        return PlainTextResponse("Service unavailable", status_code=503)
 
     response = RedirectResponse("/master", status_code=303)
     response.set_cookie(
         MASTER_SESSION_COOKIE,
-        sign_master_session(),
+        credential,
         max_age=MASTER_SESSION_MAX_AGE,
         httponly=True,
         secure=True,
         samesite="lax",
+        path="/",
     )
+    _delete_preauth_cookie(response, "master")
     return response
 
 
-@app.get("/master/logout")
-async def master_logout():
+@app.post("/master/logout", dependencies=[Depends(require_master_csrf)])
+async def master_logout(request: Request):
+    credential = _csrf_session_value(request, "master")
+    if not credential or not revoke_authenticated_session("master", credential):
+        return PlainTextResponse("Service unavailable", status_code=503)
     response = RedirectResponse("/master/login", status_code=303)
-    response.delete_cookie(MASTER_SESSION_COOKIE)
+    response.delete_cookie(
+        MASTER_SESSION_COOKIE,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
     return response
 
 
@@ -1129,17 +1818,148 @@ def admin_status_label(status):
     return labels.get(str(status or ""), str(status or "-"))
 
 
-def order_status_actions_for(status):
-    return {
-        "pending": [("cancelled", "Отмена")],
-        "awaiting_payment": [("cancelled", "Отмена")],
-        "payment_reported": [("paid", "Подтвердить оплату"), ("cancelled", "Отмена")],
-        "cash_on_delivery": [("paid", "Оплачено наличными"), ("cancelled", "Отмена")],
-        "paid": [("preparing", "Готовится"), ("done", "Готово"), ("cancelled", "Отмена")],
-        "preparing": [("done", "Готово"), ("cancelled", "Отмена")],
-        "done": [],
-        "cancelled": [],
-    }.get(str(status or ""), [])
+# ---------------------------------------------------------------------------
+# Orders v2 (Checkpoint E): payment_status/fulfillment_status are the sole
+# runtime authority. Transition tables are centralized here so both the
+# /orders/{id}/payment/{action} and /orders/{id}/fulfillment/{action} routes
+# validate against the same source of truth. Legacy orders.status is no
+# longer written or read operationally -- it remains present only as frozen
+# historical data (nullable, no default; existing rows untouched).
+# ---------------------------------------------------------------------------
+
+# Checkpoint F: the practical, already-supported payment methods (matching
+# the exact literal values bot.py's pay_iban/pay_paypal/pay_cash write).
+ORDER_PAYMENT_METHOD_VALUES = ("IBAN", "PayPal", "Cash")
+
+PAYMENT_TRANSITIONS = {
+    "unpaid": {"payment_reported", "paid"},
+    "payment_reported": {"paid"},
+    "paid": {"refunded"},
+    "refunded": set(),
+}
+
+FULFILLMENT_TRANSITIONS = {
+    "new": {"confirmed", "cancelled"},
+    "confirmed": {"picking", "cancelled"},
+    "picking": {"packed", "cancelled"},
+    "packed": {"ready_to_ship", "cancelled"},
+    "ready_to_ship": {"shipped", "cancelled"},
+    "shipped": {"delivered", "cancelled"},
+    "delivered": set(),
+    "cancelled": set(),
+}
+
+PAYMENT_STATUS_LABELS = {
+    "unpaid": "Не оплачен",
+    "payment_reported": "Оплата заявлена",
+    "paid": "Оплачен",
+    "refunded": "Возврат оформлен",
+}
+
+FULFILLMENT_STATUS_LABELS = {
+    "new": "Новый",
+    "confirmed": "Подтверждён",
+    "picking": "Сборка",
+    "packed": "Упакован",
+    "ready_to_ship": "Готов к отправке",
+    "shipped": "Отправлен",
+    "delivered": "Доставлен",
+    "cancelled": "Отменён",
+}
+
+ORDER_SOURCE_LABELS = {
+    "telegram": "Telegram",
+    "website": "Сайт",
+    "instagram": "Instagram",
+    "tiktok": "TikTok",
+    "whatsapp": "WhatsApp",
+    "viber": "Viber",
+    "in_person": "Лично",
+    "other": "Другое",
+}
+
+
+def payment_status_label(payment_status):
+    return PAYMENT_STATUS_LABELS.get(str(payment_status or ""), str(payment_status or "-"))
+
+
+def fulfillment_status_label(fulfillment_status):
+    return FULFILLMENT_STATUS_LABELS.get(str(fulfillment_status or ""), str(fulfillment_status or "-"))
+
+
+def payment_status_badge(payment_status):
+    status_key = str(payment_status or "")
+    status_class = {
+        "unpaid": "warning",
+        "payment_reported": "info",
+        "paid": "success",
+        "refunded": "danger",
+    }.get(status_key, "neutral")
+    return f"<span class='status {status_class}'>{html.escape(payment_status_label(status_key))}</span>"
+
+
+def fulfillment_status_badge(fulfillment_status):
+    status_key = str(fulfillment_status or "")
+    status_class = {
+        "new": "warning",
+        "confirmed": "info",
+        "picking": "info",
+        "packed": "info",
+        "ready_to_ship": "info",
+        "shipped": "info",
+        "delivered": "success",
+        "cancelled": "danger",
+    }.get(status_key, "neutral")
+    return f"<span class='status {status_class}'>{html.escape(fulfillment_status_label(status_key))}</span>"
+
+
+def order_source_badge(source):
+    label = ORDER_SOURCE_LABELS.get(str(source or ""), str(source or "-"))
+    return f"<span class='status neutral'>{html.escape(label)}</span>"
+
+
+def payment_actions_for(payment_status):
+    labels = {
+        "payment_reported": "Оплата заявлена",
+        "paid": "Подтвердить оплату",
+        "refunded": "Оформить возврат",
+    }
+    targets = PAYMENT_TRANSITIONS.get(str(payment_status or ""), set())
+    return [
+        (action, labels[action])
+        for action in ("payment_reported", "paid", "refunded")
+        if action in targets
+    ]
+
+
+def fulfillment_actions_for(fulfillment_status):
+    labels = {
+        "confirmed": "Подтвердить",
+        "picking": "В сборку",
+        "packed": "Упаковано",
+        "ready_to_ship": "Готов к отправке",
+        "shipped": "Отправлен",
+        "delivered": "Доставлен",
+        "cancelled": "Отмена",
+    }
+    targets = FULFILLMENT_TRANSITIONS.get(str(fulfillment_status or ""), set())
+    return [
+        (action, labels[action])
+        for action in (
+            "confirmed", "picking", "packed", "ready_to_ship",
+            "shipped", "delivered", "cancelled",
+        )
+        if action in targets
+    ]
+
+
+def _order_has_pending_weighing(cursor, order_id):
+    cursor.execute(
+        "SELECT 1 FROM order_items WHERE order_id = %s AND weight IS NULL "
+        "AND pricing_mode = 'per_kg' LIMIT 1",
+        (order_id,)
+    )
+    return cursor.fetchone() is not None
 
 
 def format_admin_datetime(value):
@@ -1399,6 +2219,8 @@ def admin_event_type_label(event_type):
         "payment_reported": "Клиент сообщил об оплате",
         "payment_confirmed": "Оплата подтверждена",
         "status_changed": "Статус изменён",
+        "payment_status_changed": "Статус оплаты изменён",
+        "fulfillment_status_changed": "Статус выполнения изменён",
         "inventory_deducted": "Склад списан",
         "stock_restored": "Склад восстановлен",
         "notification_sent": "Уведомление отправлено",
@@ -1432,16 +2254,347 @@ def log_inventory_movement(
     stock_before=None,
     stock_after=None,
     order_id=None,
-    note=""
+    note="",
+    quantity_units=None,
 ):
     cursor.execute(
         """
         INSERT INTO inventory_movements
-        (product_id, order_id, movement_type, quantity_grams, stock_before, stock_after, note)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        (product_id, order_id, movement_type, quantity_grams, quantity_units, stock_before, stock_after, note)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """,
-        (product_id, order_id, movement_type, quantity_grams, stock_before, stock_after, note),
+        (product_id, order_id, movement_type, quantity_grams, quantity_units, stock_before, stock_after, note),
     )
+
+
+def _fetch_order_items_for_fulfillment(cursor, order_id):
+    cursor.execute(
+        """
+        SELECT oi.product_id, oi.option_id, oi.weight, oi.pricing_mode
+        FROM order_items oi
+        WHERE oi.order_id = %s
+        """,
+        (order_id,)
+    )
+    return cursor.fetchall()
+
+
+class InsufficientStockError(Exception):
+    """Raised when one or more order lines cannot be fulfilled from current
+    stock. No inventory row is modified and no movement is logged before
+    this is raised for any line in the order."""
+
+    def __init__(self, shortages):
+        self.shortages = shortages
+        ids = ", ".join(
+            f"{kind}:{reference_id}" for kind, reference_id, _required, _available in shortages
+        )
+        super().__init__(f"Insufficient stock for: {ids}")
+
+
+def _aggregate_required_inventory(order_items):
+    per_kg_required_grams = {}
+    fixed_required_units = {}
+    options_required_units = {}
+
+    for product_id, option_id, weight, pricing_mode in order_items:
+        if pricing_mode == "per_kg":
+            if not product_id or not weight:
+                continue
+            per_kg_required_grams[product_id] = (
+                per_kg_required_grams.get(product_id, 0) + int(weight)
+            )
+        elif pricing_mode == "fixed":
+            if not product_id:
+                continue
+            fixed_required_units[product_id] = fixed_required_units.get(product_id, 0) + 1
+        elif pricing_mode == "options":
+            if not option_id:
+                continue
+            entry = options_required_units.setdefault(option_id, [product_id, 0])
+            entry[1] += 1
+
+    return per_kg_required_grams, fixed_required_units, options_required_units
+
+
+def _validate_and_lock_order_inventory(cursor, order_id):
+    """Locks every product/option row this order will touch with
+    SELECT ... FOR UPDATE inside the caller's existing transaction, and
+    validates that every required component has sufficient stock BEFORE any
+    mutation happens. Rows are locked in a fixed, sorted order (per_kg
+    products, then fixed products, then options) to keep concurrent Paid
+    transitions on overlapping lines from deadlocking each other.
+
+    Raises InsufficientStockError (no rows changed, no movements logged) if
+    any component is short. Returns the data deduct_order_inventory needs so
+    it never has to re-query the now-locked rows."""
+    order_items = _fetch_order_items_for_fulfillment(cursor, order_id)
+    per_kg_required, fixed_required, options_required = _aggregate_required_inventory(
+        order_items
+    )
+
+    shortages = []
+
+    per_kg_stock = {}
+    for product_id in sorted(per_kg_required):
+        required = per_kg_required[product_id]
+        cursor.execute(
+            "SELECT stock_grams FROM products WHERE id = %s AND pricing_mode = 'per_kg' FOR UPDATE",
+            (product_id,)
+        )
+        row = cursor.fetchone()
+        available = int(row[0]) if row and row[0] is not None else 0
+        per_kg_stock[product_id] = available
+        if row is None or available < required:
+            shortages.append(("per_kg", product_id, required, available))
+
+    fixed_stock = {}
+    for product_id in sorted(fixed_required):
+        required = fixed_required[product_id]
+        cursor.execute(
+            "SELECT stock_quantity FROM products WHERE id = %s AND pricing_mode = 'fixed' FOR UPDATE",
+            (product_id,)
+        )
+        row = cursor.fetchone()
+        available = int(row[0]) if row and row[0] is not None else 0
+        fixed_stock[product_id] = available
+        if row is None or available < required:
+            shortages.append(("fixed", product_id, required, available))
+
+    options_stock = {}
+    for option_id in sorted(options_required):
+        _product_id, required = options_required[option_id]
+        cursor.execute(
+            "SELECT stock_quantity FROM product_options WHERE id = %s FOR UPDATE",
+            (option_id,)
+        )
+        row = cursor.fetchone()
+        available = int(row[0]) if row and row[0] is not None else 0
+        options_stock[option_id] = available
+        if row is None or available < required:
+            shortages.append(("options", option_id, required, available))
+
+    if shortages:
+        raise InsufficientStockError(shortages)
+
+    return per_kg_required, fixed_required, options_required, per_kg_stock, fixed_stock, options_stock
+
+
+def deduct_order_inventory(cursor, order_id):
+    """Deducts stock for every line of an order at the moment it is marked
+    paid, dispatched per-line by the order line's own snapshotted
+    pricing_mode (never the product's current pricing_mode). Validates
+    sufficient stock for every required component first (see
+    _validate_and_lock_order_inventory); if any is short, raises
+    InsufficientStockError and changes nothing. Returns the list of
+    affected product_ids for low-stock/out-of-stock bookkeeping."""
+    (
+        per_kg_required, fixed_required, options_required,
+        per_kg_stock, fixed_stock, options_stock,
+    ) = _validate_and_lock_order_inventory(cursor, order_id)
+
+    affected_product_ids = []
+
+    for product_id, required in per_kg_required.items():
+        stock_before = per_kg_stock[product_id]
+        stock_after = stock_before - required
+        cursor.execute(
+            "UPDATE products SET stock_grams = %s WHERE id = %s AND pricing_mode = 'per_kg'",
+            (stock_after, product_id)
+        )
+        affected_product_ids.append(product_id)
+        log_inventory_movement(
+            cursor,
+            product_id,
+            "order_deducted",
+            stock_after - stock_before,
+            stock_before,
+            stock_after,
+            order_id,
+            "Склад списан по заказу (per_kg)."
+        )
+
+    for product_id, required in fixed_required.items():
+        stock_before = fixed_stock[product_id]
+        stock_after = stock_before - required
+        cursor.execute(
+            "UPDATE products SET stock_quantity = %s WHERE id = %s AND pricing_mode = 'fixed'",
+            (stock_after, product_id)
+        )
+        affected_product_ids.append(product_id)
+        log_inventory_movement(
+            cursor,
+            product_id,
+            "order_deducted",
+            None,
+            stock_before,
+            stock_after,
+            order_id,
+            "Списаны штучные единицы по заказу (fixed).",
+            quantity_units=stock_after - stock_before,
+        )
+
+    for option_id, (product_id, required) in options_required.items():
+        stock_before = options_stock[option_id]
+        stock_after = stock_before - required
+        cursor.execute(
+            "UPDATE product_options SET stock_quantity = %s WHERE id = %s",
+            (stock_after, option_id)
+        )
+        affected_product_ids.append(product_id)
+        log_inventory_movement(
+            cursor,
+            product_id,
+            "order_deducted",
+            None,
+            stock_before,
+            stock_after,
+            order_id,
+            "Списаны единицы варианта по заказу (options).",
+            quantity_units=stock_after - stock_before,
+        )
+
+    return affected_product_ids
+
+
+def restore_order_inventory(cursor, order_id):
+    """Mirror of deduct_order_inventory for the cancelled-after-deducted
+    path: restores exactly what was deducted, per-line, by the order line's
+    own snapshotted pricing_mode."""
+    order_items = _fetch_order_items_for_fulfillment(cursor, order_id)
+    affected_product_ids = []
+
+    # per_kg: grouped per product (matches the pre-existing grouped restore shape).
+    per_kg_restore_grams = {}
+    for product_id, _option_id, weight, pricing_mode in order_items:
+        if pricing_mode != "per_kg" or not product_id or not weight:
+            continue
+        per_kg_restore_grams[product_id] = per_kg_restore_grams.get(product_id, 0) + int(weight)
+    for product_id, restore_grams in per_kg_restore_grams.items():
+        if restore_grams <= 0:
+            continue
+        cursor.execute(
+            """
+            WITH before_update AS (
+                SELECT stock_grams AS stock_before
+                FROM products
+                WHERE id = %s
+            ),
+            updated AS (
+                UPDATE products
+                SET stock_grams = stock_grams + %s
+                WHERE id = %s
+                  AND pricing_mode = 'per_kg'
+                RETURNING stock_grams AS stock_after
+            )
+            SELECT before_update.stock_before, updated.stock_after
+            FROM before_update, updated
+            """,
+            (product_id, restore_grams, product_id)
+        )
+        stock_row = cursor.fetchone()
+        if not stock_row:
+            continue
+        affected_product_ids.append(product_id)
+        stock_before, stock_after = stock_row
+        log_inventory_movement(
+            cursor,
+            product_id,
+            "stock_restored",
+            int(stock_after or 0) - int(stock_before or 0),
+            stock_before,
+            stock_after,
+            order_id,
+            "Остаток восстановлен после отмены заказа (per_kg)."
+        )
+
+    # fixed: grouped units per product.
+    fixed_unit_counts = {}
+    for product_id, _option_id, _weight, pricing_mode in order_items:
+        if pricing_mode != "fixed" or not product_id:
+            continue
+        fixed_unit_counts[product_id] = fixed_unit_counts.get(product_id, 0) + 1
+    for product_id, units in fixed_unit_counts.items():
+        cursor.execute(
+            """
+            WITH before_update AS (
+                SELECT stock_quantity AS stock_before
+                FROM products
+                WHERE id = %s
+            ),
+            updated AS (
+                UPDATE products
+                SET stock_quantity = COALESCE(stock_quantity, 0) + %s
+                WHERE id = %s
+                  AND pricing_mode = 'fixed'
+                RETURNING stock_quantity AS stock_after
+            )
+            SELECT before_update.stock_before, updated.stock_after
+            FROM before_update, updated
+            """,
+            (product_id, units, product_id)
+        )
+        stock_row = cursor.fetchone()
+        if not stock_row:
+            continue
+        affected_product_ids.append(product_id)
+        stock_before, stock_after = stock_row
+        log_inventory_movement(
+            cursor,
+            product_id,
+            "stock_restored",
+            None,
+            stock_before,
+            stock_after,
+            order_id,
+            "Восстановлены штучные единицы после отмены заказа (fixed).",
+            quantity_units=int(stock_after or 0) - int(stock_before or 0),
+        )
+
+    # options: grouped units per option.
+    options_unit_counts = {}
+    for product_id, option_id, _weight, pricing_mode in order_items:
+        if pricing_mode != "options" or not option_id:
+            continue
+        entry = options_unit_counts.setdefault(option_id, [product_id, 0])
+        entry[1] += 1
+    for option_id, (product_id, units) in options_unit_counts.items():
+        cursor.execute(
+            """
+            WITH before_update AS (
+                SELECT stock_quantity AS stock_before
+                FROM product_options
+                WHERE id = %s
+            ),
+            updated AS (
+                UPDATE product_options
+                SET stock_quantity = COALESCE(stock_quantity, 0) + %s
+                WHERE id = %s
+                RETURNING stock_quantity AS stock_after
+            )
+            SELECT before_update.stock_before, updated.stock_after
+            FROM before_update, updated
+            """,
+            (option_id, units, option_id)
+        )
+        stock_row = cursor.fetchone()
+        if not stock_row:
+            continue
+        affected_product_ids.append(product_id)
+        stock_before, stock_after = stock_row
+        log_inventory_movement(
+            cursor,
+            product_id,
+            "stock_restored",
+            None,
+            stock_before,
+            stock_after,
+            order_id,
+            "Восстановлены единицы варианта после отмены заказа (options).",
+            quantity_units=int(stock_after or 0) - int(stock_before or 0),
+        )
+
+    return affected_product_ids
 
 
 def get_admin_chat_id():
@@ -1813,6 +2966,10 @@ def stable_admin_error_code(error_code):
     return INTERNAL_OPERATION_FAILED
 
 
+def report_read_error(error_code):
+    logger.error(stable_admin_error_code(error_code))
+
+
 def log_admin_error(route, action, error_code):
     stable_code = stable_admin_error_code(error_code)
     conn = None
@@ -1932,8 +3089,8 @@ def create_current_master_snapshot(cursor):
         SELECT
             COUNT(*),
             COALESCE(SUM(CASE WHEN created_at::date = CURRENT_DATE THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status IN ('pending', 'awaiting_payment', 'payment_reported', 'cash_on_delivery') THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'done' AND date_trunc('month', created_at) = date_trunc('month', NOW()) THEN total ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN payment_status IN ('unpaid', 'payment_reported') THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN fulfillment_status = 'delivered' AND date_trunc('month', created_at) = date_trunc('month', NOW()) THEN total ELSE 0 END), 0)
         FROM orders
         """
     )
@@ -2014,6 +3171,18 @@ def master_shop_rows(rows):
           <h1>Master Dashboard</h1>
           <p>No shops are registered yet.</p>
         </section>
+        <section class="admin-card dash-section">
+          <h2>Maintenance actions</h2>
+          <p>These operations are explicit and never run while viewing a page.</p>
+          <div class="form-actions">
+            <form method="post" action="/master/actions/sync-default-shops">
+              <button class="button secondary" type="submit">Sync default shop registry</button>
+            </form>
+            <form method="post" action="/master/actions/capture-current-snapshot">
+              <button class="button secondary" type="submit">Capture current snapshot</button>
+            </form>
+          </div>
+        </section>
         """
 
     rendered = ""
@@ -2081,6 +3250,18 @@ def master_shop_rows(rows):
         {rendered}
       </div>
     </section>
+    <section class="admin-card dash-section">
+      <h2>Maintenance actions</h2>
+      <p>These operations are explicit and never run while viewing a page.</p>
+      <div class="form-actions">
+        <form method="post" action="/master/actions/sync-default-shops">
+          <button class="button secondary" type="submit">Sync default shop registry</button>
+        </form>
+        <form method="post" action="/master/actions/capture-current-snapshot">
+          <button class="button secondary" type="submit">Capture current snapshot</button>
+        </form>
+      </div>
+    </section>
     """
 
 
@@ -2089,9 +3270,6 @@ async def master_dashboard():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        seed_default_master_shop(cursor)
-        create_current_master_snapshot(cursor)
-        conn.commit()
         cursor.execute(
             """
             SELECT
@@ -2126,10 +3304,84 @@ async def master_dashboard():
         conn.close()
         return master_layout("Master Dashboard", master_shop_rows(rows))
     except Exception:
-        log_admin_error(
-            "/master", "master_dashboard", "master_dashboard_load_failed"
-        )
+        report_read_error("master_dashboard_load_failed")
         return master_error_page("Error", "Could not load Master Dashboard.")
+
+
+@app.post(
+    "/master/actions/sync-default-shops",
+    dependencies=[Depends(require_master_csrf)],
+)
+async def sync_default_master_shops():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        seed_default_master_shop(cursor)
+        conn.commit()
+        return RedirectResponse("/master", status_code=303)
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        log_admin_error(
+            "/master/actions/sync-default-shops",
+            "sync_default_master_shops",
+            "master_shop_seed_failed",
+        )
+        return master_error_page("Error", "Could not synchronize the shop registry.")
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.post(
+    "/master/actions/capture-current-snapshot",
+    dependencies=[Depends(require_master_csrf)],
+)
+async def capture_current_master_snapshot():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        create_current_master_snapshot(cursor)
+        conn.commit()
+        return RedirectResponse("/master", status_code=303)
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        log_admin_error(
+            "/master/actions/capture-current-snapshot",
+            "capture_current_master_snapshot",
+            "master_snapshot_failed",
+        )
+        return master_error_page("Error", "Could not capture the current snapshot.")
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 @app.get("/master/shops/{shop_key}", response_class=HTMLResponse)
@@ -2137,8 +3389,6 @@ async def master_shop_detail(shop_key: str):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        seed_default_master_shop(cursor)
-        conn.commit()
         cursor.execute(
             """
             SELECT
@@ -2233,11 +3483,7 @@ async def master_shop_detail(shop_key: str):
         """
         return master_layout(f"Master Shop: {brand_name or shop_key_value}", content)
     except Exception:
-        log_admin_error(
-            "/master/shops/{shop_key}",
-            "master_shop_detail",
-            "master_shop_detail_load_failed",
-        )
+        report_read_error("master_shop_detail_load_failed")
         return master_error_page("Error", "Could not load shop details.")
 
 
@@ -2274,18 +3520,18 @@ async def root():
             """
             SELECT
                 COUNT(*),
-                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'awaiting_payment' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'payment_reported' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'cash_on_delivery' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'preparing' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN payment_status = 'unpaid' AND payment_method IS NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN payment_status = 'unpaid' AND payment_method IN ('IBAN', 'PayPal') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN payment_status = 'payment_reported' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN payment_status = 'unpaid' AND payment_method = 'Cash' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN payment_status = 'paid' AND fulfillment_status IN ('new', 'confirmed') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN fulfillment_status IN ('picking', 'packed', 'ready_to_ship', 'shipped') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN fulfillment_status = 'delivered' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN fulfillment_status = 'cancelled' THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN created_at::date = CURRENT_DATE THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'done' THEN total ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'done' AND created_at::date = CURRENT_DATE THEN total ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'done' AND date_trunc('month', created_at) = date_trunc('month', NOW()) THEN total ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN fulfillment_status = 'delivered' THEN total ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN fulfillment_status = 'delivered' AND created_at::date = CURRENT_DATE THEN total ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN fulfillment_status = 'delivered' AND date_trunc('month', created_at) = date_trunc('month', NOW()) THEN total ELSE 0 END), 0)
             FROM orders
             """
         )
@@ -2300,7 +3546,7 @@ async def root():
             FROM order_items oi
             JOIN orders o ON o.order_id = oi.order_id
             LEFT JOIN products p ON p.id = oi.product_id
-            WHERE o.status = 'done'
+            WHERE o.fulfillment_status = 'delivered'
             GROUP BY oi.product_id, COALESCE(p.name, oi.product_name)
             ORDER BY revenue DESC
             LIMIT 5
@@ -2324,7 +3570,7 @@ async def root():
                     COALESCE(SUM(oi.price), 0) AS revenue
                 FROM order_items oi
                 JOIN orders o ON o.order_id = oi.order_id
-                WHERE o.status = 'done'
+                WHERE o.fulfillment_status = 'delivered'
                 GROUP BY oi.product_id
             ) s ON s.product_id = p.id
             WHERE p.is_active = TRUE
@@ -2342,7 +3588,7 @@ async def root():
                 COUNT(*) AS orders_count,
                 COALESCE(SUM(total), 0) AS total_spent
             FROM orders
-            WHERE status = 'done'
+            WHERE fulfillment_status = 'delivered'
             GROUP BY telegram_id
             ORDER BY total_spent DESC
             LIMIT 5
@@ -2358,7 +3604,7 @@ async def root():
                 COUNT(*) AS completed_orders,
                 COALESCE(SUM(total), 0) AS total_spent
             FROM orders
-            WHERE status = 'done'
+            WHERE fulfillment_status = 'delivered'
             GROUP BY telegram_id
             HAVING COUNT(*) >= 2
             ORDER BY completed_orders DESC, total_spent DESC
@@ -2426,7 +3672,8 @@ async def root():
         funnel_rows = cursor.fetchall()
         cursor.execute(
             """
-            SELECT order_id, username, phone, address, total, status
+            SELECT order_id, username, phone, address, total,
+                   payment_status, fulfillment_status
             FROM orders
             ORDER BY id DESC
             LIMIT 5
@@ -2438,12 +3685,13 @@ async def root():
             """
             SELECT COUNT(DISTINCT o.order_id)
             FROM orders o
-            WHERE o.status != 'cancelled'
+            WHERE o.fulfillment_status != 'cancelled'
               AND EXISTS (
                   SELECT 1
                   FROM order_items oi
                   WHERE oi.order_id = o.order_id
                     AND oi.weight IS NULL
+                    AND oi.pricing_mode = 'per_kg'
               )
             """
         )
@@ -2512,7 +3760,7 @@ async def root():
                   FROM order_items oi
                   JOIN orders o ON o.order_id = oi.order_id
                   WHERE oi.product_id = p.id
-                    AND o.status != 'cancelled'
+                    AND o.fulfillment_status != 'cancelled'
                     AND o.created_at >= NOW() - INTERVAL '14 days'
               )
             """
@@ -2549,7 +3797,7 @@ async def root():
                   FROM order_items oi
                   JOIN orders o ON o.order_id = oi.order_id
                   WHERE oi.product_id = p.id
-                    AND o.status != 'cancelled'
+                    AND o.fulfillment_status != 'cancelled'
               )
             """
         )
@@ -2557,7 +3805,7 @@ async def root():
 
         conn.close()
     except Exception:
-        log_admin_error("/admin", "dashboard", DASHBOARD_LOAD_FAILED)
+        report_read_error(DASHBOARD_LOAD_FAILED)
         error_message = "Не удалось загрузить статистику. Попробуйте позже."
 
     if stats:
@@ -2616,7 +3864,7 @@ async def root():
         """
 
     order_rows = ""
-    for order_id, username, phone, address, total, status in latest_orders:
+    for order_id, username, phone, address, total, payment_status, fulfillment_status in latest_orders:
         order_id_text = html.escape(str(order_id))
         order_rows += f"""
         <tr>
@@ -2625,7 +3873,8 @@ async def root():
           <td>{html.escape(str(phone or '-'))}</td>
           <td>{html.escape(str(address or '-'))}</td>
           <td>EUR {float(total):.2f}</td>
-          <td><span class="status">{html.escape(str(status or '-'))}</span></td>
+          <td>{payment_status_badge(payment_status)}</td>
+          <td>{fulfillment_status_badge(fulfillment_status)}</td>
           <td><a class="view-link" href="/orders/{order_id_text}">Открыть</a></td>
         </tr>
         """
@@ -2636,7 +3885,7 @@ async def root():
         latest_section = f"""
         <div class="dash-table-wrap">
           <table>
-            <tr><th>ID заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th></th></tr>
+            <tr><th>ID заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Оплата</th><th>Выполнение</th><th></th></tr>
             {order_rows}
           </table>
         </div>
@@ -2905,9 +4154,7 @@ async def broadcasts():
         html_content += "</section>"
         return admin_layout("📨 Рассылка", html_content)
     except Exception:
-        log_admin_stable_error(
-            "/broadcasts", "list_broadcasts", "broadcast_list_failed"
-        )
+        report_read_error("broadcast_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -2939,13 +4186,15 @@ async def new_broadcast_form():
         """
         return admin_layout("Новая рассылка", content)
     except Exception:
-        log_admin_stable_error(
-            "/broadcasts/new", "new_broadcast_form", "broadcast_form_failed"
-        )
+        report_read_error("broadcast_form_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/broadcasts/new", response_class=HTMLResponse)
+@app.post(
+    "/broadcasts/new",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def create_broadcast(message_text: str = Form(""), target_type: str = Form("all_clients")):
     if not telegram_actions_enabled():
         return generic_not_found()
@@ -2979,7 +4228,8 @@ async def create_broadcast(message_text: str = Form(""), target_type: str = Form
                 SELECT DISTINCT telegram_id
                 FROM orders
                 WHERE telegram_id IS NOT NULL
-                  AND status = 'awaiting_payment'
+                  AND payment_status = 'unpaid'
+                  AND payment_method IN ('IBAN', 'PayPal')
             """,
         }
         recipients_query = target_queries.get(target_type)
@@ -3017,7 +4267,11 @@ async def create_broadcast(message_text: str = Form(""), target_type: str = Form
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/broadcasts/{broadcast_id}/send", response_class=HTMLResponse)
+@app.post(
+    "/broadcasts/{broadcast_id}/send",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def send_broadcast_route(broadcast_id: int):
     if not telegram_actions_enabled():
         return generic_not_found()
@@ -3204,9 +4458,7 @@ async def channel_posts():
         html_content += "</section>"
         return admin_layout("📢 Канал", html_content)
     except Exception:
-        log_admin_stable_error(
-            "/channel", "list_channel_posts", "channel_list_failed"
-        )
+        report_read_error("channel_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -3229,13 +4481,15 @@ async def new_channel_post_form():
         """
         return admin_layout("Новый пост в канал", content)
     except Exception:
-        log_admin_stable_error(
-            "/channel/new", "new_channel_post_form", "channel_form_failed"
-        )
+        report_read_error("channel_form_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/channel/new", response_class=HTMLResponse)
+@app.post(
+    "/channel/new",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def create_channel_post(message_text: str = Form("")):
     if not telegram_actions_enabled():
         return generic_not_found()
@@ -3266,7 +4520,11 @@ async def create_channel_post(message_text: str = Form("")):
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/channel/{post_id}/send", response_class=HTMLResponse)
+@app.post(
+    "/channel/{post_id}/send",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def send_channel_post_route(post_id: int):
     if not telegram_actions_enabled():
         return generic_not_found()
@@ -3337,7 +4595,11 @@ async def send_channel_post_route(post_id: int):
                 pass
 
 
-@app.post("/channel/{post_id}/delete", response_class=HTMLResponse)
+@app.post(
+    "/channel/{post_id}/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def delete_channel_post(post_id: int):
     if not telegram_actions_enabled():
         return generic_not_found()
@@ -3409,7 +4671,7 @@ async def logs():
         html_content += "</section>"
         return admin_layout("🧾 Логи ошибок", html_content)
     except Exception:
-        log_admin_error("/logs", "list_error_logs", "error_log_list_failed")
+        report_read_error("error_log_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
@@ -3456,35 +4718,32 @@ async def log_detail(log_id: int):
         """
         return admin_layout("🧾 Лог ошибки", content)
     except Exception:
-        log_admin_error(
-            "/logs/{id}", "error_log_detail", "error_log_detail_failed"
-        )
+        report_read_error("error_log_detail_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/orders", response_class=HTMLResponse)
-async def orders(status_filter: str = "all", q: str = "", pending_weighing: int = 0):
+async def orders(
+    payment_status_filter: str = "all",
+    fulfillment_status_filter: str = "all",
+    q: str = "",
+    pending_weighing: int = 0,
+):
     try:
-        allowed_status_filters = {
-            "all",
-            "pending",
-            "awaiting_payment",
-            "payment_reported",
-            "cash_on_delivery",
-            "paid",
-            "preparing",
-            "done",
-            "cancelled",
-        }
-        if status_filter not in allowed_status_filters:
-            status_filter = "all"
+        if payment_status_filter not in {"all", *ORDER_PAYMENT_STATUS_VALUES}:
+            payment_status_filter = "all"
+        if fulfillment_status_filter not in {"all", *ORDER_FULFILLMENT_STATUS_VALUES}:
+            fulfillment_status_filter = "all"
         is_pending_weighing_filter = pending_weighing == 1
         search_query = q.strip()
         where_clauses = []
         params = []
-        if status_filter != "all":
-            where_clauses.append("status = %s")
-            params.append(status_filter)
+        if payment_status_filter != "all":
+            where_clauses.append("payment_status = %s")
+            params.append(payment_status_filter)
+        if fulfillment_status_filter != "all":
+            where_clauses.append("fulfillment_status = %s")
+            params.append(fulfillment_status_filter)
         if search_query:
             search_value = f"%{search_query}%"
             where_clauses.append(
@@ -3499,7 +4758,7 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
             )
             params.extend([search_value, search_value, search_value, search_value])
         if is_pending_weighing_filter:
-            where_clauses.append("status != 'cancelled'")
+            where_clauses.append("fulfillment_status != 'cancelled'")
             where_clauses.append(
                 """
                 EXISTS (
@@ -3507,6 +4766,7 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
                     FROM order_items oi
                     WHERE oi.order_id = orders.order_id
                       AND oi.weight IS NULL
+                      AND oi.pricing_mode = 'per_kg'
                 )
                 """
             )
@@ -3515,7 +4775,8 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute(f"""
-            SELECT id, order_id, username, phone, address, total, status, payment_method, created_at
+            SELECT id, order_id, username, phone, address, total, payment_method,
+                   payment_status, fulfillment_status, source, created_at
             FROM orders
             {where_sql}
             ORDER BY id DESC
@@ -3526,32 +4787,23 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
             """
             SELECT COUNT(*)
             FROM orders
-            WHERE status IN (
-                'pending',
-                'awaiting_payment',
-                'payment_reported',
-                'cash_on_delivery'
-            )
+            WHERE payment_status IN ('unpaid', 'payment_reported')
             """
         )
         attention_orders_count = cursor.fetchone()[0]
         conn.close()
 
-        status_options = {
-            "all": "Все",
-            "pending": "Ожидает выбора оплаты",
-            "awaiting_payment": "Ожидает оплаты",
-            "payment_reported": "Оплата заявлена",
-            "cash_on_delivery": "Наличными",
-            "paid": "Оплачен",
-            "preparing": "Готовится",
-            "done": "Готов",
-            "cancelled": "Отменён",
-        }
-        options_html = ""
-        for value, label in status_options.items():
-            selected = "selected" if value == status_filter else ""
-            options_html += f"<option value=\"{value}\" {selected}>{label}</option>"
+        payment_status_options = {"all": "Все", **PAYMENT_STATUS_LABELS}
+        payment_status_options_html = ""
+        for value, label in payment_status_options.items():
+            selected = "selected" if value == payment_status_filter else ""
+            payment_status_options_html += f"<option value=\"{value}\" {selected}>{label}</option>"
+
+        fulfillment_status_options = {"all": "Все", **FULFILLMENT_STATUS_LABELS}
+        fulfillment_status_options_html = ""
+        for value, label in fulfillment_status_options.items():
+            selected = "selected" if value == fulfillment_status_filter else ""
+            fulfillment_status_options_html += f"<option value=\"{value}\" {selected}>{label}</option>"
 
         pending_weighing_banner_html = ""
         if is_pending_weighing_filter:
@@ -3563,15 +4815,21 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
         html = f"""
         <section class='admin-card'>
           <h1>📦 Заказы</h1>
+          <div class="form-actions">
+            <a class="button" href="/orders/new">➕ Новый заказ</a>
+          </div>
           <form class="admin-form" method="get" action="/orders">
             <label>Поиск <input name="q" value="{escape(search_query, quote=True)}" placeholder="№ заказа, клиент, телефон, адрес"/></label>
-            <label>Статус
-              <select name="status_filter">{options_html}</select>
+            <label>Оплата
+              <select name="payment_status_filter">{payment_status_options_html}</select>
+            </label>
+            <label>Выполнение
+              <select name="fulfillment_status_filter">{fulfillment_status_options_html}</select>
             </label>
             <div class="form-actions">
               <button type="submit">Показать</button>
               <a class="button button-link secondary" href="/orders">Сбросить</a>
-              <a class="button button-link secondary" href="/orders/export.csv?status_filter={escape(status_filter, quote=True)}&q={escape(search_query, quote=True)}">Экспорт CSV</a>
+              <a class="button button-link secondary" href="/orders/export.csv?payment_status_filter={escape(payment_status_filter, quote=True)}&fulfillment_status_filter={escape(fulfillment_status_filter, quote=True)}&q={escape(search_query, quote=True)}">Экспорт CSV</a>
             </div>
           </form>
           <div class="attention-banner">⚠️ Требуют внимания: {attention_orders_count} заказов</div>
@@ -3583,9 +4841,12 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
             return admin_layout("📦 Заказы", html, refresh_seconds=60)
 
         html += "<div class='dash-table-wrap'><table>"
-        html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th><th>Действия</th></tr>"
+        html += "<tr><th>ID</th><th>№ заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Оплата</th><th>Выполнение</th><th>Источник</th><th>Способ оплаты</th><th>Создан</th><th>Действия</th></tr>"
         for row in rows:
-            id_, order_id, username, phone, address, total, status, payment_method, created_at = row
+            (
+                id_, order_id, username, phone, address, total, payment_method,
+                payment_status, fulfillment_status, source, created_at,
+            ) = row
             order_id_text = escape(str(order_id), quote=True)
             order_id_path = urllib.parse.quote(str(order_id), safe="")
             username_text = escape(str(username or "-"), quote=True)
@@ -3593,40 +4854,43 @@ async def orders(status_filter: str = "all", q: str = "", pending_weighing: int 
             address_text = escape(str(address or "-"), quote=True)
             payment_method_text = escape(str(payment_method or "-"), quote=True)
             actions = [f"<a class=\"button\" href=\"/orders/{order_id_path}\">Открыть</a>"]
-            status_key = str(status or "")
-            for s, button_label in order_status_actions_for(status_key):
-                actions.append(f"<form method=\"post\" action=\"/orders/{order_id_path}/status/{s}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{button_label}</button></form>")
+            for action, button_label in payment_actions_for(payment_status):
+                actions.append(f"<form method=\"post\" action=\"/orders/{order_id_path}/payment/{action}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{button_label}</button></form>")
+            for action, button_label in fulfillment_actions_for(fulfillment_status):
+                actions.append(f"<form method=\"post\" action=\"/orders/{order_id_path}/fulfillment/{action}\" style=\"display:inline; margin:0; padding:0;\"><button class=\"button secondary\" type=\"submit\">{button_label}</button></form>")
             actions_html = f"<div class=\"action-group\">{' '.join(actions)}</div>"
-            row_class = " class=\"attention-row\"" if status_key in {"pending", "awaiting_payment", "payment_reported", "cash_on_delivery"} else ""
-            html += f"<tr{row_class}><td>{id_}</td><td>{order_id_text}</td><td>{username_text}</td><td>{phone_text}</td><td>{address_text}</td><td>{total:.2f}</td><td>{admin_status_badge(status)}</td><td>{payment_method_text}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
+            row_class = (
+                " class=\"attention-row\""
+                if str(payment_status or "") in {"unpaid", "payment_reported"}
+                else ""
+            )
+            html += f"<tr{row_class}><td>{id_}</td><td>{order_id_text}</td><td>{username_text}</td><td>{phone_text}</td><td>{address_text}</td><td>{total:.2f}</td><td>{payment_status_badge(payment_status)}</td><td>{fulfillment_status_badge(fulfillment_status)}</td><td>{order_source_badge(source)}</td><td>{payment_method_text}</td><td>{format_admin_datetime(created_at)}</td><td>{actions_html}</td></tr>"
         html += "</table></div></section>"
         return admin_layout("📦 Заказы", html, refresh_seconds=60)
     except Exception:
-        log_admin_error("/orders", "list_orders", "order_list_failed")
+        report_read_error("order_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
 @app.get("/orders/export.csv")
-async def orders_export_csv(status_filter: str = "all", q: str = ""):
-    allowed_status_filters = {
-        "all",
-        "pending",
-        "awaiting_payment",
-        "payment_reported",
-        "cash_on_delivery",
-        "paid",
-        "preparing",
-        "done",
-        "cancelled",
-    }
-    if status_filter not in allowed_status_filters:
-        status_filter = "all"
+async def orders_export_csv(
+    payment_status_filter: str = "all",
+    fulfillment_status_filter: str = "all",
+    q: str = "",
+):
+    if payment_status_filter not in {"all", *ORDER_PAYMENT_STATUS_VALUES}:
+        payment_status_filter = "all"
+    if fulfillment_status_filter not in {"all", *ORDER_FULFILLMENT_STATUS_VALUES}:
+        fulfillment_status_filter = "all"
     search_query = q.strip()
     where_clauses = []
     params = []
-    if status_filter != "all":
-        where_clauses.append("status = %s")
-        params.append(status_filter)
+    if payment_status_filter != "all":
+        where_clauses.append("payment_status = %s")
+        params.append(payment_status_filter)
+    if fulfillment_status_filter != "all":
+        where_clauses.append("fulfillment_status = %s")
+        params.append(fulfillment_status_filter)
     if search_query:
         search_value = f"%{search_query}%"
         where_clauses.append(
@@ -3652,13 +4916,16 @@ async def orders_export_csv(status_filter: str = "all", q: str = ""):
             phone,
             address,
             total,
-            status,
+            payment_status,
+            fulfillment_status,
+            source,
             payment_method,
             created_at,
             updated_at,
             payment_selected_at,
             payment_reported_at,
-            inventory_deducted
+            inventory_deducted,
+            status
         FROM orders
         {where_sql}
         ORDER BY id DESC
@@ -3676,13 +4943,16 @@ async def orders_export_csv(status_filter: str = "all", q: str = ""):
         "phone",
         "address",
         "total",
-        "status",
+        "payment_status",
+        "fulfillment_status",
+        "source",
         "payment_method",
         "created_at",
         "updated_at",
         "payment_selected_at",
         "payment_reported_at",
         "inventory_deducted",
+        "legacy_status",
     ])
 
     def excel_text(value):
@@ -3705,98 +4975,679 @@ async def orders_export_csv(status_filter: str = "all", q: str = ""):
     )
 
 
-@app.post("/orders/{order_id}/status/{status}", response_class=HTMLResponse)
-async def update_order_status(order_id: str, status: str):
-    allowed = {"paid", "preparing", "done", "cancelled"}
-    if status not in allowed:
-        return admin_error_page("Недопустимый статус", "Операция не может быть выполнена для этого заказа.")
+# ---------------------------------------------------------------------------
+# Checkpoint F: admin manual order creation. Uses the SAME Orders v2 model
+# and the SAME per-mode pricing rules as Telegram orders (order_creation.
+# price_single_line / insert_order) -- this is deliberately not a second
+# order system, just a second caller of the shared core.
+# ---------------------------------------------------------------------------
+
+def format_order_number(value):
+    """Friendly display form for a manually-created order's number, e.g.
+    DM-000127. Only used where this checkpoint explicitly asks for it (the
+    manual-order form/confirmation) -- existing order number display
+    elsewhere is untouched, since Telegram order_id values are a
+    completely different, much larger scheme."""
+    try:
+        return f"DM-{int(value):06d}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _manual_order_catalog(cursor):
+    cursor.execute(
+        """
+        SELECT id, name, pricing_mode, price_per_kg, fixed_price, sale_unit
+        FROM products
+        WHERE is_active = TRUE
+        ORDER BY sort_order, name
+        """
+    )
+    products = cursor.fetchall()
+    cursor.execute(
+        """
+        SELECT po.id, po.product_id, po.label, po.price
+        FROM product_options po
+        JOIN products p ON p.id = po.product_id
+        WHERE po.is_active = TRUE AND p.is_active = TRUE
+        ORDER BY po.sort_order
+        """
+    )
+    options = cursor.fetchall()
+    return products, options
+
+
+def _search_clients_for_manual_order(cursor, query):
+    query = (query or "").strip()[:100]
+    if query:
+        search_value = f"%{query}%"
+        cursor.execute(
+            """
+            SELECT id, first_name, last_name, phone, telegram_id
+            FROM clients
+            WHERE first_name ILIKE %s OR last_name ILIKE %s OR phone ILIKE %s
+            ORDER BY id DESC
+            LIMIT 10
+            """,
+            (search_value, search_value, search_value),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT id, first_name, last_name, phone, telegram_id
+            FROM clients
+            ORDER BY id DESC
+            LIMIT 10
+            """
+        )
+    return cursor.fetchall()
+
+
+def _manual_order_client_options_html(matching_clients, selected_client_id):
+    if not matching_clients:
+        return "<p>Клиенты не найдены. Уточните поиск или создайте нового клиента.</p>"
+    rows_html = ""
+    for client_id, first_name, last_name, phone, telegram_id in matching_clients:
+        checked = "checked" if str(selected_client_id or "") == str(client_id) else ""
+        full_name = " ".join(part for part in (first_name, last_name) if part) or "Без имени"
+        telegram_text = f"Telegram ID: {telegram_id}" if telegram_id else "Telegram ID: —"
+        rows_html += (
+            '<label class="manual-order-client-option" style="display:block;">'
+            f'<input type="radio" name="client_id" value="{client_id}" {checked}/> '
+            f'{escape(full_name, quote=True)} · {escape(str(phone or "-"), quote=True)} · {telegram_text}'
+            '</label>'
+        )
+    return rows_html
+
+
+def _manual_order_product_rows_html(products, options, form_values):
+    options_by_product = {}
+    for option_id, product_id, label, price in options:
+        options_by_product.setdefault(product_id, []).append((option_id, label, price))
+
+    rows = ""
+    for product_id, name, pricing_mode, price_per_kg, fixed_price, sale_unit in products:
+        name_text = escape(str(name), quote=True)
+        if pricing_mode == "per_kg":
+            field_name = f"weight_{product_id}"
+            existing_value = escape(str(form_values.get(field_name, "")), quote=True)
+            input_html = (
+                f'<input type="number" name="{field_name}" min="1" step="1" '
+                f'value="{existing_value}" placeholder="г"/>'
+            )
+            price_text = f"{float(price_per_kg or 0):.2f} {CURRENCY_SYMBOL}/кг"
+        elif pricing_mode == "fixed":
+            field_name = f"qty_{product_id}"
+            existing_value = escape(str(form_values.get(field_name, "0") or "0"), quote=True)
+            unit_text = escape(str(sale_unit or "шт"), quote=True)
+            input_html = (
+                f'<input type="number" name="{field_name}" min="0" step="1" '
+                f'value="{existing_value}"/> {unit_text}'
+            )
+            price_text = f"{float(fixed_price or 0):.2f} {CURRENCY_SYMBOL}"
+        else:
+            product_options = options_by_product.get(product_id, [])
+            if not product_options:
+                continue
+            option_inputs = ""
+            for option_id, label, price in product_options:
+                field_name = f"optqty_{option_id}"
+                existing_value = escape(str(form_values.get(field_name, "0") or "0"), quote=True)
+                option_inputs += (
+                    f'<div>{escape(str(label), quote=True)} '
+                    f'({float(price):.2f} {CURRENCY_SYMBOL}) '
+                    f'<input type="number" name="{field_name}" min="0" step="1" '
+                    f'value="{existing_value}"/></div>'
+                )
+            input_html = option_inputs
+            price_text = "варианты"
+        rows += f"<tr><td>{name_text}</td><td>{price_text}</td><td>{input_html}</td></tr>"
+    return rows
+
+
+def _render_new_order_form(products, options, matching_clients, client_query,
+                            form_values=None, errors=None):
+    form_values = form_values or {}
+    errors = errors or []
+
+    def fv(name, default=""):
+        return escape(str(form_values.get(name, default) or default), quote=True)
+
+    error_html = ""
+    if errors:
+        items_html = "".join(f"<li>{escape(str(e), quote=True)}</li>" for e in errors)
+        error_html = (
+            f'<div class="attention-banner">⚠️ Проверьте данные заказа:<ul>{items_html}</ul></div>'
+        )
+
+    source_options_html = ""
+    for value in ORDER_SOURCE_VALUES:
+        selected = "selected" if form_values.get("source") == value else ""
+        source_options_html += (
+            f'<option value="{value}" {selected}>{ORDER_SOURCE_LABELS.get(value, value)}</option>'
+        )
+
+    customer_mode = form_values.get("customer_mode") or "existing"
+    existing_checked = "checked" if customer_mode != "new" else ""
+    new_checked = "checked" if customer_mode == "new" else ""
+
+    delivery_method = form_values.get("delivery_method") or "pickup"
+    pickup_checked = "checked" if delivery_method != "delivery" else ""
+    delivery_checked = "checked" if delivery_method == "delivery" else ""
+
+    payment_method_options_html = "".join(
+        f'<option value="{value}" {"selected" if form_values.get("payment_method") == value else ""}>{value}</option>'
+        for value in ORDER_PAYMENT_METHOD_VALUES
+    )
+    payment_status_options_html = "".join(
+        f'<option value="{value}" {"selected" if (form_values.get("payment_status") or "unpaid") == value else ""}>'
+        f'{PAYMENT_STATUS_LABELS.get(value, value)}</option>'
+        for value in ("unpaid", "paid")
+    )
+
+    client_options_html = _manual_order_client_options_html(
+        matching_clients, form_values.get("client_id")
+    )
+    product_rows_html = _manual_order_product_rows_html(products, options, form_values)
+
+    return f"""
+    <section class="admin-card">
+      <h1>➕ Новый заказ</h1>
+      <p><a href="/orders">← К заказам</a></p>
+      {error_html}
+      <form class="admin-form" method="get">
+        <label>Поиск клиента (имя или телефон)
+          <input name="client_query" value="{escape(client_query, quote=True)}"/>
+        </label>
+        <div class="form-actions"><button class="button secondary" type="submit">Искать</button></div>
+      </form>
+      <form class="admin-form" method="post" action="/orders/new">
+        <h2>Источник заказа</h2>
+        <label>Канал <select name="source">{source_options_html}</select></label>
+        <label>Референс источника
+          <input name="source_reference" value="{fv('source_reference')}" placeholder="@instagram, номер WhatsApp..."/>
+        </label>
+
+        <h2>Клиент</h2>
+        <label><input type="radio" name="customer_mode" value="existing" {existing_checked}/> Существующий клиент</label>
+        <label><input type="radio" name="customer_mode" value="new" {new_checked}/> Новый клиент</label>
+        <div class="manual-order-existing-client">
+          {client_options_html}
+        </div>
+        <div class="manual-order-new-client">
+          <label>Имя <input name="new_first_name" value="{fv('new_first_name')}"/></label>
+          <label>Фамилия (необязательно) <input name="new_last_name" value="{fv('new_last_name')}"/></label>
+          <label>Телефон <input name="new_phone" value="{fv('new_phone')}"/></label>
+          <label>Telegram ID (необязательно) <input name="new_telegram_id" value="{fv('new_telegram_id')}"/></label>
+        </div>
+
+        <h2>Доставка</h2>
+        <label><input type="radio" name="delivery_method" value="pickup" {pickup_checked}/> Самовывоз</label>
+        <label><input type="radio" name="delivery_method" value="delivery" {delivery_checked}/> Доставка</label>
+        <div class="manual-order-delivery-fields">
+          <label>Улица <input name="delivery_street" value="{fv('delivery_street')}"/></label>
+          <label>Дом/корпус <input name="delivery_house_number" value="{fv('delivery_house_number')}"/></label>
+          <label>Индекс <input name="delivery_postcode" value="{fv('delivery_postcode')}"/></label>
+          <label>Город <input name="delivery_city" value="{fv('delivery_city')}"/></label>
+          <label>Страна <input name="delivery_country" value="{fv('delivery_country')}"/></label>
+          <label>Комментарий <input name="delivery_notes" value="{fv('delivery_notes')}"/></label>
+        </div>
+
+        <h2>Товары</h2>
+        <div class="dash-table-wrap"><table>
+          <tr><th>Товар</th><th>Цена</th><th>Количество / вес</th></tr>
+          {product_rows_html}
+        </table></div>
+
+        <h2>Оплата</h2>
+        <label>Способ оплаты <select name="payment_method">{payment_method_options_html}</select></label>
+        <label>Статус оплаты <select name="payment_status">{payment_status_options_html}</select></label>
+
+        <div class="form-actions">
+          <button class="button" type="submit">Создать заказ</button>
+          <a class="button button-link secondary" href="/orders">Отмена</a>
+        </div>
+      </form>
+    </section>
+    """
+
+
+@app.get("/orders/new", response_class=HTMLResponse)
+async def new_order_form(client_query: str = ""):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        products, options = _manual_order_catalog(cursor)
+        matching_clients = _search_clients_for_manual_order(cursor, client_query)
+        conn.close()
+        page = _render_new_order_form(
+            products, options, matching_clients, client_query
+        )
+        return admin_layout("➕ Новый заказ", page)
+    except Exception:
+        report_read_error("manual_order_form_failed")
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.post(
+    "/orders/new",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
+async def create_manual_order(request: Request):
+    form = await request.form()
+    form_values = {key: form.get(key, "") for key in form.keys()}
+    errors = []
+    conn = None
+    cursor = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        products, options = _manual_order_catalog(cursor)
+
+        source = str(form.get("source") or "")
+        if source not in ORDER_SOURCE_VALUES:
+            errors.append("Выберите корректный источник заказа.")
+        source_reference = (str(form.get("source_reference") or "")).strip() or None
+
+        customer_mode = form.get("customer_mode") or "existing"
+        client_id = None
+        customer_name = None
+        phone = None
+        telegram_id = None
+        username = None
+
+        if customer_mode == "new":
+            first_name = str(form.get("new_first_name") or "").strip()
+            last_name = str(form.get("new_last_name") or "").strip()
+            new_phone = str(form.get("new_phone") or "").strip()
+            raw_telegram_id = str(form.get("new_telegram_id") or "").strip()
+            if not first_name:
+                errors.append("Укажите имя нового клиента.")
+            if not new_phone:
+                errors.append("Укажите телефон нового клиента.")
+            new_telegram_id_value = None
+            if raw_telegram_id:
+                try:
+                    new_telegram_id_value = int(raw_telegram_id)
+                except ValueError:
+                    errors.append("Telegram ID должен быть числом.")
+                else:
+                    cursor.execute(
+                        "SELECT id FROM clients WHERE telegram_id = %s",
+                        (new_telegram_id_value,),
+                    )
+                    if cursor.fetchone():
+                        errors.append(
+                            "Клиент с этим Telegram ID уже существует. "
+                            "Выберите его через поиск существующих клиентов."
+                        )
+            if not errors:
+                cursor.execute(
+                    """
+                    INSERT INTO clients (telegram_id, first_name, last_name, phone)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (new_telegram_id_value, first_name, last_name or None, new_phone),
+                )
+                client_id = cursor.fetchone()[0]
+                customer_name = " ".join(part for part in (first_name, last_name) if part)
+                phone = new_phone
+                telegram_id = new_telegram_id_value
+        else:
+            raw_client_id = form.get("client_id")
+            if not raw_client_id:
+                errors.append("Выберите существующего клиента через поиск.")
+            else:
+                try:
+                    client_id = int(raw_client_id)
+                except (TypeError, ValueError):
+                    errors.append("Некорректный клиент.")
+                    client_id = None
+                else:
+                    cursor.execute(
+                        "SELECT first_name, last_name, phone, telegram_id, username "
+                        "FROM clients WHERE id = %s",
+                        (client_id,),
+                    )
+                    client_row = cursor.fetchone()
+                    if not client_row:
+                        errors.append("Выбранный клиент не найден.")
+                        client_id = None
+                    else:
+                        existing_first_name, existing_last_name, phone, telegram_id, username = client_row
+                        customer_name = " ".join(
+                            part for part in (existing_first_name, existing_last_name) if part
+                        ) or None
+
+        delivery_method = form.get("delivery_method") or "pickup"
+        if delivery_method not in ORDER_DELIVERY_METHOD_VALUES:
+            errors.append("Выберите способ доставки.")
+        delivery_street = delivery_house_number = delivery_postcode = None
+        delivery_city = delivery_country = delivery_notes = None
+        if delivery_method == "delivery":
+            delivery_street = str(form.get("delivery_street") or "").strip() or None
+            delivery_house_number = str(form.get("delivery_house_number") or "").strip() or None
+            delivery_postcode = str(form.get("delivery_postcode") or "").strip() or None
+            delivery_city = str(form.get("delivery_city") or "").strip() or None
+            delivery_country = str(form.get("delivery_country") or "").strip() or None
+            delivery_notes = str(form.get("delivery_notes") or "").strip() or None
+            if not (delivery_street and delivery_house_number and delivery_postcode and delivery_city):
+                errors.append(
+                    "Для доставки укажите улицу, дом/корпус, индекс и город."
+                )
+
+        payment_method = form.get("payment_method") or None
+        if payment_method not in ORDER_PAYMENT_METHOD_VALUES:
+            errors.append("Выберите способ оплаты.")
+        payment_status = form.get("payment_status") or "unpaid"
+        if payment_status not in ("unpaid", "paid"):
+            errors.append("Недопустимый статус оплаты.")
+
+        priced_items = []
+        products_by_id = {row[0]: row for row in products}
+
+        for product_id, name, pricing_mode, price_per_kg, fixed_price, sale_unit in products:
+            product_dict = {
+                "pricing_mode": pricing_mode,
+                "price_per_kg": price_per_kg,
+                "fixed_price": fixed_price,
+            }
+            if pricing_mode == "per_kg":
+                raw_weight = str(form.get(f"weight_{product_id}") or "").strip()
+                if not raw_weight:
+                    continue
+                try:
+                    weight = int(raw_weight)
+                except ValueError:
+                    errors.append(f"Некорректный вес для товара «{name}».")
+                    continue
+                if weight <= 0:
+                    continue
+                price, mode, snapshot = price_single_line(product_dict, weight, None, None)
+                priced_items.append({
+                    "product_id": product_id, "product_name": name, "weight": weight,
+                    "option_id": None, "price": price, "pricing_mode": mode,
+                    "price_per_kg_snapshot": snapshot,
+                })
+            elif pricing_mode == "fixed":
+                raw_qty = str(form.get(f"qty_{product_id}") or "0").strip()
+                try:
+                    qty = int(raw_qty or 0)
+                except ValueError:
+                    errors.append(f"Некорректное количество для товара «{name}».")
+                    continue
+                for _ in range(max(qty, 0)):
+                    price, mode, snapshot = price_single_line(product_dict, None, None, None)
+                    priced_items.append({
+                        "product_id": product_id, "product_name": name, "weight": None,
+                        "option_id": None, "price": price, "pricing_mode": mode,
+                        "price_per_kg_snapshot": snapshot,
+                    })
+
+        for option_id, product_id, label, option_price in options:
+            raw_qty = str(form.get(f"optqty_{option_id}") or "0").strip()
+            try:
+                qty = int(raw_qty or 0)
+            except ValueError:
+                errors.append(f"Некорректное количество для варианта «{label}».")
+                continue
+            if qty <= 0:
+                continue
+            product_row = products_by_id.get(product_id)
+            product_name = product_row[1] if product_row else label
+            product_dict = {"pricing_mode": "options"}
+            for _ in range(qty):
+                price, mode, snapshot = price_single_line(
+                    product_dict, None, option_id, option_price
+                )
+                priced_items.append({
+                    "product_id": product_id, "product_name": product_name, "weight": None,
+                    "option_id": option_id, "price": price, "pricing_mode": mode,
+                    "price_per_kg_snapshot": snapshot,
+                })
+
+        if not priced_items and not errors:
+            errors.append("Добавьте хотя бы один товар в заказ.")
+
+        if errors:
+            conn.rollback()
+            matching_clients = _search_clients_for_manual_order(
+                cursor, str(form.get("client_query") or "")
+            )
+            page = _render_new_order_form(
+                products, options, matching_clients, str(form.get("client_query") or ""),
+                form_values=form_values, errors=errors,
+            )
+            return admin_layout("➕ Новый заказ", page)
+
+        order_id, _total = insert_order(
+            cursor,
+            source=source,
+            source_reference=source_reference,
+            priced_items=priced_items,
+            client_id=client_id,
+            telegram_id=telegram_id,
+            username=username,
+            customer_name=customer_name,
+            phone=phone,
+            address=None,
+            payment_method=payment_method,
+            payment_status=payment_status,
+            delivery_method=delivery_method,
+            delivery_street=delivery_street,
+            delivery_house_number=delivery_house_number,
+            delivery_postcode=delivery_postcode,
+            delivery_city=delivery_city,
+            delivery_country=delivery_country,
+            delivery_notes=delivery_notes,
+        )
+
+        log_order_event(
+            cursor,
+            order_id,
+            "order_created",
+            f"Заказ создан вручную администратором. Источник: {source}. "
+            f"Номер: {format_order_number(order_id)}.",
+        )
+        conn.commit()
+        return RedirectResponse(f"/orders/{order_id}", status_code=303)
+    except OrderCreationError:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return admin_error_page(
+            "Ошибка", "Не удалось создать заказ: некорректные данные заказа."
+        )
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        log_admin_stable_error(
+            "/orders/new", "create_manual_order", MANUAL_ORDER_CREATE_FAILED,
+        )
+        return admin_error_page(
+            "Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже."
+        )
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.post(
+    "/orders/{order_id}/payment/{action}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
+async def update_order_payment_status(order_id: str, action: str):
+    """Checkpoint E: payment_status is the sole runtime authority here --
+    unpaid -> payment_reported -> paid -> refunded (direct unpaid -> paid is
+    also allowed for manual admin confirmation). Never touches inventory --
+    stock is only ever moved by the fulfillment 'packed'/'cancelled' actions
+    below. Legacy orders.status is no longer written (frozen historical
+    data only)."""
+    if action not in PAYMENT_STATUS_LABELS:
+        return admin_error_page("Недопустимое действие", "Операция не может быть выполнена для этого заказа.")
     conn = None
     cursor = None
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT status, inventory_deducted, inventory_restored, telegram_id FROM orders WHERE order_id = %s",
+            "SELECT payment_status, telegram_id "
+            "FROM orders WHERE order_id = %s",
             (order_id,)
         )
         row = cursor.fetchone()
         if not row:
             return RedirectResponse("/orders", status_code=303)
 
-        current_status = str(row[0] or "")
+        current_payment_status = str(row[0] or "unpaid")
+        telegram_id = row[1]
+
+        if action not in PAYMENT_TRANSITIONS.get(current_payment_status, set()):
+            print("order_payment_transition_rejected")
+            return RedirectResponse(f"/orders/{order_id}", status_code=303)
+
+        cursor.execute(
+            "UPDATE orders SET payment_status = %s, updated_at = NOW() WHERE order_id = %s",
+            (action, order_id)
+        )
+        log_order_event(
+            cursor,
+            order_id,
+            "payment_status_changed",
+            f"Оплата: {payment_status_label(current_payment_status)} → {payment_status_label(action)}"
+        )
+        conn.commit()
+
+        # Customer-facing notification: only 'paid' has an established
+        # message (see send_order_status_notification's fixed vocabulary).
+        # payment_reported/refunded have never had a customer notification
+        # and none is introduced here.
+        if action == "paid":
+            try:
+                send_order_status_notification_and_record(telegram_id, order_id, "paid")
+            except Exception:
+                print(ORDER_NOTIFICATION_FAILED)
+                try:
+                    record_notification_event(
+                        order_id,
+                        "notification_failed",
+                        f"Не удалось отправить уведомление о статусе: {admin_status_label('paid')}"
+                    )
+                except Exception:
+                    print(ORDER_NOTIFICATION_FAILED)
+
+        return admin_layout(
+            "✅ Статус оплаты обновлён",
+            f"""
+            <section class="admin-card">
+              <h1>✅ Статус оплаты обновлён</h1>
+              <p>Статус оплаты заказа успешно изменён.</p>
+              <div class="form-actions">
+                <a class="button button-link" href="/orders">← К заказам</a>
+                <a class="button button-link secondary" href="/orders/{order_id}">Открыть заказ</a>
+              </div>
+            </section>
+            """,
+        )
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        log_admin_stable_error(
+            "/orders/{order_id}/payment/{action}",
+            "update_order_payment_status",
+            ORDER_PAYMENT_UPDATE_FAILED,
+        )
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.post(
+    "/orders/{order_id}/fulfillment/{action}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
+async def update_order_fulfillment_status(order_id: str, action: str):
+    """Checkpoint E: fulfillment_status is the sole runtime authority here
+    -- new -> confirmed -> picking -> packed -> ready_to_ship -> shipped ->
+    delivered, with 'cancelled' reachable from any non-terminal state.
+    Never gated by payment_status -- a cash/COD order must be able to
+    progress through fulfillment while payment_status stays 'unpaid'.
+    Legacy orders.status is no longer written (frozen historical data
+    only).
+
+    Inventory is deducted exactly once, atomically, when this transition
+    reaches 'packed' (not on any payment change), after confirming every
+    per_kg line that requires weighing already has a real weight. Inventory
+    is restored exactly once when a 'cancelled' transition is applied to an
+    order that had already been deducted."""
+    if action not in FULFILLMENT_STATUS_LABELS:
+        return admin_error_page("Недопустимое действие", "Операция не может быть выполнена для этого заказа.")
+    conn = None
+    cursor = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT fulfillment_status, inventory_deducted, "
+            "inventory_restored, telegram_id FROM orders WHERE order_id = %s",
+            (order_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return RedirectResponse("/orders", status_code=303)
+
+        current_fulfillment_status = str(row[0] or "new")
         inventory_deducted = bool(row[1])
         inventory_restored = bool(row[2])
         telegram_id = row[3]
-        allowed_transitions = {
-            "pending": {"paid", "preparing", "done", "cancelled"},
-            "awaiting_payment": {"paid", "preparing", "done", "cancelled"},
-            "payment_reported": {"paid", "preparing", "done", "cancelled"},
-            "cash_on_delivery": {"paid", "cancelled"},
-            "paid": {"preparing", "done", "cancelled"},
-            "preparing": {"done", "cancelled"},
-            "done": set(),
-            "cancelled": set(),
-        }
-        if status not in allowed_transitions.get(current_status, set()):
-            print("order_status_transition_rejected")
-            return RedirectResponse("/orders", status_code=303)
 
-        if status == "paid" and not inventory_deducted:
-            affected_product_ids = []
-            cursor.execute(
-                """
-                SELECT oi.product_id, oi.weight, p.pricing_mode
-                FROM order_items oi
-                LEFT JOIN products p ON p.id = oi.product_id
-                WHERE oi.order_id = %s
-                """,
-                (order_id,)
-            )
-            order_items = cursor.fetchall()
-            try:
-                validate_weight_inventory_modes(order_items)
-            except ValueError:
+        if action not in FULFILLMENT_TRANSITIONS.get(current_fulfillment_status, set()):
+            print("order_fulfillment_transition_rejected")
+            return RedirectResponse(f"/orders/{order_id}", status_code=303)
+
+        if action == "packed" and not inventory_deducted:
+            if _order_has_pending_weighing(cursor, order_id):
                 conn.rollback()
                 return admin_error_page(
-                    "Списание не выполнено",
-                    "Проверьте данные заказа и повторите попытку.",
+                    "Требуется взвешивание",
+                    "Перед упаковкой взвесьте все весовые товары в заказе.",
                 )
-            for product_id, weight, _pricing_mode in order_items:
-                if not product_id or not weight:
-                    continue
-                cursor.execute(
-                    """
-                    WITH before_update AS (
-                        SELECT stock_grams AS stock_before
-                        FROM products
-                        WHERE id = %s
-                    ),
-                    updated AS (
-                        UPDATE products
-                        SET stock_grams = GREATEST(stock_grams - %s, 0)
-                        WHERE id = %s
-                          AND pricing_mode = 'per_kg'
-                        RETURNING stock_grams AS stock_after
-                    )
-                    SELECT before_update.stock_before, updated.stock_after
-                    FROM before_update, updated
-                    """,
-                    (product_id, weight, product_id)
-                )
-                stock_row = cursor.fetchone()
-                if not stock_row:
-                    continue
-                affected_product_ids.append(product_id)
-                stock_before, stock_after = stock_row
-                log_inventory_movement(
-                    cursor,
-                    product_id,
-                    "order_deducted",
-                    int(stock_after or 0) - int(stock_before or 0),
-                    stock_before,
-                    stock_after,
-                    order_id,
-                    "Склад списан по заказу."
+            try:
+                affected_product_ids = deduct_order_inventory(cursor, order_id)
+            except InsufficientStockError:
+                conn.rollback()
+                return admin_error_page(
+                    "Недостаточно товара на складе",
+                    "Пополните остаток или измените состав заказа и повторите попытку.",
                 )
             if affected_product_ids:
                 cursor.execute(
@@ -3826,65 +5677,8 @@ async def update_order_status(order_id: str, status: str):
                 "Склад списан по заказу."
             )
 
-        if status == "cancelled" and inventory_deducted and not inventory_restored:
-            affected_product_ids = []
-            cursor.execute(
-                """
-                SELECT oi.product_id, COALESCE(SUM(oi.weight), 0) AS restore_grams,
-                       p.pricing_mode
-                FROM order_items oi
-                LEFT JOIN products p ON p.id = oi.product_id
-                WHERE oi.order_id = %s
-                GROUP BY oi.product_id, p.pricing_mode
-                """,
-                (order_id,)
-            )
-            restore_items = cursor.fetchall()
-            try:
-                validate_weight_inventory_modes(restore_items)
-            except ValueError:
-                conn.rollback()
-                return admin_error_page(
-                    "Возврат остатка не выполнен",
-                    "Проверьте данные заказа и повторите попытку.",
-                )
-            for product_id, restore_grams, _pricing_mode in restore_items:
-                if not product_id or not restore_grams or int(restore_grams or 0) <= 0:
-                    continue
-                cursor.execute(
-                    """
-                    WITH before_update AS (
-                        SELECT stock_grams AS stock_before
-                        FROM products
-                        WHERE id = %s
-                    ),
-                    updated AS (
-                        UPDATE products
-                        SET stock_grams = stock_grams + %s
-                        WHERE id = %s
-                          AND pricing_mode = 'per_kg'
-                        RETURNING stock_grams AS stock_after
-                    )
-                    SELECT before_update.stock_before, updated.stock_after
-                    FROM before_update, updated
-                    """,
-                    (product_id, restore_grams, product_id)
-                )
-                stock_row = cursor.fetchone()
-                if not stock_row:
-                    continue
-                affected_product_ids.append(product_id)
-                stock_before, stock_after = stock_row
-                log_inventory_movement(
-                    cursor,
-                    product_id,
-                    "stock_restored",
-                    int(stock_after or 0) - int(stock_before or 0),
-                    stock_before,
-                    stock_after,
-                    order_id,
-                    "Остаток восстановлен после отмены заказа."
-                )
+        if action == "cancelled" and inventory_deducted and not inventory_restored:
+            affected_product_ids = restore_order_inventory(cursor, order_id)
             if affected_product_ids:
                 cursor.execute(
                     """
@@ -3914,38 +5708,50 @@ async def update_order_status(order_id: str, status: str):
             )
 
         cursor.execute(
-            "UPDATE orders SET status = %s, updated_at = NOW() WHERE order_id = %s",
-            (status, order_id)
+            "UPDATE orders SET fulfillment_status = %s, updated_at = NOW() WHERE order_id = %s",
+            (action, order_id)
         )
-        if current_status != status:
-            log_order_event(
-                cursor,
-                order_id,
-                "status_changed",
-                f"Статус изменён: {admin_status_label(current_status)} → {admin_status_label(status)}"
-            )
+        log_order_event(
+            cursor,
+            order_id,
+            "fulfillment_status_changed",
+            f"Статус выполнения: {fulfillment_status_label(current_fulfillment_status)} → {fulfillment_status_label(action)}"
+        )
         conn.commit()
-        if current_status != status:
+
+        # Customer-facing notification: only the three fulfillment actions
+        # that have an established message fire one (see
+        # send_order_status_notification's fixed vocabulary) -- 'picking'
+        # is the first point a customer is told their order is being
+        # prepared, matching the single notification the old
+        # picking/packed/ready_to_ship/shipped -> 'preparing' mapping used
+        # to send exactly once. confirmed/packed/ready_to_ship/shipped
+        # never notify, same as before.
+        notification_key = {
+            "picking": "preparing",
+            "delivered": "done",
+            "cancelled": "cancelled",
+        }.get(action)
+        if notification_key is not None:
             try:
-                send_order_status_notification_and_record(
-                    telegram_id, order_id, status
-                )
+                send_order_status_notification_and_record(telegram_id, order_id, notification_key)
             except Exception:
                 print(ORDER_NOTIFICATION_FAILED)
                 try:
                     record_notification_event(
                         order_id,
                         "notification_failed",
-                        f"Не удалось отправить уведомление о статусе: {admin_status_label(status)}"
+                        f"Не удалось отправить уведомление о статусе: {admin_status_label(notification_key)}"
                     )
                 except Exception:
                     print(ORDER_NOTIFICATION_FAILED)
+
         return admin_layout(
-            "✅ Статус заказа обновлён",
+            "✅ Статус выполнения обновлён",
             f"""
             <section class="admin-card">
-              <h1>✅ Статус заказа обновлён</h1>
-              <p>Статус заказа успешно изменён.</p>
+              <h1>✅ Статус выполнения обновлён</h1>
+              <p>Статус выполнения заказа успешно изменён.</p>
               <div class="form-actions">
                 <a class="button button-link" href="/orders">← К заказам</a>
                 <a class="button button-link secondary" href="/orders/{order_id}">Открыть заказ</a>
@@ -3960,9 +5766,9 @@ async def update_order_status(order_id: str, status: str):
             except Exception:
                 pass
         log_admin_stable_error(
-            "/orders/{order_id}/status/{status}",
-            "update_order_status",
-            ORDER_STATUS_UPDATE_FAILED,
+            "/orders/{order_id}/fulfillment/{action}",
+            "update_order_fulfillment_status",
+            ORDER_FULFILLMENT_UPDATE_FAILED,
         )
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
     finally:
@@ -4001,7 +5807,10 @@ async def order_detail(order_id: str):
                 payment_reported_at,
                 inventory_deducted,
                 inventory_deducted_at,
-                order_note
+                order_note,
+                payment_status,
+                fulfillment_status,
+                source
             FROM orders
             WHERE order_id = %s
             """,
@@ -4040,12 +5849,15 @@ async def order_detail(order_id: str):
             inventory_deducted,
             inventory_deducted_at,
             order_note,
+            payment_status,
+            fulfillment_status,
+            source,
         ) = row
         try:
             cursor.execute(
                 """
                 SELECT oi.id, oi.product_name, oi.weight, oi.price, po.label,
-                       p.price_per_kg, p.pricing_mode
+                       p.price_per_kg, oi.pricing_mode, oi.price_per_kg_snapshot
                 FROM order_items oi
                 LEFT JOIN product_options po ON po.id = oi.option_id
                 LEFT JOIN products p ON p.id = oi.product_id
@@ -4090,28 +5902,53 @@ async def order_detail(order_id: str):
         html += f"<div class='detail-field'><strong>Клиент</strong>{username_text}</div>"
         html += f"<div class='detail-field'><strong>Телефон</strong>{phone_text}</div>"
         html += f"<div class='detail-field'><strong>Адрес</strong>{address_text}</div>"
-        html += f"<div class='detail-field'><strong>Статус</strong>{admin_status_badge(status)}</div>"
-        html += f"<div class='detail-field'><strong>Оплата</strong>{payment_method_text}</div>"
+        html += f"<div class='detail-field'><strong>Оплата</strong>{payment_status_badge(payment_status)}</div>"
+        html += f"<div class='detail-field'><strong>Выполнение</strong>{fulfillment_status_badge(fulfillment_status)}</div>"
+        html += f"<div class='detail-field'><strong>Источник</strong>{order_source_badge(source)}</div>"
+        html += f"<div class='detail-field'><strong>Способ оплаты</strong>{payment_method_text}</div>"
+        html += f"<div class='detail-field'><strong>Статус (устар.)</strong>{admin_status_badge(status)}</div>"
         html += "</div></section>"
-        status_action_buttons = ""
-        for target_status, button_label in order_status_actions_for(status):
-            status_action_buttons += (
-                f'<form method="post" action="/orders/{order_id_path}/status/{target_status}" '
+
+        payment_action_buttons = ""
+        for action, button_label in payment_actions_for(payment_status):
+            payment_action_buttons += (
+                f'<form method="post" action="/orders/{order_id_path}/payment/{action}" '
                 'style="display:inline; margin:0; padding:0;">'
                 f'<button class="button secondary" type="submit">{button_label}</button>'
                 '</form>'
             )
-        payment_actions = f'<div class="form-actions">{status_action_buttons}</div>' if status_action_buttons else ""
+        fulfillment_action_buttons = ""
+        for action, button_label in fulfillment_actions_for(fulfillment_status):
+            fulfillment_action_buttons += (
+                f'<form method="post" action="/orders/{order_id_path}/fulfillment/{action}" '
+                'style="display:inline; margin:0; padding:0;">'
+                f'<button class="button secondary" type="submit">{button_label}</button>'
+                '</form>'
+            )
+        payment_actions_html = (
+            f'<div class="form-actions">{payment_action_buttons}</div>' if payment_action_buttons else ""
+        )
+        fulfillment_actions_html = (
+            f'<div class="form-actions">{fulfillment_action_buttons}</div>' if fulfillment_action_buttons else ""
+        )
         html += f"""
         <section class='admin-card dash-section'>
-          <h2>Проверка оплаты</h2>
+          <h2>Оплата</h2>
           <div class='detail-grid'>
             <div class='detail-field'><strong>Способ оплаты</strong>{payment_method_text}</div>
             <div class='detail-field'><strong>Оплата выбрана</strong>{format_admin_datetime(payment_selected_at)}</div>
             <div class='detail-field'><strong>Клиент сообщил об оплате</strong>{format_admin_datetime(payment_reported_at)}</div>
-            <div class='detail-field'><strong>Текущий статус</strong>{admin_status_badge(status)}</div>
+            <div class='detail-field'><strong>Текущий статус оплаты</strong>{payment_status_badge(payment_status)}</div>
           </div>
-          {payment_actions}
+          {payment_actions_html}
+        </section>
+        <section class='admin-card dash-section'>
+          <h2>Выполнение</h2>
+          <div class='detail-grid'>
+            <div class='detail-field'><strong>Текущий статус выполнения</strong>{fulfillment_status_badge(fulfillment_status)}</div>
+            <div class='detail-field'><strong>Источник заказа</strong>{order_source_badge(source)}</div>
+          </div>
+          {fulfillment_actions_html}
         </section>
         """
         html += f"""
@@ -4188,19 +6025,31 @@ async def order_detail(order_id: str):
             html += "<tr><th>Товар</th><th>Вариант / вес</th><th>Итого</th></tr>"
             for (
                 item_id, product_name, weight, price, option_label, price_per_kg,
-                pricing_mode,
+                pricing_mode, price_per_kg_snapshot,
             ) in items:
                 item_label = option_label if option_label else f"{weight} г"
                 product_name_text = escape(str(product_name or "-"), quote=True)
                 item_label_text = escape(str(item_label or "-"), quote=True)
                 if weight is None and pricing_mode == "per_kg":
-                    price_per_kg_value = float(price_per_kg) if price_per_kg is not None else 0
+                    # Preview must match what weigh_order_item will actually
+                    # charge: the order line's own snapshot, never the
+                    # product's current price_per_kg.
+                    effective_price_per_kg = (
+                        price_per_kg_snapshot
+                        if price_per_kg_snapshot is not None
+                        else price_per_kg
+                    )
+                    price_per_kg_value = (
+                        float(effective_price_per_kg)
+                        if effective_price_per_kg is not None
+                        else 0
+                    )
                     preview_id = f"price_preview_{item_id}"
                     photo_preview_id = f"photo_preview_{item_id}"
                     html += (
                         f"<tr><td>{product_name_text}</td><td>{item_label_text}</td><td>"
                         f'<form method="post" action="/orders/{order_id_path}/items/{item_id}/weigh" '
-                        'enctype="multipart/form-data" '
+                        'enctype="multipart/form-data" data-csrf-multipart="header" '
                         'style="display:flex; gap:4px; align-items:center; flex-wrap:wrap; margin:0;">'
                         f'<input type="number" name="final_weight_grams" placeholder="г" required style="width:70px;" '
                         f'data-price-per-kg="{price_per_kg_value}" '
@@ -4213,6 +6062,13 @@ async def order_detail(order_id: str):
                         f'<img id="{photo_preview_id}" style="display:none; max-width:40px; max-height:40px; border-radius:4px; object-fit:cover;"/>'
                         '<button class="button secondary" type="submit">Подтвердить вес</button>'
                         '</form>'
+                        '<noscript>'
+                        f'<form method="post" action="/orders/{order_id_path}/items/{item_id}/weigh" '
+                        'style="display:flex; gap:4px; align-items:center; flex-wrap:wrap; margin-top:8px;">'
+                        '<input type="number" name="final_weight_grams" placeholder="г" required style="width:70px;"/>'
+                        '<button class="button secondary" type="submit">Подтвердить без фото</button>'
+                        '</form>'
+                        '</noscript>'
                         '</td></tr>'
                     )
                 elif weight is None:
@@ -4230,13 +6086,14 @@ async def order_detail(order_id: str):
         html += f"<p><a class='button button-link' href=\"/orders\">← К заказам</a></p>"
         return admin_layout(f"Заказ {order_id}", html)
     except Exception:
-        log_admin_error(
-            "/orders/{order_id}", "order_detail", "order_detail_failed"
-        )
+        report_read_error("order_detail_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/orders/{order_id}/note")
+@app.post(
+    "/orders/{order_id}/note",
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def update_order_note(order_id: str, order_note: str = Form("")):
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -4263,7 +6120,10 @@ async def update_order_note(order_id: str, order_note: str = Form("")):
     return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
 
-@app.post("/orders/{order_id}/items/{item_id}/weigh")
+@app.post(
+    "/orders/{order_id}/items/{item_id}/weigh",
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def weigh_order_item(
     order_id: str,
     item_id: int,
@@ -4292,7 +6152,7 @@ async def weigh_order_item(
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT p.price_per_kg, p.pricing_mode, p.id
+            SELECT p.price_per_kg, oi.pricing_mode, p.id, oi.price_per_kg_snapshot
             FROM order_items oi
             JOIN products p ON p.id = oi.product_id
             WHERE oi.id = %s
@@ -4305,7 +6165,7 @@ async def weigh_order_item(
         if not product_row:
             return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
-        price_per_kg, pricing_mode, product_id = product_row
+        price_per_kg, pricing_mode, product_id, price_per_kg_snapshot = product_row
         try:
             validate_weight_inventory_modes(
                 [(product_id, final_weight_grams, pricing_mode)]
@@ -4316,7 +6176,13 @@ async def weigh_order_item(
                 "Взвешивание не выполнено",
                 "Проверьте вес товара и повторите попытку.",
             )
-        final_price = round(final_weight_grams / 1000 * price_per_kg, 2)
+        # Never use the product's current price_per_kg for an existing
+        # order line -- only historical rows created before this snapshot
+        # column existed fall back to it.
+        effective_price_per_kg = (
+            price_per_kg_snapshot if price_per_kg_snapshot is not None else price_per_kg
+        )
+        final_price = round(final_weight_grams / 1000 * effective_price_per_kg, 2)
 
         cursor.execute(
             """
@@ -4421,6 +6287,292 @@ async def weigh_order_item(
     return RedirectResponse(f"/orders/{order_id}", status_code=303)
 
 
+# ---------------------------------------------------------------------------
+# Warehouse/Picking Workspace V1: a work screen inside the existing admin,
+# not a separate app. Reads Orders v2 data (fulfillment_status='confirmed'/
+# 'picking'/'packed') only. Every mutation on this page is a thin wrapper
+# around the existing, already-tested functions above --
+# update_order_fulfillment_status (confirmed->picking, picking->packed,
+# including its pending-weighing check, atomic stock validation/deduction,
+# row locking and rollback-on-shortage) and weigh_order_item -- called
+# directly as plain Python functions, never duplicated. Each wrapper's only
+# job is deciding where to redirect: back to /picking on success, or the
+# existing function's own result (already a clear operational message) on
+# rejection/failure.
+# ---------------------------------------------------------------------------
+
+PICKING_QUEUE_SECTIONS = (
+    ("confirmed", "К сборке"),
+    ("picking", "В сборке"),
+    ("packed", "Недавно собрано"),
+)
+
+
+def _picking_order_lines(item_rows):
+    """Groups one order's raw order_items rows into display-ready
+    components. per_kg lines are shown individually (each carries its own
+    weight/needs_weighing); fixed/options lines are grouped into a
+    quantity per (product, option) since order_items has one row per unit,
+    not a quantity column. Returns small dicts rather than raw DB rows so
+    a future "boxes" component type can be added here without reshaping
+    this function's callers -- no schema change, presentation only."""
+    per_kg_lines = []
+    grouped = {}
+    grouped_order = []
+    for item_id, product_name, weight, option_id, option_label, pricing_mode in item_rows:
+        if pricing_mode == "per_kg":
+            per_kg_lines.append({
+                "type": "per_kg",
+                "item_id": item_id,
+                "product_name": product_name,
+                "weight": weight,
+                "needs_weighing": weight is None,
+            })
+        else:
+            key = (pricing_mode, product_name, option_id)
+            if key not in grouped:
+                grouped[key] = {
+                    "type": pricing_mode,
+                    "product_name": product_name,
+                    "option_label": option_label,
+                    "quantity": 0,
+                }
+                grouped_order.append(key)
+            grouped[key]["quantity"] += 1
+    return per_kg_lines + [grouped[key] for key in grouped_order]
+
+
+def _picking_item_line_html(order_id_path, line):
+    name_text = escape(str(line["product_name"] or "-"), quote=True)
+    if line["type"] == "per_kg":
+        if line["needs_weighing"]:
+            return (
+                f"<li>{name_text} — <span class='status warning'>требует взвешивания</span>"
+                f'<form method="post" action="/picking/{order_id_path}/items/{line["item_id"]}/weigh" '
+                'style="display:flex; gap:4px; align-items:center; margin-top:4px;">'
+                '<input type="number" name="final_weight_grams" min="1" step="1" placeholder="г" required style="width:70px;"/>'
+                '<button class="button secondary" type="submit">Подтвердить вес</button>'
+                '</form></li>'
+            )
+        return f"<li>{name_text} — {line['weight']} г</li>"
+    if line["type"] == "fixed":
+        return f"<li>{name_text} × {line['quantity']}</li>"
+    option_text = escape(str(line.get("option_label") or "-"), quote=True)
+    return f"<li>{name_text}: {option_text} × {line['quantity']}</li>"
+
+
+def _picking_order_card_html(order_row, items_for_order):
+    (
+        id_, order_id, customer_name, username, total, payment_status,
+        payment_method, fulfillment_status, source, created_at,
+        delivery_method, delivery_street, delivery_city,
+    ) = order_row
+    order_id_path = urllib.parse.quote(str(order_id), safe="")
+    customer_text = escape(str(customer_name or username or "-"), quote=True)
+    payment_method_text = escape(str(payment_method or "-"), quote=True)
+
+    if delivery_method == "delivery":
+        location_bits = [bit for bit in (delivery_city, delivery_street) if bit]
+        delivery_text = "🚚 Доставка"
+        if location_bits:
+            delivery_text += " · " + escape(", ".join(location_bits), quote=True)
+    else:
+        delivery_text = "🏬 Самовывоз"
+
+    lines = _picking_order_lines(items_for_order)
+    items_html = "".join(
+        _picking_item_line_html(order_id_path, line) for line in lines
+    ) or "<li>Нет товаров</li>"
+    has_pending_weighing = any(
+        line["type"] == "per_kg" and line["needs_weighing"] for line in lines
+    )
+
+    action_html = ""
+    if fulfillment_status == "confirmed":
+        action_html = (
+            f'<form method="post" action="/picking/{order_id_path}/start" style="display:inline; margin:0;">'
+            '<button class="button" type="submit">▶️ Начать сборку</button></form>'
+        )
+    elif fulfillment_status == "picking":
+        pack_button = (
+            f'<form method="post" action="/picking/{order_id_path}/pack" style="display:inline; margin:0;">'
+            '<button class="button" type="submit">✅ Собрано</button></form>'
+        )
+        action_html = pack_button
+        if has_pending_weighing:
+            action_html = "<p class='muted'>Взвесьте весовые товары, чтобы упаковать заказ.</p>" + pack_button
+
+    return f"""
+    <div class="admin-card picking-order-card">
+      <div class="detail-grid">
+        <div class="detail-field"><strong>№</strong>{escape(format_order_number(id_), quote=True)}</div>
+        <div class="detail-field"><strong>Клиент</strong>{customer_text}</div>
+        <div class="detail-field"><strong>Источник</strong>{order_source_badge(source)}</div>
+        <div class="detail-field"><strong>Доставка</strong>{delivery_text}</div>
+        <div class="detail-field"><strong>Сумма</strong>{total:.2f} {CURRENCY_SYMBOL}</div>
+        <div class="detail-field"><strong>Создан</strong>{format_admin_datetime(created_at)}</div>
+        <div class="detail-field"><strong>Оплата</strong>{payment_status_badge(payment_status)} <span class="muted">{payment_method_text}</span></div>
+        <div class="detail-field"><strong>Выполнение</strong>{fulfillment_status_badge(fulfillment_status)}</div>
+      </div>
+      <ul class="picking-items">{items_html}</ul>
+      <div class="form-actions">
+        {action_html}
+        <a class="button button-link secondary" href="/orders/{order_id_path}">Заказ →</a>
+      </div>
+    </div>
+    """
+
+
+@app.get("/picking", response_class=HTMLResponse)
+async def picking_workspace():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+
+        orders_by_section = {}
+        all_order_ids = []
+        for status_value, _label in PICKING_QUEUE_SECTIONS:
+            if status_value == "packed":
+                cursor.execute(
+                    """
+                    SELECT id, order_id, customer_name, username, total, payment_status,
+                           payment_method, fulfillment_status, source, created_at,
+                           delivery_method, delivery_street, delivery_city
+                    FROM orders
+                    WHERE fulfillment_status = %s
+                    ORDER BY updated_at DESC
+                    LIMIT 15
+                    """,
+                    (status_value,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, order_id, customer_name, username, total, payment_status,
+                           payment_method, fulfillment_status, source, created_at,
+                           delivery_method, delivery_street, delivery_city
+                    FROM orders
+                    WHERE fulfillment_status = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (status_value,),
+                )
+            rows = cursor.fetchall()
+            orders_by_section[status_value] = rows
+            all_order_ids.extend(row[1] for row in rows)
+
+        items_by_order = {}
+        if all_order_ids:
+            cursor.execute(
+                """
+                SELECT oi.order_id, oi.id, oi.product_name, oi.weight, oi.option_id,
+                       po.label, oi.pricing_mode
+                FROM order_items oi
+                LEFT JOIN product_options po ON po.id = oi.option_id
+                WHERE oi.order_id = ANY(%s)
+                ORDER BY oi.order_id, oi.id
+                """,
+                (all_order_ids,),
+            )
+            for (
+                order_id, item_id, product_name, weight, option_id,
+                option_label, pricing_mode,
+            ) in cursor.fetchall():
+                items_by_order.setdefault(order_id, []).append(
+                    (item_id, product_name, weight, option_id, option_label, pricing_mode)
+                )
+        conn.close()
+
+        html_content = "<section class='admin-card'><h1>📦 Сборка</h1></section>"
+        for status_value, label in PICKING_QUEUE_SECTIONS:
+            rows = orders_by_section[status_value]
+            html_content += f"<section class='admin-card dash-section'><h2>{label} ({len(rows)})</h2>"
+            if not rows:
+                html_content += "<p>Пусто.</p></section>"
+                continue
+            html_content += "<div class='picking-queue'>"
+            for row in rows:
+                html_content += _picking_order_card_html(row, items_by_order.get(row[1], []))
+            html_content += "</div></section>"
+
+        return admin_layout("📦 Сборка", html_content, refresh_seconds=30)
+    except Exception:
+        report_read_error("picking_workspace_load_failed")
+        return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+def _order_reached_fulfillment_status(order_id, target_status):
+    conn = None
+    cursor = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT fulfillment_status FROM orders WHERE order_id = %s",
+            (order_id,),
+        )
+        row = cursor.fetchone()
+        return row is not None and str(row[0] or "") == target_status
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.post("/picking/{order_id}/start", dependencies=[Depends(require_admin_csrf)])
+async def picking_start_order(order_id: str):
+    """Performs no transition logic of its own -- calls the existing
+    update_order_fulfillment_status('picking') unchanged and, only once
+    that transition has actually taken effect, redirects back to the
+    picking workspace instead of its normal destination. Any
+    rejection/error from the existing function is returned as-is."""
+    result = await update_order_fulfillment_status(order_id, "picking")
+    if _order_reached_fulfillment_status(order_id, "picking"):
+        return RedirectResponse("/picking", status_code=303)
+    return result
+
+
+@app.post("/picking/{order_id}/pack", dependencies=[Depends(require_admin_csrf)])
+async def picking_pack_order(order_id: str):
+    """Same wrapper pattern as picking_start_order, for picking -> packed.
+    update_order_fulfillment_status already performs the pending-weighing
+    check, atomic stock validation/deduction, row locking and
+    rollback-on-shortage -- this route never touches inventory or
+    order_items itself."""
+    result = await update_order_fulfillment_status(order_id, "packed")
+    if _order_reached_fulfillment_status(order_id, "packed"):
+        return RedirectResponse("/picking", status_code=303)
+    return result
+
+
+@app.post(
+    "/picking/{order_id}/items/{item_id}/weigh",
+    dependencies=[Depends(require_admin_csrf)],
+)
+async def picking_weigh_order_item(
+    order_id: str,
+    item_id: int,
+    final_weight_grams: int = Form(...),
+    photo: UploadFile = File(None),
+):
+    """Reuses weigh_order_item unchanged -- same validation, same
+    price_per_kg_snapshot rule, same customer notification behavior. Its
+    success path always returns a redirect, so on success this redirects
+    back to the picking workspace instead; a validation error page
+    (weigh_order_item's own) is returned as-is."""
+    result = await weigh_order_item(order_id, item_id, final_weight_grams, photo)
+    if isinstance(result, RedirectResponse):
+        return RedirectResponse("/picking", status_code=303)
+    return result
+
+
 @app.get("/clients", response_class=HTMLResponse)
 async def clients(q: str = ""):
     try:
@@ -4514,10 +6666,10 @@ async def client_detail(telegram_id: int):
             """
             SELECT
               COUNT(*) AS total_orders,
-              COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS completed_orders,
-              COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_orders,
-              COALESCE(SUM(CASE WHEN status = 'done' THEN total ELSE 0 END), 0) AS total_spent,
-              COALESCE(AVG(CASE WHEN status = 'done' THEN total ELSE NULL END), 0) AS average_order_value,
+              COALESCE(SUM(CASE WHEN fulfillment_status = 'delivered' THEN 1 ELSE 0 END), 0) AS completed_orders,
+              COALESCE(SUM(CASE WHEN fulfillment_status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_orders,
+              COALESCE(SUM(CASE WHEN fulfillment_status = 'delivered' THEN total ELSE 0 END), 0) AS total_spent,
+              COALESCE(AVG(CASE WHEN fulfillment_status = 'delivered' THEN total ELSE NULL END), 0) AS average_order_value,
               MIN(created_at) AS first_order_date,
               MAX(created_at) AS last_order_date
             FROM orders
@@ -4528,7 +6680,7 @@ async def client_detail(telegram_id: int):
         stats = cursor.fetchone()
         cursor.execute(
             """
-            SELECT order_id, total, status, payment_method, created_at
+            SELECT order_id, total, payment_status, fulfillment_status, payment_method, created_at
             FROM orders
             WHERE telegram_id = %s
             ORDER BY id DESC
@@ -4549,7 +6701,7 @@ async def client_detail(telegram_id: int):
             JOIN orders o ON o.order_id = oi.order_id
             LEFT JOIN products p ON p.id = oi.product_id
             WHERE o.telegram_id = %s
-              AND o.status = 'done'
+              AND o.fulfillment_status = 'delivered'
             GROUP BY
                 oi.product_id,
                 COALESCE(p.name, oi.product_name)
@@ -4624,13 +6776,14 @@ async def client_detail(telegram_id: int):
         orders_html = "<p>Заказов пока нет.</p>"
         if order_rows:
             rows_html = ""
-            for order_id, total, status, payment_method, created_at in order_rows:
+            for order_id, total, payment_status, fulfillment_status, payment_method, created_at in order_rows:
                 order_id_text = html.escape(str(order_id))
                 rows_html += f"""
                 <tr>
                   <td><a class="view-link" href="/orders/{order_id_text}">{order_id_text}</a></td>
                   <td>€{float(total or 0):.2f}</td>
-                  <td>{admin_status_badge(status)}</td>
+                  <td>{payment_status_badge(payment_status)}</td>
+                  <td>{fulfillment_status_badge(fulfillment_status)}</td>
                   <td>{html.escape(str(payment_method or '-'))}</td>
                   <td>{format_admin_datetime(created_at)}</td>
                 </tr>
@@ -4638,7 +6791,7 @@ async def client_detail(telegram_id: int):
             orders_html = f"""
             <div class="dash-table-wrap">
               <table>
-                <tr><th>Заказ</th><th>Сумма</th><th>Статус</th><th>Оплата</th><th>Создан</th></tr>
+                <tr><th>Заказ</th><th>Сумма</th><th>Оплата</th><th>Выполнение</th><th>Способ оплаты</th><th>Создан</th></tr>
                 {rows_html}
               </table>
             </div>
@@ -4810,7 +6963,10 @@ async def client_detail(telegram_id: int):
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/clients/{telegram_id}/note")
+@app.post(
+    "/clients/{telegram_id}/note",
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def update_client_note(telegram_id: int, client_note: str = Form("")):
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -4886,7 +7042,7 @@ async def products(filter: str = "", days: int = 14):
                     FROM order_items oi
                     JOIN orders o ON o.order_id = oi.order_id
                     WHERE oi.product_id = p.id
-                      AND o.status != 'cancelled'
+                      AND o.fulfillment_status != 'cancelled'
                       AND o.created_at >= NOW() - (%s * INTERVAL '1 day')
                   )
             """
@@ -4903,7 +7059,7 @@ async def products(filter: str = "", days: int = 14):
                     FROM order_items oi
                     JOIN orders o ON o.order_id = oi.order_id
                     WHERE oi.product_id = p.id
-                      AND o.status != 'cancelled'
+                      AND o.fulfillment_status != 'cancelled'
                   )
             """
 
@@ -5044,7 +7200,7 @@ async def products(filter: str = "", days: int = 14):
         html += f"</table></div><div class='mobile-products-list'>{''.join(mobile_sections)}</div></section>"
         return admin_layout("🛒 Товары", html)
     except Exception:
-        log_admin_error("/products", "list_products", "product_list_failed")
+        report_read_error("product_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 @app.get("/products/new", response_class=HTMLResponse)
 async def new_product_form():
@@ -5083,7 +7239,11 @@ async def new_product_form():
     return admin_layout("➕ Новый товар", html)
 
 
-@app.post("/products/new", response_class=HTMLResponse)
+@app.post(
+    "/products/new",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def create_product(
     category_id: int = Form(...),
     name: str = Form(...),
@@ -5493,15 +7653,14 @@ async def product_recommendations_form(product_id: int):
         """
         return admin_layout("🎯 Рекомендации продаж", html)
     except Exception:
-        log_admin_error(
-            "/products/{product_id}/recommendations",
-            "product_recommendations_form",
-            "product_recommendations_load_failed",
-        )
+        report_read_error("product_recommendations_load_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/products/{product_id}/recommendations")
+@app.post(
+    "/products/{product_id}/recommendations",
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def update_product_recommendations(
     product_id: int,
     recommended_product_id: list[int] = Form([]),
@@ -5588,7 +7747,11 @@ async def new_product_option_form(product_id: int):
     return admin_layout("➕ Новый вариант продажи", html)
 
 
-@app.post("/products/{product_id}/options/new", response_class=HTMLResponse)
+@app.post(
+    "/products/{product_id}/options/new",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def create_product_option(
     product_id: int,
     label: str = Form(""),
@@ -5723,7 +7886,11 @@ async def edit_product_option_form(option_id: int):
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/options/{option_id}/edit", response_class=HTMLResponse)
+@app.post(
+    "/options/{option_id}/edit",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def update_product_option(
     option_id: int,
     label: str = Form(""),
@@ -5805,7 +7972,11 @@ async def update_product_option(
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/options/{option_id}/toggle", response_class=HTMLResponse)
+@app.post(
+    "/options/{option_id}/toggle",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def toggle_product_option(option_id: int):
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -5849,7 +8020,11 @@ async def toggle_product_option(option_id: int):
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/products/{product_id}/edit", response_class=HTMLResponse)
+@app.post(
+    "/products/{product_id}/edit",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def update_product(
     product_id: int,
     category_id: int = Form(...),
@@ -5985,7 +8160,11 @@ async def update_product(
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/products/{product_id}/deactivate", response_class=HTMLResponse)
+@app.post(
+    "/products/{product_id}/deactivate",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def deactivate_product(product_id: int):
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -6009,7 +8188,11 @@ async def deactivate_product(product_id: int):
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/products/{product_id}/activate", response_class=HTMLResponse)
+@app.post(
+    "/products/{product_id}/activate",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def activate_product(product_id: int):
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -6079,7 +8262,11 @@ async def new_category_form():
     return admin_layout("➕ Новая категория", html)
 
 
-@app.post("/categories/new", response_class=HTMLResponse)
+@app.post(
+    "/categories/new",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def create_category(
     name: str = Form(...),
     sort_order: int = Form(0),
@@ -6165,7 +8352,11 @@ async def edit_category_form(category_id: int):
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
 
 
-@app.post("/categories/{category_id}/edit", response_class=HTMLResponse)
+@app.post(
+    "/categories/{category_id}/edit",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin_csrf)],
+)
 async def update_category(
     category_id: int,
     name: str = Form(...),

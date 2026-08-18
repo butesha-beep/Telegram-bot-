@@ -2,6 +2,7 @@ import asyncio
 import ast
 import base64
 import contextlib
+import copy
 import hashlib
 import inspect
 import io
@@ -112,9 +113,106 @@ def basic_header(username, password):
     return f"Basic {token.decode('ascii')}"
 
 
+SECURITY_TABLE_OIDS = {
+    "web_sessions": 1001,
+    "consumed_login_nonces": 1002,
+}
+
+
+def compatible_security_catalog_rows():
+    table_rows = [
+        ("public", table_name, table_oid, "r")
+        for table_name, table_oid in SECURITY_TABLE_OIDS.items()
+    ]
+    column_rows = []
+    column_numbers = {}
+    for table_name, expected_columns in db_schema.EXPECTED_SECURITY_COLUMN_STRUCTURE.items():
+        column_numbers[table_name] = {}
+        for attribute_number, (column_name, specification) in enumerate(
+            expected_columns.items(), start=1
+        ):
+            column_numbers[table_name][column_name] = attribute_number
+            column_rows.append(
+                (
+                    SECURITY_TABLE_OIDS[table_name],
+                    table_name,
+                    attribute_number,
+                    column_name,
+                    *specification,
+                )
+            )
+    constraint_rows = [
+        (
+            SECURITY_TABLE_OIDS[table_name],
+            table_name,
+            constraint_name,
+            constraint_type,
+            True,
+            list(constrained_columns),
+            definition,
+        )
+        for table_name, constraints in db_schema.EXPECTED_SECURITY_CONSTRAINT_STRUCTURE.items()
+        for constraint_name, (
+            constraint_type,
+            constrained_columns,
+            definition,
+        ) in constraints.items()
+    ]
+    index_rows = [
+        (
+            SECURITY_TABLE_OIDS[table_name],
+            table_name,
+            index_name,
+            is_unique,
+            True,
+            True,
+            len(key_columns),
+            len(key_columns),
+            list(key_columns),
+            False,
+            predicate,
+        )
+        for table_name, indexes in db_schema.EXPECTED_SECURITY_INDEX_STRUCTURE.items()
+        for index_name, (is_unique, key_columns, predicate) in indexes.items()
+    ]
+    sequence_rows = [
+        (
+            SECURITY_TABLE_OIDS[table_name],
+            table_name,
+            column_numbers[table_name]["id"],
+            SECURITY_TABLE_OIDS[table_name] + 100,
+            SECURITY_TABLE_OIDS[table_name],
+            column_numbers[table_name]["id"],
+            "a",
+            True,
+            True,
+            True,
+        )
+        for table_name in SECURITY_TABLE_OIDS
+    ]
+    return table_rows, column_rows, constraint_rows, index_rows, sequence_rows
+
+
 class SchemaCursor:
-    def __init__(self, columns=None, read_only="on", fail=False):
+    def __init__(
+        self,
+        columns=None,
+        tables=None,
+        security_columns=None,
+        constraints=None,
+        indexes=None,
+        sequences=None,
+        schema_name="public",
+        read_only="on",
+        fail=False,
+    ):
         self.columns = columns
+        self.tables = tables
+        self.security_columns = security_columns
+        self.constraints = constraints
+        self.indexes = indexes
+        self.sequences = sequences
+        self.schema_name = schema_name
         self.read_only = read_only
         self.fail = fail
         self.queries = []
@@ -126,16 +224,38 @@ class SchemaCursor:
             raise RuntimeError("credential-like internal detail")
 
     def fetchone(self):
+        if "current_schema()" in self.queries[-1][0]:
+            return (self.schema_name,)
         return (self.read_only,)
 
     def fetchall(self):
-        if self.columns is not None:
-            return self.columns
-        return [
-            (table_name, column_name)
-            for table_name, required in db_schema.REQUIRED_CATALOG_COLUMNS.items()
-            for column_name in required
-        ]
+        query = self.queries[-1][0]
+        if "information_schema.columns" in query and "data_type" not in query:
+            if self.columns is not None:
+                return self.columns
+            return [
+                (table_name, column_name)
+                for table_name, required in db_schema.REQUIRED_CATALOG_COLUMNS.items()
+                for column_name in required
+            ]
+        valid_rows = compatible_security_catalog_rows()
+        if "table_info.relkind" in query:
+            return valid_rows[0] if self.tables is None else self.tables
+        if "format_type" in query:
+            if self.security_columns is not None:
+                return self.security_columns
+            return valid_rows[1]
+        if "FROM pg_constraint" in query:
+            if self.constraints is not None:
+                return self.constraints
+            return valid_rows[2]
+        if "FROM pg_index" in query:
+            if self.indexes is not None:
+                return self.indexes
+            return valid_rows[3]
+        if "ownership_info" in query:
+            return valid_rows[4] if self.sequences is None else self.sequences
+        return []
 
     def close(self):
         self.closed = True
@@ -329,6 +449,24 @@ class PreviewFoundationTests(unittest.TestCase):
         self.assertIn("SET LOCAL lock_timeout", statements[2])
         self.assertIn("transaction_read_only", statements[3])
         self.assertIn("information_schema.columns", statements[4])
+        self.assertIn("current_schema", statements[5])
+        self.assertIn("relkind", statements[6])
+        self.assertIn("format_type", statements[7])
+        self.assertIn("pg_constraint", statements[8])
+        self.assertIn("pg_index", statements[9])
+        self.assertIn("pg_depend", statements[10])
+        executed_sql = "\n".join(statements).upper()
+        for write_keyword in (
+            "INSERT ",
+            "UPDATE ",
+            "DELETE ",
+            "CREATE ",
+            "ALTER ",
+            "DROP ",
+            "TRUNCATE ",
+            "COMMIT",
+        ):
+            self.assertNotIn(write_keyword, executed_sql)
         self.assertTrue(connection.rolled_back)
         self.assertFalse(connection.committed)
         self.assertTrue(cursor.closed)
@@ -343,6 +481,12 @@ class PreviewFoundationTests(unittest.TestCase):
         incomplete = complete_columns[:-1]
         for cursor in (
             SchemaCursor(columns=incomplete),
+            SchemaCursor(tables=[]),
+            SchemaCursor(security_columns=[]),
+            SchemaCursor(constraints=[]),
+            SchemaCursor(indexes=[]),
+            SchemaCursor(sequences=[]),
+            SchemaCursor(schema_name=""),
             SchemaCursor(read_only="off"),
             SchemaCursor(fail=True),
         ):
@@ -354,6 +498,142 @@ class PreviewFoundationTests(unittest.TestCase):
                 self.assertTrue(connection.rolled_back)
                 self.assertFalse(connection.committed)
                 self.assertTrue(connection.closed)
+
+    def test_security_catalog_structure_rejects_same_name_wrong_objects(self):
+        valid_rows = compatible_security_catalog_rows()
+
+        def rejected(rows):
+            self.assertFalse(
+                db_schema._security_catalog_is_compatible("public", *rows)
+            )
+
+        self.assertTrue(
+            db_schema._security_catalog_is_compatible("public", *valid_rows)
+        )
+
+        for table_index, replacement in (
+            (0, ("other", "web_sessions", 1001, "r")),
+            (0, ("public", "web_sessions", 1001, "v")),
+            (1, ("public", "consumed_login_nonces", 1001, "r")),
+        ):
+            rows = copy.deepcopy(valid_rows)
+            rows[0][table_index] = replacement
+            rejected(rows)
+
+        for column_index, changed_value in (
+            (0, "text"),
+            (1, False),
+            (2, False),
+        ):
+            rows = copy.deepcopy(valid_rows)
+            target = list(rows[1][0])
+            target[4 + column_index] = changed_value
+            rows[1][0] = tuple(target)
+            rejected(rows)
+        rows = copy.deepcopy(valid_rows)
+        rows[1].append((1001, "web_sessions", 99, "unexpected", "text", False, False))
+        rejected(rows)
+
+        for constraint_index in range(len(valid_rows[2])):
+            rows = copy.deepcopy(valid_rows)
+            target = list(rows[2][constraint_index])
+            target[6] = str(target[6]) + " AND FALSE"
+            rows[2][constraint_index] = tuple(target)
+            rejected(rows)
+        for field_index, changed_value in (
+            (0, 9999),
+            (3, "x"),
+            (4, False),
+            (5, ["role"]),
+        ):
+            rows = copy.deepcopy(valid_rows)
+            target = list(rows[2][0])
+            target[field_index] = changed_value
+            rows[2][0] = tuple(target)
+            rejected(rows)
+
+        for index_index in range(len(valid_rows[3])):
+            rows = copy.deepcopy(valid_rows)
+            target = list(rows[3][index_index])
+            target[8] = ["id"]
+            target[6] = 1
+            target[7] = 1
+            rows[3][index_index] = tuple(target)
+            rejected(rows)
+        active_index = next(
+            index
+            for index, row in enumerate(valid_rows[3])
+            if row[2] == "uq_web_sessions_active_role_account"
+        )
+        for field_index, changed_value in (
+            (0, 9999),
+            (3, False),
+            (4, False),
+            (5, False),
+            (7, 3),
+            (8, ["account_key", "role"]),
+            (9, True),
+            (10, ""),
+            (10, "revoked_at IS NOT NULL"),
+        ):
+            rows = copy.deepcopy(valid_rows)
+            target = list(rows[3][active_index])
+            target[field_index] = changed_value
+            rows[3][active_index] = tuple(target)
+            rejected(rows)
+
+        for sequence_index in range(len(valid_rows[4])):
+            for field_index, changed_value in (
+                (2, 99),
+                (3, 0),
+                (4, 9999),
+                (5, 99),
+                (6, "i"),
+                (7, False),
+                (8, False),
+                (9, False),
+            ):
+                rows = copy.deepcopy(valid_rows)
+                target = list(rows[4][sequence_index])
+                target[field_index] = changed_value
+                rows[4][sequence_index] = tuple(target)
+                rejected(rows)
+
+    def test_security_catalog_constraint_column_order_is_not_significant(self):
+        # Corrective fix: Postgres populates a CHECK constraint's conkey in
+        # expression-analysis order (an implementation detail), not a
+        # stable/semantic order -- the same real constraint can legitimately
+        # report its columns in a different order than
+        # EXPECTED_SECURITY_CONSTRAINT_STRUCTURE declares them. Only the
+        # column *set* must match; reversing a multi-column constraint's
+        # reported order must not be treated as an incompatibility.
+        valid_rows = compatible_security_catalog_rows()
+        expiry_index = next(
+            index
+            for index, row in enumerate(valid_rows[2])
+            if row[2] == "ck_web_sessions_expiry"
+        )
+        self.assertEqual(valid_rows[2][expiry_index][5], ["issued_at", "expires_at"])
+
+        rows = copy.deepcopy(valid_rows)
+        target = list(rows[2][expiry_index])
+        target[5] = ["expires_at", "issued_at"]  # same columns, reversed order
+        rows[2][expiry_index] = tuple(target)
+
+        self.assertTrue(db_schema._security_catalog_is_compatible("public", *rows))
+
+    def test_security_catalog_sequence_query_escapes_postgres_format_percent(self):
+        # Corrective fix: the sequence-ownership query calls Postgres's own
+        # format('nextval(%L::regclass)', ...) -- since this query is also
+        # executed with a psycopg2 params tuple, a literal %L must be
+        # escaped as %%L or psycopg2 misreads it as an extra placeholder
+        # and raises IndexError before any row is ever returned. This is a
+        # static guard: the compatible-fixture-driven tests above use a
+        # SchemaCursor mock that never re-parses the query as psycopg2
+        # would, so they cannot catch this class of bug themselves.
+        source = inspect.getsource(db_schema.catalog_schema_is_compatible)
+        self.assertIn("nextval(%%L::regclass)", source)
+        self.assertNotIn("nextval(%L::regclass)", source)
 
     def test_ready_returns_only_generic_success_or_failure(self):
         with patch.object(admin_app, "DATABASE_URL", "postgresql://configured/test"):
@@ -956,29 +1236,22 @@ class PreviewFoundationTests(unittest.TestCase):
         self.assertNotIn(SECRET_EXCEPTION_MARKER, observed)
 
     def test_dashboard_and_admin_error_logger_never_expose_raw_marker(self):
-        log_cursor = RecordingCursor()
-        log_connection = RecordingConnection(log_cursor)
         with patch.object(
             admin_app.psycopg2,
             "connect",
             side_effect=RuntimeError(SECRET_EXCEPTION_MARKER),
         ):
-            with patch.object(
-                admin_app, "get_db_connection", return_value=log_connection
-            ):
-                response, observed = capture_observables(
-                    lambda: asyncio.run(admin_app.root())
-                )
+            with patch.object(admin_app, "get_db_connection") as get_connection:
+                with patch.object(admin_app.logger, "error") as read_error:
+                    response, observed = capture_observables(
+                        lambda: asyncio.run(admin_app.root())
+                    )
 
-        stored = str(log_cursor.queries)
         response_text = response_observable(response)
-        self.assertIn(admin_app.DASHBOARD_LOAD_FAILED, stored)
-        self.assertNotIn(SECRET_EXCEPTION_MARKER, stored)
+        read_error.assert_called_once_with(admin_app.DASHBOARD_LOAD_FAILED)
+        get_connection.assert_not_called()
         self.assertNotIn(SECRET_EXCEPTION_MARKER, response_text)
         self.assertNotIn(SECRET_EXCEPTION_MARKER, observed)
-        self.assertTrue(
-            any(params and params[3] is None for _query, params in log_cursor.queries)
-        )
 
         with patch.object(
             admin_app,
@@ -1017,14 +1290,20 @@ class PreviewFoundationTests(unittest.TestCase):
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            if not isinstance(node.func, ast.Name) or node.func.id != "log_admin_error":
+            if not isinstance(node.func, ast.Name) or node.func.id not in {
+                "log_admin_error",
+                "report_read_error",
+            }:
                 continue
-            if len(node.args) < 3:
+            error_index = 2 if node.func.id == "log_admin_error" else 0
+            if len(node.args) <= error_index:
                 continue
-            if not isinstance(node.args[0], ast.Constant):
+            if node.func.id == "log_admin_error" and not isinstance(
+                node.args[0], ast.Constant
+            ):
                 continue
             calls.append(node)
-            error_code = node.args[2]
+            error_code = node.args[error_index]
             is_literal = (
                 isinstance(error_code, ast.Constant)
                 and isinstance(error_code.value, str)
@@ -1037,7 +1316,9 @@ class PreviewFoundationTests(unittest.TestCase):
             self.assertTrue(is_literal or is_allowed_name)
 
         self.assertGreaterEqual(len(calls), 12)
-        logger_source = inspect.getsource(admin_app.log_admin_error)
+        logger_source = inspect.getsource(
+            admin_app.log_admin_error
+        ) + inspect.getsource(admin_app.report_read_error)
         for fragment in (
             "str(error",
             "repr(",
@@ -1115,7 +1396,11 @@ class PreviewFoundationTests(unittest.TestCase):
                         if not connection.fail_cursor:
                             self.assertTrue(connection.cursor_instance.closed)
 
-    def test_order_status_route_cleans_up_database_and_send_failures(self):
+    def test_order_fulfillment_status_route_cleans_up_database_and_send_failures(self):
+        # Migrated from the retired update_order_status/'done' path
+        # (Checkpoint D): the same generic connection/cursor/execute/
+        # cleanup/commit failure handling is now exercised through
+        # update_order_fulfillment_status's 'delivered' action instead.
         def run_stage(stage):
             log_cursor = RecordingCursor()
             log_connection = RecordingConnection(log_cursor)
@@ -1142,7 +1427,9 @@ class PreviewFoundationTests(unittest.TestCase):
             else:
                 connection = FailureConnection(
                     RecordingCursor(
-                        fetchone_values=[("preparing", False, False, 123)]
+                        fetchone_values=[
+                            ("shipped", True, False, 123)
+                        ]
                     ),
                     fail_commit_at=1,
                 )
@@ -1155,7 +1442,9 @@ class PreviewFoundationTests(unittest.TestCase):
                 ):
                     response, observed = capture_observables(
                         lambda: asyncio.run(
-                            admin_app.update_order_status("order-1", "done")
+                            admin_app.update_order_fulfillment_status(
+                                "order-1", "delivered"
+                            )
                         )
                     )
             return connection, log_cursor, response, observed
@@ -1165,7 +1454,7 @@ class PreviewFoundationTests(unittest.TestCase):
                 connection, log_cursor, response, observed = run_stage(stage)
                 combined = observed + response_observable(response) + str(log_cursor.queries)
                 self.assertNotIn(SECRET_EXCEPTION_MARKER, combined)
-                self.assertIn(admin_app.ORDER_STATUS_UPDATE_FAILED, str(log_cursor.queries))
+                self.assertIn(admin_app.ORDER_FULFILLMENT_UPDATE_FAILED, str(log_cursor.queries))
                 if connection is not None:
                     self.assertEqual(connection.rollback_count, 1)
                     self.assertTrue(connection.closed)
@@ -1173,7 +1462,7 @@ class PreviewFoundationTests(unittest.TestCase):
                         self.assertTrue(connection.cursor_instance.closed)
 
         main_cursor = RecordingCursor(
-            fetchone_values=[("preparing", False, False, 123)]
+            fetchone_values=[("shipped", True, False, 123)]
         )
         main_connection = RecordingConnection(main_cursor)
         with patch.object(
@@ -1189,7 +1478,9 @@ class PreviewFoundationTests(unittest.TestCase):
                 ) as record_event:
                     response, observed = capture_observables(
                         lambda: asyncio.run(
-                            admin_app.update_order_status("order-1", "done")
+                            admin_app.update_order_fulfillment_status(
+                                "order-1", "delivered"
+                            )
                         )
                     )
         self.assertTrue(main_cursor.closed)
@@ -1209,7 +1500,9 @@ class PreviewFoundationTests(unittest.TestCase):
             ):
                 response, observed = capture_observables(
                     lambda: asyncio.run(
-                        admin_app.update_order_status("order-1", "done")
+                        admin_app.update_order_fulfillment_status(
+                            "order-1", "delivered"
+                        )
                     )
                 )
         self.assertEqual(primary.rollback_count, 1)
@@ -1234,7 +1527,7 @@ class PreviewFoundationTests(unittest.TestCase):
                 "commit",
                 FailureConnection(
                     RecordingCursor(
-                        fetchone_values=[(35.0, "per_kg", 19), (1,)]
+                        fetchone_values=[(35.0, "per_kg", 19, None), (1,)]
                     ),
                     fail_commit_at=1,
                 ),
@@ -1272,7 +1565,7 @@ class PreviewFoundationTests(unittest.TestCase):
 
         main_cursor = RecordingCursor(
             fetchone_values=[
-                (35.0, "per_kg", 19),
+                (35.0, "per_kg", 19, None),
                 None,
                 (123, 35.0),
             ],
@@ -1520,8 +1813,12 @@ class PreviewFoundationTests(unittest.TestCase):
         self.assertNotIn(SECRET_EXCEPTION_MARKER, observed + response_observable(response))
 
     def test_order_notification_exception_marker_is_redacted(self):
+        # Migrated from the retired update_order_status/'preparing' path
+        # (Checkpoint E): the fulfillment 'picking' action always attempts a
+        # customer notification (fixed vocabulary), so its failure is still
+        # exercised here.
         main_cursor = RecordingCursor(
-            fetchone_values=[("paid", True, False, 123456789)]
+            fetchone_values=[("confirmed", False, False, 123456789)]
         )
         event_cursor = RecordingCursor()
         main_connection = RecordingConnection(main_cursor)
@@ -1539,8 +1836,8 @@ class PreviewFoundationTests(unittest.TestCase):
                 ):
                     response, observed = capture_observables(
                         lambda: asyncio.run(
-                            admin_app.update_order_status(
-                                "order-test", "preparing"
+                            admin_app.update_order_fulfillment_status(
+                                "order-test", "picking"
                             )
                         )
                     )
@@ -1560,7 +1857,7 @@ class PreviewFoundationTests(unittest.TestCase):
     def test_weighing_notification_exception_marker_is_redacted(self):
         main_cursor = RecordingCursor(
             fetchone_values=[
-                (35.0, "per_kg", 19),
+                (35.0, "per_kg", 19, None),
                 None,
                 (123456789, 35.0),
             ],
@@ -1616,7 +1913,7 @@ class PreviewFoundationTests(unittest.TestCase):
             ):
                 order_response, order_observed = capture_observables(
                     lambda: asyncio.run(
-                        admin_app.update_order_status("order-test", "paid")
+                        admin_app.update_order_payment_status("order-test", "paid")
                     )
                 )
                 weighing_response, weighing_observed = capture_observables(
@@ -1628,7 +1925,7 @@ class PreviewFoundationTests(unittest.TestCase):
                 )
 
         stored = str(log_cursor.queries)
-        self.assertIn(admin_app.ORDER_STATUS_UPDATE_FAILED, stored)
+        self.assertIn(admin_app.ORDER_PAYMENT_UPDATE_FAILED, stored)
         self.assertIn(admin_app.WEIGHING_UPDATE_FAILED, weighing_observed)
         for observable in (
             order_observed,
@@ -1696,7 +1993,8 @@ class PreviewFoundationTests(unittest.TestCase):
             admin_app.create_channel_post,
             admin_app.send_channel_post_route,
             admin_app.delete_channel_post,
-            admin_app.update_order_status,
+            admin_app.update_order_payment_status,
+            admin_app.update_order_fulfillment_status,
             admin_app.weigh_order_item,
             admin_app.log_admin_stable_error,
             bot.send_admin_message,
@@ -1931,7 +2229,19 @@ class PreviewFoundationTests(unittest.TestCase):
             "ADMIN_SESSION_SECRET": "dummy-admin-session-secret",
         }
         with patch.dict(os.environ, environment):
-            response = asyncio.run(admin_app.login("dummy-admin-password"))
+            request = make_request("/login", method="POST")
+            request.state.preauth_nonce = "test-nonce"
+            request.state.preauth_issued_at = 1
+            request.state.preauth_expires_at = 2
+            credential = admin_app.sign_admin_session()
+            with patch.object(
+                admin_app,
+                "create_authenticated_session",
+                return_value=("created", credential),
+            ):
+                response = asyncio.run(
+                    admin_app.login(request, "dummy-admin-password")
+                )
 
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "/admin")

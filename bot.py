@@ -10,10 +10,11 @@ import os
 from functools import wraps
 
 from db_schema import DATABASE_URL, catalog_schema_is_compatible, get_db_connection
+from order_creation import insert_order, price_single_line
 from runtime_settings import env_flag_enabled, get_app_env
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.exceptions import TelegramForbiddenError
-from aiogram.filters import Command
+from aiogram.filters import Command, ExceptionTypeFilter
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton
@@ -38,6 +39,34 @@ AWAITING_PAYMENT_REMINDER_MINUTES = 30
 AWAITING_PAYMENT_CANCEL_HOURS = 24
 UNPAID_ORDER_WORKER_SLEEP_SECONDS = 1800
 callback_locks = {}
+
+# Orders v2 (Checkpoint E): payment_status/fulfillment_status are the
+# runtime authority everywhere, including admin-facing Telegram display --
+# orders.status is no longer read for operational or display purposes.
+PAYMENT_STATUS_DISPLAY_LABELS = {
+    "unpaid": "не оплачен",
+    "payment_reported": "оплата заявлена",
+    "paid": "оплачен",
+    "refunded": "возврат оформлен",
+}
+FULFILLMENT_STATUS_DISPLAY_LABELS = {
+    "new": "новый",
+    "confirmed": "подтверждён",
+    "picking": "сборка",
+    "packed": "упакован",
+    "ready_to_ship": "готов к отправке",
+    "shipped": "отправлен",
+    "delivered": "доставлен",
+    "cancelled": "отменён",
+}
+
+
+def payment_status_display_label(payment_status):
+    return PAYMENT_STATUS_DISPLAY_LABELS.get(str(payment_status or ""), str(payment_status or "-"))
+
+
+def fulfillment_status_display_label(fulfillment_status):
+    return FULFILLMENT_STATUS_DISPLAY_LABELS.get(str(fulfillment_status or ""), str(fulfillment_status or "-"))
 
 
 def telegram_actions_enabled():
@@ -295,7 +324,7 @@ async def send_pending_order_reminders():
         """
         SELECT DISTINCT telegram_id
         FROM orders
-        WHERE status = 'pending'
+        WHERE payment_status = 'unpaid'
           AND payment_method IS NULL
           AND created_at <= NOW() - (%s * INTERVAL '1 minute')
           AND payment_reminded_at IS NULL
@@ -322,7 +351,8 @@ async def send_pending_order_reminders():
                     SET payment_reminded_at = NOW(),
                         updated_at = NOW()
                     WHERE telegram_id = %s
-                      AND status = 'pending'
+                      AND payment_status = 'unpaid'
+                      AND payment_method IS NULL
                       AND payment_reminded_at IS NULL
                     """,
                     (telegram_id,)
@@ -347,7 +377,8 @@ async def send_pending_order_reminders():
                         SET payment_reminded_at = NOW(),
                             updated_at = NOW()
                         WHERE telegram_id = %s
-                          AND status = 'pending'
+                          AND payment_status = 'unpaid'
+                          AND payment_method IS NULL
                           AND payment_reminded_at IS NULL
                         """,
                         (telegram_id,)
@@ -372,16 +403,18 @@ async def cancel_expired_pending_orders():
     cursor.execute(
         """
         UPDATE orders
-        SET status = 'cancelled',
+        SET fulfillment_status = 'cancelled',
             updated_at = NOW()
-        WHERE status = 'pending'
+        WHERE payment_status = 'unpaid'
           AND payment_method IS NULL
+          AND fulfillment_status = 'new'
           AND created_at <= NOW() - (%s * INTERVAL '1 hour')
           AND NOT EXISTS (
               SELECT 1
               FROM order_items
               WHERE order_items.order_id = orders.order_id
                 AND order_items.weight IS NULL
+                AND order_items.pricing_mode = 'per_kg'
           )
         """,
         (PENDING_ORDER_CANCEL_HOURS,)
@@ -398,7 +431,8 @@ async def send_awaiting_payment_reminders():
         """
         SELECT DISTINCT telegram_id
         FROM orders
-        WHERE status = 'awaiting_payment'
+        WHERE payment_status = 'unpaid'
+          AND payment_method IN ('IBAN', 'PayPal')
           AND payment_selected_at <= NOW() - (%s * INTERVAL '1 minute')
           AND payment_reminded_at IS NULL
         """,
@@ -424,7 +458,8 @@ async def send_awaiting_payment_reminders():
                     SET payment_reminded_at = NOW(),
                         updated_at = NOW()
                     WHERE telegram_id = %s
-                      AND status = 'awaiting_payment'
+                      AND payment_status = 'unpaid'
+                      AND payment_method IN ('IBAN', 'PayPal')
                       AND payment_reminded_at IS NULL
                     """,
                     (telegram_id,)
@@ -449,7 +484,8 @@ async def send_awaiting_payment_reminders():
                         SET payment_reminded_at = NOW(),
                             updated_at = NOW()
                         WHERE telegram_id = %s
-                          AND status = 'awaiting_payment'
+                          AND payment_status = 'unpaid'
+                          AND payment_method IN ('IBAN', 'PayPal')
                           AND payment_reminded_at IS NULL
                         """,
                         (telegram_id,)
@@ -474,9 +510,11 @@ async def cancel_expired_awaiting_payment_orders():
     cursor.execute(
         """
         UPDATE orders
-        SET status = 'cancelled',
+        SET fulfillment_status = 'cancelled',
             updated_at = NOW()
-        WHERE status = 'awaiting_payment'
+        WHERE payment_status = 'unpaid'
+          AND payment_method IN ('IBAN', 'PayPal')
+          AND fulfillment_status = 'new'
           AND payment_selected_at <= NOW() - (%s * INTERVAL '1 hour')
         """,
         (AWAITING_PAYMENT_CANCEL_HOURS,)
@@ -504,40 +542,54 @@ def load_json(filename):
         return json.load(file)
     
 
+class CatalogUnavailableError(RuntimeError):
+    """Raised when the live product catalog cannot be loaded from the
+    database. Callers must not substitute the demo/import JSON catalog for
+    this condition."""
+
+
 def get_products():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, category_id, name, price_per_kg, description, image_url, is_active, stock_grams, is_out_of_stock
+            SELECT id, category_id, name, price_per_kg, description, image_url, is_active, stock_grams, is_out_of_stock,
+                   pricing_mode, fixed_price, sale_unit, unit_weight_grams, stock_quantity
             FROM products
             WHERE is_active = TRUE
             ORDER BY sort_order, id
         """)
         rows = cursor.fetchall()
         conn.close()
+    except Exception as exc:
+        print("catalog_unavailable")
+        raise CatalogUnavailableError("Product catalog is unavailable") from exc
 
-        if rows:
-            products = []
-            for row in rows:
-                product_id, category_id, name, price_per_kg, description, image_url, is_active, stock_grams, is_out_of_stock = row
-                products.append({
-                    "id": product_id,
-                    "category_id": category_id,
-                    "name": name,
-                    "price_per_kg": price_per_kg,
-                    "description": description,
-                    "image_url": image_url,
-                    "photo": image_url,
-                    "is_active": is_active,
-                    "stock_grams": stock_grams,
-                    "is_out_of_stock": is_out_of_stock
-                })
-            return products
-    except Exception:
-        pass
-
-    return load_json("products.json")
+    products = []
+    for row in rows:
+        (
+            product_id, category_id, name, price_per_kg, description, image_url,
+            is_active, stock_grams, is_out_of_stock,
+            pricing_mode, fixed_price, sale_unit, unit_weight_grams, stock_quantity,
+        ) = row
+        products.append({
+            "id": product_id,
+            "category_id": category_id,
+            "name": name,
+            "price_per_kg": price_per_kg,
+            "description": description,
+            "image_url": image_url,
+            "photo": image_url,
+            "is_active": is_active,
+            "stock_grams": stock_grams,
+            "is_out_of_stock": is_out_of_stock,
+            "pricing_mode": pricing_mode,
+            "fixed_price": fixed_price,
+            "sale_unit": sale_unit,
+            "unit_weight_grams": unit_weight_grams,
+            "stock_quantity": stock_quantity,
+        })
+    return products
 
 
 def get_promotion_products():
@@ -602,6 +654,18 @@ OUT_OF_STOCK_TEXT = (
 def is_product_out_of_stock(product):
     if product.get("is_out_of_stock"):
         return True
+    pricing_mode = product.get("pricing_mode") or "per_kg"
+    if pricing_mode == "fixed":
+        fixed_price = product.get("fixed_price")
+        if fixed_price is None or float(fixed_price) <= 0:
+            return True
+        stock_quantity = product.get("stock_quantity")
+        return stock_quantity is None or int(stock_quantity or 0) <= 0
+    if pricing_mode == "options":
+        # Per-option availability is respected where it is checked (product
+        # detail and add-to-cart); grams are not the tracked unit for this
+        # mode, so the per_kg stock_grams heuristic below does not apply.
+        return False
     stock_grams = product.get("stock_grams")
     if stock_grams is None:
         return False
@@ -1147,8 +1211,6 @@ def support_message():
 
 
 def get_categories():
-    categories = []
-
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -1160,19 +1222,39 @@ def get_categories():
         """)
         rows = cursor.fetchall()
         conn.close()
+    except Exception as exc:
+        print("category_catalog_unavailable")
+        raise CatalogUnavailableError("Category catalog is unavailable") from exc
 
-        if rows:
-            categories = [
-                {"id": row[0], "name": row[1]}
-                for row in rows
-            ]
-    except Exception:
-        categories = []
+    return [{"id": row[0], "name": row[1]} for row in rows]
 
-    if not categories:
-        categories = load_json("categories.json")
 
-    return categories
+CATALOG_UNAVAILABLE_MESSAGE = "⚠️ Каталог временно недоступен. Попробуйте немного позже."
+
+
+def _answerable_message(update):
+    if update.message is not None:
+        return update.message
+    if update.callback_query is not None and update.callback_query.message is not None:
+        return update.callback_query.message
+    return None
+
+
+@dp.error(ExceptionTypeFilter(CatalogUnavailableError))
+async def handle_catalog_unavailable_error(event: types.ErrorEvent):
+    print("catalog_unavailable_customer_notified")
+    message = _answerable_message(event.update)
+    if message is not None:
+        try:
+            await message.answer(CATALOG_UNAVAILABLE_MESSAGE)
+        except Exception:
+            print("catalog_unavailable_notification_failed")
+    if event.update.callback_query is not None:
+        try:
+            await event.update.callback_query.answer()
+        except Exception:
+            pass
+    return True
 
 
 def main_menu():
@@ -1397,6 +1479,59 @@ def _build_variable_weight_explanation(product_icon, product, options):
     )
 
 
+async def _render_fixed_product(message, product, product_id, product_icon):
+    fixed_price = product.get("fixed_price")
+    sale_unit = str(product.get("sale_unit") or "шт").strip()
+    if fixed_price is None:
+        price_line = "💰 Цена уточняется"
+    else:
+        price_line = f"💰 Цена: {float(fixed_price):.2f} € / {sale_unit}"
+
+    text = (
+        f"{product_icon} {product['name']}\n\n"
+        f"{product['description']}\n\n"
+        f"{price_line}\n\n"
+        f"👇 Добавить в корзину:"
+    )
+
+    if is_product_out_of_stock(product):
+        alternatives = get_alternative_products(product["category_id"], product_id)
+        text = f"{text}\n\n{OUT_OF_STOCK_TEXT}"
+        if alternatives:
+            text = f"{text}\n\n🔎 Похожее в наличии:"
+        keyboard = out_of_stock_keyboard(product["category_id"], alternatives)
+    else:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🛒 Добавить в корзину",
+                        callback_data=f"fixed_{product_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data=f"category_{product['category_id']}"
+                    )
+                ]
+            ]
+        )
+
+    photo = product.get("photo") or product.get("image_url")
+    if photo:
+        try:
+            await message.answer_photo(
+                photo=photo,
+                caption=text,
+                reply_markup=keyboard
+            )
+        except Exception:
+            await message.answer(text, reply_markup=keyboard)
+    else:
+        await message.answer(text, reply_markup=keyboard)
+
+
 @telegram_action_boundary
 async def render_product(message, product_id, telegram_id):
     products = get_products()
@@ -1417,19 +1552,34 @@ async def render_product(message, product_id, telegram_id):
         {"product_id": product_id}
     )
 
-    price_100g = product["price_per_kg"] / 10
     product_icon = DEAL_MARKET_PRODUCT_CARD_ICONS.get(
         product.get("category_id"),
         "🛒"
     )
 
-    text = (
-        f"{product_icon} {product['name']}\n\n"
-        f"{product['description']}\n\n"
-        f"💰 Цена: {product['price_per_kg']} €/кг\n"
-        f"⚖️ 100 г: {price_100g:.2f} €\n\n"
-        f"👇 Выберите вес:"
-    )
+    pricing_mode = product.get("pricing_mode") or "per_kg"
+
+    if pricing_mode == "fixed":
+        await _render_fixed_product(message, product, product_id, product_icon)
+        return
+
+    if pricing_mode == "options":
+        # No price_per_kg exists for this mode (it is stored as 0 in the
+        # database) — never show it. Each option shows its own price below.
+        text = (
+            f"{product_icon} {product['name']}\n\n"
+            f"{product['description']}\n\n"
+            f"👇 Выберите вариант:"
+        )
+    else:
+        price_100g = product["price_per_kg"] / 10
+        text = (
+            f"{product_icon} {product['name']}\n\n"
+            f"{product['description']}\n\n"
+            f"💰 Цена: {product['price_per_kg']} €/кг\n"
+            f"⚖️ 100 г: {price_100g:.2f} €\n\n"
+            f"👇 Выберите вес:"
+        )
 
     if is_product_out_of_stock(product):
         alternatives = get_alternative_products(product["category_id"], product_id)
@@ -1456,7 +1606,7 @@ async def render_product(message, product_id, telegram_id):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, label, weight, price
+            SELECT id, label, weight, price, stock_quantity, is_out_of_stock
             FROM product_options
             WHERE product_id = %s
               AND is_active = TRUE
@@ -1464,12 +1614,49 @@ async def render_product(message, product_id, telegram_id):
             """,
             (product_id,)
         )
-        options = cursor.fetchall()
+        raw_options = cursor.fetchall()
         conn.close()
     except Exception:
-        options = []
+        raw_options = []
 
-    is_variable_weight = any(row[2] is None for row in options)
+    # Options with zero/untracked stock or an explicit out-of-stock flag can
+    # never be selected, regardless of pricing_mode.
+    options = [
+        (option_id, label, weight, option_price)
+        for option_id, label, weight, option_price, stock_quantity, option_out_of_stock
+        in raw_options
+        if not option_out_of_stock
+        and stock_quantity is not None
+        and int(stock_quantity or 0) > 0
+    ]
+
+    if pricing_mode == "options" and not options:
+        # Fail closed: no purchasable options means unavailable, never a
+        # fallback to gram buttons or a price derived from price_per_kg.
+        alternatives = get_alternative_products(product["category_id"], product_id)
+        text = f"{text}\n\n{OUT_OF_STOCK_TEXT}"
+        if alternatives:
+            text = f"{text}\n\n🔎 Похожее в наличии:"
+        keyboard = out_of_stock_keyboard(product["category_id"], alternatives)
+        photo = product.get("photo") or product.get("image_url")
+        if photo:
+            try:
+                await message.answer_photo(
+                    photo=photo,
+                    caption=text,
+                    reply_markup=keyboard
+                )
+            except Exception:
+                await message.answer(text, reply_markup=keyboard)
+        else:
+            await message.answer(text, reply_markup=keyboard)
+        return
+
+    # Weighing after order only ever applies to per_kg products; an
+    # options-mode option's own NULL weight just means "not applicable".
+    is_variable_weight = pricing_mode == "per_kg" and any(
+        row[2] is None for row in options
+    )
 
     if is_variable_weight:
         text = _build_variable_weight_explanation(product_icon, product, options)
@@ -1617,7 +1804,7 @@ async def choose_option(callback: types.CallbackQuery):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT product_id, label, weight, price
+        SELECT product_id, label, weight, price, stock_quantity, is_out_of_stock
         FROM product_options
         WHERE id = %s
           AND is_active = TRUE
@@ -1632,7 +1819,7 @@ async def choose_option(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    product_id, label, weight, price = option
+    product_id, label, weight, price, option_stock_quantity, option_is_out_of_stock = option
 
     products = get_products()
     product = next(
@@ -1647,7 +1834,13 @@ async def choose_option(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    if is_product_out_of_stock(product):
+    pricing_mode = product.get("pricing_mode") or "per_kg"
+    option_unavailable = pricing_mode == "options" and (
+        option_is_out_of_stock
+        or option_stock_quantity is None
+        or int(option_stock_quantity or 0) <= 0
+    )
+    if is_product_out_of_stock(product) or option_unavailable:
         await callback.message.answer(
             OUT_OF_STOCK_TEXT,
             reply_markup=out_of_stock_keyboard(product.get("category_id"))
@@ -1672,7 +1865,7 @@ async def choose_option(callback: types.CallbackQuery):
         ]
     )
 
-    if weight is None:
+    if weight is None and pricing_mode == "per_kg":
         preview_text = (
             f"🧮 Расчёт заказа\n\n"
             f"Товар: {product['name']}\n"
@@ -1762,7 +1955,9 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT po.product_id, po.weight, po.price, po.label, p.category_id, p.stock_grams, p.is_out_of_stock
+        SELECT po.product_id, po.weight, po.price, po.label, p.category_id,
+               p.stock_grams, p.is_out_of_stock, p.pricing_mode,
+               po.stock_quantity, po.is_out_of_stock
         FROM product_options po
         JOIN products p ON p.id = po.product_id
         WHERE po.id = %s
@@ -1779,11 +1974,21 @@ async def add_option_to_cart(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    product_id, weight, price, label, category_id, stock_grams, is_out_of_stock = option
+    (
+        product_id, weight, price, label, category_id,
+        stock_grams, is_out_of_stock, pricing_mode,
+        option_stock_quantity, option_is_out_of_stock,
+    ) = option
+    option_unavailable = pricing_mode == "options" and (
+        option_is_out_of_stock
+        or option_stock_quantity is None
+        or int(option_stock_quantity or 0) <= 0
+    )
     if is_product_out_of_stock({
+        "pricing_mode": pricing_mode,
         "stock_grams": stock_grams,
         "is_out_of_stock": is_out_of_stock
-    }):
+    }) or option_unavailable:
         conn.close()
         await callback.message.answer(
             OUT_OF_STOCK_TEXT,
@@ -1829,6 +2034,193 @@ async def add_option_to_cart(callback: types.CallbackQuery):
     # The product just added is already committed to cart_items above, so it is
     # already a member of cart_product_ids and gets excluded automatically below —
     # no separate "exclude the product just added" check is needed.
+    cart_product_ids = get_cart_product_ids(callback.from_user.id)
+    recommended_products = get_recommended_products(product_id, cart_product_ids)
+    automatic_recommendations = []
+    if not recommended_products:
+        automatic_recommendations = get_automatic_recommendations(product_id, cart_product_ids)
+    has_promotions = has_available_promotions(cart_product_ids)
+
+    display_recommendations = recommended_products or automatic_recommendations
+
+    keyboard_rows = []
+    for recommended_product in display_recommendations:
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text=recommended_product["name"],
+                callback_data=f"product_{recommended_product['id']}"
+            )
+        ])
+    if has_promotions:
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text="🔥 Посмотреть акции",
+                callback_data="promotions"
+            )
+        ])
+    keyboard_rows.append([
+        InlineKeyboardButton(
+            text="🏠 Главное меню",
+            callback_data="back_to_menu"
+        )
+    ])
+    keyboard_rows.append([
+        InlineKeyboardButton(
+            text="🛒 Корзина",
+            callback_data="cart"
+        )
+    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    success_text = (
+        "✅ Отличный выбор!\n\n"
+        "🛒 Товар успешно добавлен в корзину.\n\n"
+        "😋 Многие покупатели берут сразу несколько разных снеков, чтобы попробовать больше вкусов."
+    )
+    if recommended_products:
+        success_text += f"\n\n{random.choice(UPSELL_INTRO_PHRASES)}"
+    elif automatic_recommendations:
+        success_text += f"\n\n{random.choice(AUTO_RECOMMENDATION_PHRASES)}"
+    elif has_promotions:
+        success_text += "\n\n🔥 Для вас сейчас есть выгодные предложения:"
+
+    await callback.message.answer(
+        success_text,
+        reply_markup=keyboard
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("fixed_"))
+@telegram_action_boundary
+async def choose_fixed(callback: types.CallbackQuery):
+    product_id = int(callback.data.split("_")[1])
+
+    products = get_products()
+    product = next(
+        (p for p in products if p["id"] == product_id),
+        None
+    )
+
+    if not product or (product.get("pricing_mode") or "per_kg") != "fixed":
+        await callback.message.answer("❌ Товар не найден.")
+        await callback.answer()
+        return
+
+    if is_product_out_of_stock(product):
+        await callback.message.answer(
+            OUT_OF_STOCK_TEXT,
+            reply_markup=out_of_stock_keyboard(product.get("category_id"))
+        )
+        await callback.answer()
+        return
+
+    fixed_price = float(product.get("fixed_price") or 0)
+    sale_unit = str(product.get("sale_unit") or "шт").strip()
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛒 Добавить в корзину",
+                    callback_data=f"cart_add_fixed_{product_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=f"product_{product_id}"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.answer(
+        f"🧮 Расчёт заказа\n\n"
+        f"Товар: {product['name']}\n"
+        f"Сумма: {fixed_price:.2f} € / {sale_unit}",
+        reply_markup=keyboard
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cart_add_fixed_"))
+@telegram_action_boundary
+async def add_fixed_to_cart(callback: types.CallbackQuery):
+    if is_callback_locked(callback):
+        await callback.answer("Подождите секунду", show_alert=False)
+        return
+
+    product_id = int(callback.data.split("_")[3])
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT category_id, pricing_mode, fixed_price, stock_quantity, is_out_of_stock
+        FROM products
+        WHERE id = %s
+          AND is_active = TRUE
+        """,
+        (product_id,)
+    )
+    product_row = cursor.fetchone()
+    if not product_row:
+        conn.close()
+        await callback.message.answer("❌ Товар не найден.")
+        await callback.answer()
+        return
+
+    category_id, pricing_mode, fixed_price, stock_quantity, is_out_of_stock = product_row
+    if pricing_mode != "fixed" or is_product_out_of_stock({
+        "pricing_mode": pricing_mode,
+        "fixed_price": fixed_price,
+        "stock_quantity": stock_quantity,
+        "is_out_of_stock": is_out_of_stock,
+    }):
+        conn.close()
+        await callback.message.answer(
+            OUT_OF_STOCK_TEXT,
+            reply_markup=out_of_stock_keyboard(category_id)
+        )
+        await callback.answer()
+        return
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM cart_items
+        WHERE telegram_id = %s
+          AND product_id = %s
+          AND weight IS NULL
+          AND option_id IS NULL
+        """,
+        (callback.from_user.id, product_id)
+    )
+    quantity = cursor.fetchone()[0]
+    if quantity >= MAX_CART_ITEM_QUANTITY:
+        conn.close()
+        await callback.answer("Максимум 10 шт одного варианта", show_alert=True)
+        return
+
+    cursor.execute(
+        """
+        INSERT INTO cart_items (telegram_id, product_id, weight, option_id)
+        VALUES (%s, %s, NULL, NULL)
+        """,
+        (callback.from_user.id, product_id)
+    )
+    conn.commit()
+    conn.close()
+    log_customer_event(
+        callback.from_user.id,
+        "add_to_cart",
+        {"product_id": product_id}
+    )
+    mark_cart_active(callback.from_user.id)
+
     cart_product_ids = get_cart_product_ids(callback.from_user.id)
     recommended_products = get_recommended_products(product_id, cart_product_ids)
     automatic_recommendations = []
@@ -2153,7 +2545,14 @@ async def show_cart(callback: types.CallbackQuery):
             ])
             continue
 
-        if option_id and option_label is not None and option_price is not None:
+        pricing_mode = product.get("pricing_mode") or "per_kg"
+        if pricing_mode == "fixed":
+            unit_price = float(product.get("fixed_price") or 0)
+            price = unit_price * quantity
+            sale_unit = str(product.get("sale_unit") or "шт").strip()
+            item_detail = f"  {sale_unit}\n"
+            remove_label = sale_unit
+        elif option_id and option_label is not None and option_price is not None:
             unit_price = float(option_price)
             price = unit_price * quantity
             item_detail = f"  Вариант: {option_label}\n"
@@ -2179,6 +2578,25 @@ async def show_cart(callback: types.CallbackQuery):
             total_weight_text = f"{kg:g} кг"
         else:
             total_weight_text = f"{total_weight} г"
+
+        if pricing_mode == "fixed":
+            text += (
+                f"• {product['name']}\n"
+                f"{item_detail}"
+                f"  Количество: {quantity} шт\n"
+                f"  Сумма: {price:.2f} €\n\n"
+            )
+            remove_buttons.append([
+                InlineKeyboardButton(
+                    text=f"➖ {remove_label}",
+                    callback_data=f"remove_item_{cart_item_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"➕ {remove_label}",
+                    callback_data=f"cart_plus_fixed_{product_id}"
+                )
+            ])
+            continue
 
         if option_id and option_label is not None and option_price is not None:
             if weight is None:
@@ -2285,7 +2703,8 @@ async def cart_plus_option(callback: types.CallbackQuery):
 
     cursor.execute(
         """
-        SELECT po.product_id, po.weight, p.category_id, p.stock_grams, p.is_out_of_stock
+        SELECT po.product_id, po.weight, p.category_id, p.stock_grams, p.is_out_of_stock,
+               p.pricing_mode, po.stock_quantity, po.is_out_of_stock
         FROM product_options po
         JOIN products p ON p.id = po.product_id
         WHERE po.id = %s
@@ -2300,11 +2719,20 @@ async def cart_plus_option(callback: types.CallbackQuery):
         await callback.answer("Вариант не найден", show_alert=True)
         return
 
-    product_id, weight, category_id, stock_grams, is_out_of_stock = option
+    (
+        product_id, weight, category_id, stock_grams, is_out_of_stock,
+        pricing_mode, option_stock_quantity, option_is_out_of_stock,
+    ) = option
+    option_unavailable = pricing_mode == "options" and (
+        option_is_out_of_stock
+        or option_stock_quantity is None
+        or int(option_stock_quantity or 0) <= 0
+    )
     if is_product_out_of_stock({
+        "pricing_mode": pricing_mode,
         "stock_grams": stock_grams,
         "is_out_of_stock": is_out_of_stock
-    }):
+    }) or option_unavailable:
         conn.close()
         await callback.message.answer(
             OUT_OF_STOCK_TEXT,
@@ -2406,6 +2834,77 @@ async def cart_plus_weight(callback: types.CallbackQuery):
     await show_cart(callback)
 
 
+@dp.callback_query(F.data.startswith("cart_plus_fixed_"))
+@telegram_action_boundary
+async def cart_plus_fixed(callback: types.CallbackQuery):
+    if is_callback_locked(callback):
+        await callback.answer("Подождите секунду", show_alert=False)
+        return
+
+    product_id = int(callback.data.split("_")[3])
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT category_id, pricing_mode, fixed_price, stock_quantity, is_out_of_stock
+        FROM products
+        WHERE id = %s
+          AND is_active = TRUE
+        """,
+        (product_id,)
+    )
+    product_row = cursor.fetchone()
+    if not product_row:
+        conn.close()
+        await callback.answer("Товар не найден", show_alert=True)
+        return
+
+    category_id, pricing_mode, fixed_price, stock_quantity, is_out_of_stock = product_row
+    if pricing_mode != "fixed" or is_product_out_of_stock({
+        "pricing_mode": pricing_mode,
+        "fixed_price": fixed_price,
+        "stock_quantity": stock_quantity,
+        "is_out_of_stock": is_out_of_stock,
+    }):
+        conn.close()
+        await callback.message.answer(
+            OUT_OF_STOCK_TEXT,
+            reply_markup=out_of_stock_keyboard(category_id)
+        )
+        await callback.answer()
+        return
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM cart_items
+        WHERE telegram_id = %s
+          AND product_id = %s
+          AND weight IS NULL
+          AND option_id IS NULL
+        """,
+        (callback.from_user.id, product_id)
+    )
+    quantity = cursor.fetchone()[0]
+    if quantity >= MAX_CART_ITEM_QUANTITY:
+        conn.close()
+        await callback.answer("Максимум 10 шт одного варианта", show_alert=True)
+        return
+
+    cursor.execute(
+        """
+        INSERT INTO cart_items (telegram_id, product_id, weight, option_id)
+        VALUES (%s, %s, NULL, NULL)
+        """,
+        (callback.from_user.id, product_id)
+    )
+    conn.commit()
+    conn.close()
+    mark_cart_active(callback.from_user.id)
+    await show_cart(callback)
+
+
 @dp.callback_query(F.data.startswith("remove_item_"))
 @telegram_action_boundary
 async def remove_item(callback: types.CallbackQuery):
@@ -2490,7 +2989,8 @@ async def show_orders(message: types.Message):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT order_id, telegram_id, username, phone, address, total, status, payment_method
+        SELECT order_id, telegram_id, username, phone, address, total,
+               payment_status, fulfillment_status, payment_method
         FROM orders
         ORDER BY id DESC
         LIMIT 20
@@ -2505,7 +3005,10 @@ async def show_orders(message: types.Message):
 
     text = "📦 Последние заказы:\n\n"
 
-    for order_id, telegram_id, username, phone, address, total, status, payment_method in orders:
+    for (
+        order_id, telegram_id, username, phone, address, total,
+        payment_status, fulfillment_status, payment_method,
+    ) in orders:
 
         text += (
             f"🧾 Заказ #{order_id}\n"
@@ -2514,8 +3017,9 @@ async def show_orders(message: types.Message):
             f"📞 Телефон: {phone}\n"
             f"🏠 Адрес: {address}\n"
             f"💰 Сумма: {total:.2f} €\n"
-            f"📌 Статус: {status}\n"
-            f"💳 Оплата: {payment_method if payment_method else 'не выбрана'}\n\n"
+            f"📌 Оплата: {payment_status_display_label(payment_status)}\n"
+            f"📦 Выполнение: {fulfillment_status_display_label(fulfillment_status)}\n"
+            f"💳 Способ оплаты: {payment_method if payment_method else 'не выбран'}\n\n"
         )
 
     await message.answer(text)
@@ -2533,7 +3037,7 @@ async def show_clients(message: types.Message):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT 
+        SELECT
             c.telegram_id,
             c.username,
             c.first_name,
@@ -2542,7 +3046,14 @@ async def show_clients(message: types.Message):
             COUNT(o.id) as order_count,
             COALESCE(SUM(o.total), 0) as total_spent,
             MAX(o.id) as last_order_id,
-            (SELECT status FROM orders WHERE telegram_id = c.telegram_id ORDER BY id DESC LIMIT 1) as last_order_status
+            (
+                SELECT payment_status FROM orders
+                WHERE telegram_id = c.telegram_id ORDER BY id DESC LIMIT 1
+            ) as last_order_payment_status,
+            (
+                SELECT fulfillment_status FROM orders
+                WHERE telegram_id = c.telegram_id ORDER BY id DESC LIMIT 1
+            ) as last_order_fulfillment_status
         FROM clients c
         LEFT JOIN orders o ON c.telegram_id = o.telegram_id
         GROUP BY c.id, c.telegram_id, c.username, c.first_name, c.phone, c.address
@@ -2559,29 +3070,36 @@ async def show_clients(message: types.Message):
 
     text = "👥 База клиентов:\n\n"
 
-    for telegram_id, username, first_name, phone, address, order_count, total_spent, last_order_id, last_order_status in clients:
+    for (
+        telegram_id, username, first_name, phone, address, order_count, total_spent,
+        last_order_id, last_order_payment_status, last_order_fulfillment_status,
+    ) in clients:
         user_display = f"@{username}" if username else "без username"
 
         text += (
             f"👤 {user_display}\n"
             f"📝 Имя: {first_name if first_name else 'не указано'}\n"
         )
-        
+
         if phone:
             text += f"📞 Телефон: {phone}\n"
         if address:
             text += f"🏠 Адрес: {address}\n"
-        
+
         text += f"🆔 ID: {telegram_id}\n"
         text += f"📦 Заказов: {order_count}\n"
-        
+
         if order_count > 0:
             text += f"💰 Потрачено: {total_spent:.2f} €\n"
-            if last_order_status:
-                text += f"📌 Последний заказ: #{last_order_id} ({last_order_status})\n"
+            if last_order_payment_status or last_order_fulfillment_status:
+                text += (
+                    f"📌 Последний заказ: #{last_order_id} "
+                    f"({payment_status_display_label(last_order_payment_status)}, "
+                    f"{fulfillment_status_display_label(last_order_fulfillment_status)})\n"
+                )
         else:
             text += "📦 Заказов пока нет\n"
-        
+
         text += "\n"
 
     await message.answer(text)
@@ -2596,11 +3114,18 @@ def price_cart_items(cart_items, products):
         if not product:
             continue
 
-        if option_id and option_price is not None:
-            price = float(option_price)
+        # Pricing math itself lives in order_creation.price_single_line
+        # (shared with the admin manual-order form) -- this stays
+        # Telegram-message-formatting-only.
+        price, pricing_mode, price_per_kg_snapshot = price_single_line(
+            product, weight, option_id, option_price
+        )
+        if pricing_mode == "fixed":
+            sale_unit = str(product.get("sale_unit") or "шт").strip()
+            item_detail = f"  {sale_unit}\n"
+        elif option_id and option_price is not None:
             item_detail = f"  Вариант: {option_label}\n"
         else:
-            price = product["price_per_kg"] * weight / 1000
             item_detail = f"  Вес: {weight} г\n"
 
         total += price
@@ -2610,7 +3135,9 @@ def price_cart_items(cart_items, products):
             "weight": weight,
             "option_id": option_id,
             "price": price,
-            "item_detail": item_detail
+            "item_detail": item_detail,
+            "pricing_mode": pricing_mode,
+            "price_per_kg_snapshot": price_per_kg_snapshot,
         })
 
     return total, priced_items
@@ -2664,6 +3191,7 @@ def create_order_from_cart(
                 first_name = EXCLUDED.first_name,
                 phone = EXCLUDED.phone,
                 address = EXCLUDED.address
+            RETURNING id
         """, (
             user_id,
             username,
@@ -2671,42 +3199,56 @@ def create_order_from_cart(
             phone,
             address
         ))
-
-    cursor.execute("""
-        INSERT INTO orders (
-            order_id,
-            telegram_id,
-            username,
-            phone,
-            address,
-            total,
-            status,
-            created_at,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-    """, (
-        order_id,
-        user_id,
-        username,
-        phone,
-        address,
-        total,
-        "pending"
-    ))
-
-    for item in priced_items:
+        client_id = cursor.fetchone()[0]
+    else:
+        # The client may already exist from an earlier order even though
+        # this checkout isn't (re-)saving contact details -- link to it
+        # without touching existing telegram_id-based client behavior.
         cursor.execute(
-            "INSERT INTO order_items (order_id, product_id, product_name, weight, price, option_id) VALUES (%s, %s, %s, %s, %s, %s)",
-            (
-                order_id,
-                item["product_id"],
-                item["product"]["name"],
-                item["weight"],
-                item["price"],
-                item["option_id"]
-            )
+            "SELECT id FROM clients WHERE telegram_id = %s",
+            (user_id,)
         )
+        client_row = cursor.fetchone()
+        client_id = client_row[0] if client_row else None
+
+    # Orders v2 (Checkpoint E/F): payment_status/fulfillment_status/source
+    # are the runtime authority for new orders -- legacy orders.status is
+    # no longer written (nullable, no schema default; existing historical
+    # rows are untouched). client_id/customer_name are derived from data
+    # already present at checkout -- no new identity resolution or address
+    # parsing. delivery_street/house_number/postcode/city/country/notes are
+    # left NULL: the checkout flow only collects a single free-text address
+    # string, and orders.address keeps holding it unchanged. delivery_method
+    # is 'delivery' for every order because the Telegram flow has no pickup
+    # concept to map yet. The actual INSERTs are done by the shared
+    # order_creation core (order_id is passed explicitly here, preserving
+    # Telegram's own user_id+timestamp scheme unchanged).
+    db_items = [
+        {
+            "product_id": item["product_id"],
+            "product_name": item["product"]["name"],
+            "weight": item["weight"],
+            "option_id": item["option_id"],
+            "price": item["price"],
+            "pricing_mode": item["pricing_mode"],
+            "price_per_kg_snapshot": item["price_per_kg_snapshot"],
+        }
+        for item in priced_items
+    ]
+    order_id, total = insert_order(
+        cursor,
+        source="telegram",
+        priced_items=db_items,
+        client_id=client_id,
+        telegram_id=user_id,
+        username=username,
+        customer_name=first_name,
+        phone=phone,
+        address=address,
+        payment_status="unpaid",
+        delivery_method="delivery",
+        order_id=order_id,
+    )
 
     cursor.execute(
         "DELETE FROM cart_items WHERE telegram_id = %s",
@@ -2724,7 +3266,8 @@ def order_needs_weighing(order_id):
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT 1 FROM order_items WHERE order_id = %s AND weight IS NULL LIMIT 1",
+        "SELECT 1 FROM order_items WHERE order_id = %s AND weight IS NULL "
+        "AND pricing_mode = 'per_kg' LIMIT 1",
         (order_id,)
     )
     needs_weighing = cursor.fetchone() is not None
@@ -3199,10 +3742,12 @@ async def resume_payment(callback: types.CallbackQuery):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT order_id, total, status
+        SELECT order_id, total, payment_method
         FROM orders
         WHERE telegram_id = %s
-          AND status IN ('pending', 'awaiting_payment')
+          AND payment_status = 'unpaid'
+          AND (payment_method IS NULL OR payment_method != 'Cash')
+          AND fulfillment_status != 'cancelled'
         ORDER BY id DESC
         LIMIT 1
         """,
@@ -3220,8 +3765,8 @@ async def resume_payment(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    order_id, total, status = order_row
-    status_text = "ожидает выбора оплаты" if status == "pending" else "ожидает оплаты"
+    order_id, total, payment_method = order_row
+    status_text = "ожидает выбора оплаты" if payment_method is None else "ожидает оплаты"
     await callback.message.answer(
         f"🧾 Заказ #{order_id} {status_text}.\n\n"
         f"Сумма: {float(total or 0):.2f} €\n\n"
@@ -3255,7 +3800,8 @@ async def use_saved_data(callback: types.CallbackQuery):
         phone=phone,
         address=address,
         cart_items=cart_items,
-        products=products
+        products=products,
+        first_name=callback.from_user.first_name
     )
 
     if order_needs_weighing(order_id):
@@ -3318,7 +3864,7 @@ async def pay_iban(callback: types.CallbackQuery):
         """
         UPDATE orders
         SET payment_method = %s,
-            status = %s,
+            payment_status = 'unpaid',
             updated_at = NOW(),
             payment_selected_at = NOW()
         WHERE id = (
@@ -3330,7 +3876,7 @@ async def pay_iban(callback: types.CallbackQuery):
         )
         RETURNING order_id
         """,
-        ("IBAN", "awaiting_payment", callback.from_user.id)
+        ("IBAN", callback.from_user.id)
     )
     order_row = cursor.fetchone()
 
@@ -3397,7 +3943,7 @@ async def pay_paypal(callback: types.CallbackQuery):
         """
         UPDATE orders
         SET payment_method = %s,
-            status = %s,
+            payment_status = 'unpaid',
             updated_at = NOW(),
             payment_selected_at = NOW()
         WHERE id = (
@@ -3409,7 +3955,7 @@ async def pay_paypal(callback: types.CallbackQuery):
         )
         RETURNING order_id
         """,
-        ("PayPal", "awaiting_payment", callback.from_user.id)
+        ("PayPal", callback.from_user.id)
     )
     order_row = cursor.fetchone()
 
@@ -3463,7 +4009,7 @@ async def pay_cash(callback: types.CallbackQuery):
         """
         UPDATE orders
         SET payment_method = %s,
-            status = %s,
+            payment_status = 'unpaid',
             updated_at = NOW()
         WHERE id = (
             SELECT id
@@ -3474,7 +4020,7 @@ async def pay_cash(callback: types.CallbackQuery):
         )
         RETURNING order_id
         """,
-        ("Cash", "cash_on_delivery", callback.from_user.id)
+        ("Cash", callback.from_user.id)
     )
     order_row = cursor.fetchone()
 
@@ -3574,14 +4120,15 @@ async def payment_done_for_order(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET status = %s,
+        SET payment_status = 'payment_reported',
             updated_at = NOW(),
             payment_reported_at = NOW()
         WHERE order_id = %s
           AND telegram_id = %s
-          AND status = 'awaiting_payment'
+          AND payment_status = 'unpaid'
+          AND payment_method IN ('IBAN', 'PayPal')
         """,
-        ("payment_reported", order_id, callback.from_user.id)
+        (order_id, callback.from_user.id)
     )
 
     if cursor.rowcount == 0:
@@ -3632,7 +4179,7 @@ async def payment_done(callback: types.CallbackQuery):
     cursor.execute(
         """
         UPDATE orders
-        SET status = %s,
+        SET payment_status = 'payment_reported',
             updated_at = NOW(),
             payment_reported_at = NOW()
         WHERE id = (
@@ -3643,7 +4190,7 @@ async def payment_done(callback: types.CallbackQuery):
             LIMIT 1
         )
         """,
-        ("payment_reported", callback.from_user.id)
+        (callback.from_user.id,)
     )
 
     conn.commit()

@@ -153,22 +153,69 @@ class AdminPricingValidationTests(unittest.TestCase):
                 [(2, 1, "fixed"), (3, 1, "options")]
             )
 
-    def test_paid_order_rejects_unsupported_stock_mode_before_update(self):
+    def test_packed_transition_no_longer_rejects_fixed_or_options_lines(self):
+        # Superseded by the per-mode fulfillment dispatch: fixed/options
+        # lines used to be rejected wholesale here; they must now be
+        # deducted like any other line. See tests/test_admin_fulfillment.py
+        # for the detailed per-mode deduction/restoration coverage.
+        # (Checkpoint D: inventory deduction moved from the legacy 'paid'
+        # status transition to the fulfillment_status='packed' transition.)
         cursor = ScriptedCursor(
-            fetchone_values=[("pending", False, False, 123)],
-            fetchall_values=[[(10, 100, "fixed")]],
+            fetchone_values=[
+                ("picking", False, False, 123),
+                None,  # no pending weighing
+            ],
         )
         connection = ScriptedConnection(cursor)
-        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
-            response = asyncio.run(admin_app.update_order_status("order-1", "paid"))
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection), \
+             patch.object(admin_app, "deduct_order_inventory", return_value=[10]) as deduct:
+            response = asyncio.run(
+                admin_app.update_order_fulfillment_status("order-1", "packed")
+            )
 
-        self.assertIn("Списание не выполнено", response)
+        deduct.assert_called_once_with(cursor, "order-1")
+        self.assertNotIn("Списание не выполнено", response)
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
+
+    def test_mixed_mode_deduction_failure_rolls_back_without_partial_commit(self):
+        # Requirement 13: if fulfillment fails partway through a mixed-mode
+        # order, the existing transaction wrapper must still roll back the
+        # whole attempt rather than leaving some lines deducted and others
+        # not. (connection.committed is not asserted here: the error-logging
+        # path opens its own separate connection in production and commits
+        # independently; this test's simple mock happens to return the same
+        # object for every psycopg2.connect() call, so that unrelated commit
+        # would otherwise be conflated with the order transaction itself.)
+        cursor = ScriptedCursor(
+            fetchone_values=[
+                ("picking", False, False, 123),
+                None,  # no pending weighing
+            ],
+        )
+        connection = ScriptedConnection(cursor)
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection), \
+             patch.object(
+                 admin_app,
+                 "deduct_order_inventory",
+                 side_effect=RuntimeError("simulated mid-fulfillment failure"),
+             ):
+            response = asyncio.run(
+                admin_app.update_order_fulfillment_status("order-1", "packed")
+            )
+
+        self.assertIn("Ошибка", response)
         self.assertTrue(connection.rolled_back)
-        self.assertFalse(connection.committed)
-        self.assertFalse(any("UPDATE products" in query for query, _ in cursor.queries))
+        self.assertFalse(
+            any(
+                "UPDATE orders SET inventory_deducted" in query
+                or "fulfillment_status = %s" in query
+                for query, _ in cursor.queries
+            )
+        )
 
     def test_weighing_rejects_unsupported_stock_mode_before_update(self):
-        cursor = ScriptedCursor(fetchone_values=[(20, "options", 10)])
+        cursor = ScriptedCursor(fetchone_values=[(20, "options", 10, None)])
         connection = ScriptedConnection(cursor)
         with patch.object(admin_app.psycopg2, "connect", return_value=connection):
             response = asyncio.run(
@@ -179,6 +226,69 @@ class AdminPricingValidationTests(unittest.TestCase):
         self.assertTrue(connection.rolled_back)
         self.assertFalse(connection.committed)
         self.assertFalse(any("UPDATE order_items" in query for query, _ in cursor.queries))
+
+    def test_weighing_reads_pricing_mode_from_the_order_line_snapshot_not_live_product(self):
+        # Order-snapshot requirement: weigh_order_item must key its
+        # per_kg-only guard off oi.pricing_mode (fixed at order time), not
+        # the product's current pricing_mode, so a later admin edit to the
+        # product can't change fulfillment semantics for an existing order.
+        cursor = ScriptedCursor(fetchone_values=[(20, "per_kg", 10, None)])
+        connection = ScriptedConnection(cursor)
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
+            asyncio.run(
+                admin_app.weigh_order_item("order-1", 1, 100, photo=None)
+            )
+
+        lookup_queries = [
+            query for query, _ in cursor.queries if "FROM order_items oi" in query
+        ]
+        self.assertTrue(lookup_queries)
+        self.assertIn("oi.pricing_mode", lookup_queries[0])
+        self.assertNotIn("p.pricing_mode", lookup_queries[0])
+
+    def test_weighing_uses_price_snapshot_not_live_price_per_kg(self):
+        # product's CURRENT price_per_kg is 40 (as if an admin changed it
+        # after the order was placed); the order line snapshotted 35 at
+        # purchase time and must be the one actually charged.
+        cursor = ScriptedCursor(
+            fetchone_values=[(40.0, "per_kg", 10, 35.0), (1,)],
+        )
+        connection = ScriptedConnection(cursor)
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
+            asyncio.run(
+                admin_app.weigh_order_item("order-1", 1, 600, photo=None)
+            )
+
+        update_queries = [
+            (query, params)
+            for query, params in cursor.queries
+            if query.strip().startswith("UPDATE order_items")
+        ]
+        self.assertEqual(len(update_queries), 1)
+        final_weight_grams, final_price = update_queries[0][1][0], update_queries[0][1][1]
+        self.assertEqual(final_weight_grams, 600)
+        self.assertEqual(final_price, round(0.6 * 35.0, 2))
+        self.assertNotEqual(final_price, round(0.6 * 40.0, 2))
+
+    def test_weighing_falls_back_to_live_price_only_for_historical_null_snapshot(self):
+        # Orders created before this column existed have no snapshot; that
+        # legacy case is the only one allowed to use the live price.
+        cursor = ScriptedCursor(
+            fetchone_values=[(35.0, "per_kg", 10, None), (1,)],
+        )
+        connection = ScriptedConnection(cursor)
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
+            asyncio.run(
+                admin_app.weigh_order_item("order-1", 1, 600, photo=None)
+            )
+
+        update_queries = [
+            (query, params)
+            for query, params in cursor.queries
+            if query.strip().startswith("UPDATE order_items")
+        ]
+        final_price = update_queries[0][1][1]
+        self.assertEqual(final_price, round(0.6 * 35.0, 2))
 
     def test_admin_product_list_renders_per_kg_inventory(self):
         cursor = ScriptedCursor(fetchall_values=[[
