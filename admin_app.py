@@ -98,6 +98,7 @@ ORDER_PAYMENT_UPDATE_FAILED = "order_payment_update_failed"
 ORDER_FULFILLMENT_UPDATE_FAILED = "order_fulfillment_update_failed"
 MANUAL_ORDER_CREATE_FAILED = "manual_order_create_failed"
 MANUAL_ORDER_FORM_FAILED = "manual_order_form_failed"
+MANUAL_ORDER_CLIENT_SEARCH_FAILED = "manual_order_client_search_failed"
 PICKING_WORKSPACE_LOAD_FAILED = "picking_workspace_load_failed"
 WEIGHING_UPDATE_FAILED = "weighing_update_failed"
 WEIGHING_NOTIFICATION_FAILED = "weighing_notification_failed"
@@ -188,6 +189,7 @@ ADMIN_OPERATION_ERROR_CODES = frozenset({
     ORDER_FULFILLMENT_UPDATE_FAILED,
     MANUAL_ORDER_CREATE_FAILED,
     MANUAL_ORDER_FORM_FAILED,
+    MANUAL_ORDER_CLIENT_SEARCH_FAILED,
     PICKING_WORKSPACE_LOAD_FAILED,
     WEIGHING_UPDATE_FAILED,
     WEIGHING_NOTIFICATION_FAILED,
@@ -258,31 +260,383 @@ def admin_css():
     return """
 <style>
   :root {
-    --bg: #121212;
-    --panel: #1c1c1f;
-    --panel-soft: #252529;
-    --text: #f7f7f7;
-    --muted: #b7b7bd;
-    --line: #34343a;
-    --accent: #f97316;
-    --accent-hover: #ea580c;
+    /* Design tokens -- light, professional B2B palette */
+    --color-bg: #f5f6f8;
+    --color-surface: #ffffff;
+    --color-surface-alt: #f8fafc;
+    --color-border: #e5e7eb;
+    --color-border-strong: #d1d5db;
+    --color-text: #0f172a;
+    --color-text-secondary: #475569;
+    --color-text-muted: #64748b;
+    --color-text-faint: #94a3b8;
+
+    --color-primary: #2563eb;
+    --color-primary-hover: #1d4ed8;
+    --color-primary-subtle: #eff6ff;
+
+    --color-success: #059669;
+    --color-success-bg: #ecfdf5;
+    --color-success-border: #a7f3d0;
+    --color-warning: #b45309;
+    --color-warning-bg: #fffbeb;
+    --color-warning-border: #fde68a;
+    --color-danger: #dc2626;
+    --color-danger-bg: #fef2f2;
+    --color-danger-border: #fecaca;
+    --color-info: #0369a1;
+    --color-info-bg: #f0f9ff;
+    --color-info-border: #bae6fd;
+    --color-neutral: #475569;
+    --color-neutral-bg: #f1f5f9;
+    --color-neutral-border: #e2e8f0;
+
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+    --shadow-md: 0 6px 16px rgba(15, 23, 42, 0.08);
+
+    --sidebar-w: 248px;
+    --sidebar-w-collapsed: 72px;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+    /* Legacy aliases: every selector below written before the redesign
+       references these names. Keeping them means unmigrated pages
+       (Orders, Products, Clients, Categories, New Order, Picking) inherit
+       the light system automatically, with no markup changes, until their
+       own redesign phase. */
+    --bg: var(--color-bg);
+    --panel: var(--color-surface);
+    --panel-soft: var(--color-surface-alt);
+    --text: var(--color-text);
+    --muted: var(--color-text-muted);
+    --line: var(--color-border);
+    --accent: var(--color-primary);
+    --accent-hover: var(--color-primary-hover);
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   body {
     margin: 0;
     min-height: 100vh;
-    font-family: Arial, sans-serif;
-    background: var(--bg);
-    color: var(--text);
+    font-family: var(--font-sans);
+    background: var(--color-bg);
+    color: var(--color-text);
+    -webkit-font-smoothing: antialiased;
   }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { color: var(--accent-hover); }
+  a { color: var(--color-primary); text-decoration: none; }
+  a:hover { color: var(--color-primary-hover); }
+  h1, h2, h3 { margin: 0 0 16px; color: var(--color-text); font-weight: 700; }
+  h3 { font-size: 15px; margin-bottom: 10px; }
+  p { color: var(--color-text-muted); line-height: 1.55; }
+
+  /* ---------------------------------------------------------------------
+     Application shell: persistent left sidebar + main content column.
+     Used by admin_layout(). master_layout() keeps the older top-bar shell
+     below (admin-topbar/admin-nav), still styled from the same tokens.
+     --------------------------------------------------------------------- */
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 100;
+    padding: 10px 16px;
+    background: var(--color-primary);
+    color: #fff;
+    border-radius: 0 0 8px 0;
+    font-weight: 600;
+  }
+  .skip-link:focus { left: 0; }
+  .app-shell { display: flex; min-height: 100vh; align-items: stretch; }
+  .app-sidebar {
+    position: sticky;
+    top: 0;
+    flex: 0 0 var(--sidebar-w);
+    width: var(--sidebar-w);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--color-surface);
+    border-right: 1px solid var(--color-border);
+    transition: width 0.15s ease, flex-basis 0.15s ease;
+    z-index: 40;
+  }
+  :root.sidebar-collapsed .app-sidebar {
+    flex-basis: var(--sidebar-w-collapsed);
+    width: var(--sidebar-w-collapsed);
+  }
+  .sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 16px 14px;
+    border-bottom: 1px solid var(--color-border);
+    min-height: 60px;
+  }
+  .sidebar-brand { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--color-text); font-weight: 700; transition: color 0.12s ease; }
+  .sidebar-brand:hover { color: var(--color-primary); }
+  .sidebar-brand-mark {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: var(--color-primary);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    transition: background-color 0.12s ease;
+  }
+  .sidebar-brand:hover .sidebar-brand-mark { background: var(--color-primary-hover); }
+  .sidebar-brand-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+  .sidebar-collapse-btn, .sidebar-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    flex: none;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+  }
+  .sidebar-collapse-btn:hover, .sidebar-toggle-btn:hover { background: var(--color-surface-alt); color: var(--color-text); }
+  .sidebar-collapse-btn svg { transition: transform 0.15s ease; }
+  :root.sidebar-collapsed .sidebar-collapse-btn svg { transform: rotate(180deg); }
+  .sidebar-nav { flex: 1; overflow-y: auto; padding: 14px 10px; }
+  .sidebar-group { margin-bottom: 16px; }
+  .sidebar-group-label {
+    padding: 0 10px 6px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-text-faint);
+  }
+  .sidebar-link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 10px 9px 7px;
+    margin-bottom: 2px;
+    border-left: 3px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+    font-size: 14px;
+    font-weight: 600;
+    transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  }
+  .sidebar-link:hover { background: var(--color-surface-alt); color: var(--color-text); }
+  .sidebar-link.active { background: var(--color-primary-subtle); color: var(--color-primary); border-left-color: var(--color-primary); }
+  .sidebar-link svg { flex: none; width: 18px; height: 18px; }
+  .sidebar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sidebar-footer { padding: 12px 10px; border-top: 1px solid var(--color-border); }
+  .sidebar-logout-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 9px 10px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-text-secondary);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .sidebar-logout-btn:hover { background: var(--color-danger-bg); color: var(--color-danger); }
+  .sidebar-logout-btn svg { flex: none; width: 18px; height: 18px; }
+  :root.sidebar-collapsed .sidebar-brand-text,
+  :root.sidebar-collapsed .sidebar-label,
+  :root.sidebar-collapsed .sidebar-group-label { display: none; }
+  :root.sidebar-collapsed .sidebar-link,
+  :root.sidebar-collapsed .sidebar-logout-btn { justify-content: center; }
+  :root.sidebar-collapsed .sidebar-header {
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 8px;
+  }
+  .sidebar-backdrop { display: none; }
+  .mobile-topbar { display: none; }
+  .app-main { flex: 1; min-width: 0; }
+  .page { max-width: 1280px; margin: 0 auto; padding: 28px 32px 64px; }
+
+  /* ---------------------------------------------------------------------
+     Page header, buttons, cards, badges, forms -- shared primitives.
+     --------------------------------------------------------------------- */
+  .page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  .page-header-title { font-size: 22px; font-weight: 700; color: var(--color-text); margin: 0 0 4px; }
+  .page-header-subtitle { font-size: 14px; color: var(--color-text-muted); margin: 0; }
+  .page-header-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  .breadcrumb a { color: var(--color-text-muted); }
+  .breadcrumb a:hover { color: var(--color-primary); }
+  .breadcrumb-sep { color: var(--color-text-faint); }
+  .breadcrumb-current { color: var(--color-text-secondary); font-weight: 600; overflow-wrap: anywhere; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 9px 16px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.3;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+  }
+  .btn svg { flex: none; width: 16px; height: 16px; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
+  .btn-primary:hover { background: var(--color-primary-hover); border-color: var(--color-primary-hover); color: #fff; }
+  .btn-secondary { background: var(--color-surface); border-color: var(--color-border-strong); color: var(--color-text); }
+  .btn-secondary:hover { background: var(--color-surface-alt); border-color: var(--color-text-faint); }
+  .btn-danger { background: var(--color-surface); border-color: var(--color-danger-border); color: var(--color-danger); }
+  .btn-danger:hover { background: var(--color-danger-bg); border-color: var(--color-danger); }
+  .btn-ghost { background: transparent; border-color: transparent; color: var(--color-text-secondary); }
+  .btn-ghost:hover { background: var(--color-surface-alt); color: var(--color-text); }
+  .btn-sm { padding: 6px 12px; font-size: 13px; }
+  .btn:focus-visible, .sidebar-link:focus-visible, .sidebar-collapse-btn:focus-visible,
+  .sidebar-toggle-btn:focus-visible, .sidebar-logout-btn:focus-visible, a:focus-visible,
+  input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  .card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 20px; }
+  .card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .card-title { font-size: 15px; font-weight: 700; color: var(--color-text); margin: 0; }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .stat-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px 18px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    color: inherit;
+    text-decoration: none;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+  }
+  a.stat-card:hover { border-color: var(--color-primary); box-shadow: var(--shadow-sm); color: inherit; transform: translateY(-1px); }
+  .stat-card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .stat-card-label { font-size: 13px; font-weight: 600; color: var(--color-text-muted); }
+  .stat-card-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--color-primary-subtle); color: var(--color-primary); flex: none; }
+  .stat-card-icon svg { width: 15px; height: 15px; }
+  .stat-card.is-warning .stat-card-icon { background: var(--color-warning-bg); color: var(--color-warning); }
+  .stat-card-value { font-size: 26px; font-weight: 700; color: var(--color-text); line-height: 1; }
+
+  .quick-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 22px; }
+
+  .alert-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    border: 1px solid var(--color-warning-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-warning-bg);
+    color: var(--color-text);
+    font-size: 14px;
+    font-weight: 600;
+  }
+  a.alert-row:hover { border-color: var(--color-warning); color: var(--color-text); }
+  .alert-row-count {
+    display: inline-flex;
+    min-width: 22px;
+    justify-content: center;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--color-warning);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .disclosure { border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); margin-top: 18px; }
+  .disclosure > summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--color-text);
+  }
+  .disclosure > summary::-webkit-details-marker { display: none; }
+  .disclosure-chevron { color: var(--color-text-faint); transition: transform 0.15s ease; }
+  .disclosure[open] .disclosure-chevron { transform: rotate(180deg); }
+  .disclosure-body { padding: 0 20px 20px; border-top: 1px solid var(--color-border); padding-top: 18px; }
+
+  .data-list { display: flex; flex-direction: column; }
+  .data-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 4px;
+    border-bottom: 1px solid var(--color-border);
+    color: inherit;
+    text-decoration: none;
+  }
+  .data-list > .data-row:last-child { border-bottom: 0; }
+  a.data-row:hover { background: var(--color-surface-alt); color: inherit; }
+  .data-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .data-row-title { font-weight: 600; color: var(--color-text); font-size: 14px; overflow-wrap: anywhere; }
+  .data-row-subtitle { font-size: 13px; color: var(--color-text-muted); overflow-wrap: anywhere; }
+  .data-row-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+
+  .empty-state { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 36px 20px; color: var(--color-text-muted); }
+  .empty-state-icon { width: 36px; height: 36px; color: var(--color-text-faint); }
+  .empty-state-title { font-weight: 600; color: var(--color-text-secondary); font-size: 14px; }
+  .empty-state-text { font-size: 13px; margin: 0; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 12px 14px; text-align: left; }
+  th { background: var(--panel-soft); color: var(--text); font-size: 13px; font-weight: 700; }
+
+  /* --- Legacy/interim components: restyled to the light system through
+     the token aliases above, kept as-is structurally for pages not yet
+     migrated to the new primitives (Orders, Products, Clients,
+     Categories, New Order). --- */
   .admin-shell { min-height: 100vh; }
-  .admin-topbar {
-    border-bottom: 1px solid var(--line);
-    background: #18181b;
-  }
+  .admin-topbar { border-bottom: 1px solid var(--line); background: var(--panel); }
   .admin-nav {
     max-width: 1180px;
     margin: 0 auto;
@@ -305,221 +659,102 @@ def admin_css():
     font: inherit;
     font-size: 14px;
     font-weight: 400;
-  }
-  .nav-logout-button:hover { color: var(--accent); }
-  .admin-container {
-    max-width: 1180px;
-    margin: 0 auto;
-    padding: 34px 28px;
-  }
-  .admin-card {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 24px;
-  }
-  h1, h2 { margin: 0 0 16px; color: var(--text); }
-  p { color: var(--muted); line-height: 1.5; }
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-  th, td { border-bottom: 1px solid var(--line); padding: 12px 14px; text-align: left; }
-  th { background: var(--panel-soft); color: var(--text); }
-  .button, .button-link, button {
-    display: inline-block;
-    padding: 8px 12px;
-    border: 0;
-    border-radius: 6px;
-    background: var(--accent);
-    color: #111111;
-    font-weight: 700;
     cursor: pointer;
   }
-  .button.secondary { background: #3f3f46; color: var(--text); }
+  .nav-logout-button:hover { color: var(--accent); }
+  .admin-container { max-width: 1180px; margin: 0 auto; padding: 34px 28px; }
+  .admin-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 24px; }
+  .button, .button-link, button {
+    display: inline-block;
+    padding: 8px 14px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--accent);
+    color: #ffffff;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .button:hover, .button-link:hover, button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .button.secondary { background: var(--panel); border-color: var(--line); color: var(--text); }
+  .button.secondary:hover { background: var(--panel-soft); border-color: var(--color-text-faint); }
   .status {
     display: inline-block;
-    padding: 4px 8px;
-    border: 1px solid rgba(249, 115, 22, 0.45);
+    padding: 3px 9px;
+    border: 1px solid var(--color-primary-subtle);
     border-radius: 999px;
-    background: rgba(249, 115, 22, 0.12);
-    color: var(--accent);
-    font-size: 13px;
+    background: var(--color-primary-subtle);
+    color: var(--color-primary);
+    font-size: 12px;
     font-weight: 700;
     white-space: nowrap;
   }
-  .status.warning {
-    border-color: rgba(245, 158, 11, 0.45);
-    background: rgba(245, 158, 11, 0.14);
-    color: #fbbf24;
-  }
-  .status.info {
-    border-color: rgba(56, 189, 248, 0.45);
-    background: rgba(56, 189, 248, 0.12);
-    color: #38bdf8;
-  }
-  .status.success {
-    border-color: rgba(34, 197, 94, 0.45);
-    background: rgba(34, 197, 94, 0.12);
-    color: #4ade80;
-  }
-  .status.danger {
-    border-color: rgba(248, 113, 113, 0.45);
-    background: rgba(248, 113, 113, 0.12);
-    color: #f87171;
-  }
-  .status.neutral {
-    border-color: rgba(161, 161, 170, 0.35);
-    background: rgba(161, 161, 170, 0.12);
-    color: #d4d4d8;
-  }
-  .action-group {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 5px;
-    min-width: 0;
-    max-width: 190px;
-  }
+  .status.warning { border-color: var(--color-warning-border); background: var(--color-warning-bg); color: var(--color-warning); }
+  .status.info { border-color: var(--color-info-border); background: var(--color-info-bg); color: var(--color-info); }
+  .status.success { border-color: var(--color-success-border); background: var(--color-success-bg); color: var(--color-success); }
+  .status.danger { border-color: var(--color-danger-border); background: var(--color-danger-bg); color: var(--color-danger); }
+  .status.neutral { border-color: var(--color-neutral-border); background: var(--color-neutral-bg); color: var(--color-neutral); }
+  .status.active { border-color: var(--color-success-border); background: var(--color-success-bg); color: var(--color-success); }
+  .status.inactive { border-color: var(--color-neutral-border); background: var(--color-neutral-bg); color: var(--color-neutral); }
+  .action-group { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; min-width: 0; max-width: 220px; }
   .action-group form { display: inline-flex !important; margin: 0 !important; padding: 0 !important; }
-  .action-group .button {
-    margin: 0;
-    padding: 5px 7px;
-    font-size: 11px;
-    line-height: 1.1;
-    white-space: nowrap;
-  }
-  .dash-hero {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 24px;
-    margin-bottom: 22px;
-  }
-  .dash-kicker {
-    margin: 0 0 8px;
-    color: var(--accent);
-    font-size: 13px;
-    font-weight: 700;
-    text-transform: uppercase;
-  }
-  .dash-grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 16px;
-    margin-bottom: 18px;
-  }
+  .action-group .button { margin: 0; padding: 6px 9px; font-size: 12px; line-height: 1.2; white-space: nowrap; }
+  .dash-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+  .dash-kicker { margin: 0 0 8px; color: var(--accent); font-size: 13px; font-weight: 700; text-transform: uppercase; }
+  .dash-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px; }
   .dash-grid > * { min-width: 0; }
   .dash-card {
     display: block;
     min-width: 0;
     max-width: 100%;
-    min-height: 118px;
+    min-height: 110px;
     padding: 18px;
     border: 1px solid var(--line);
     border-top: 3px solid var(--accent);
-    border-radius: 10px;
+    border-radius: var(--radius-md);
     background: var(--panel);
     color: var(--text);
   }
-  .dash-card:hover { border-color: var(--accent); color: var(--text); }
-  .dash-card strong { display: block; margin-bottom: 8px; font-size: 18px; }
+  .dash-card:hover { border-color: var(--accent); color: var(--text); box-shadow: var(--shadow-sm); }
+  .dash-card strong { display: block; margin-bottom: 8px; font-size: 16px; }
   .dash-card span { color: var(--muted); font-size: 14px; }
-  .dash-card.priority-urgent { border-top-color: #ef4444; }
-  .dash-card.priority-today { border-top-color: #eab308; }
-  .dash-card.priority-later { border-top-color: #3b82f6; }
+  .dash-card.priority-urgent { border-top-color: var(--color-danger); }
+  .dash-card.priority-today { border-top-color: var(--color-warning); }
+  .dash-card.priority-later { border-top-color: var(--color-info); }
   .attention-banner {
     margin: 16px 0;
     padding: 14px 16px;
-    border: 1px solid rgba(245, 158, 11, 0.45);
-    border-left: 4px solid var(--accent);
-    border-radius: 8px;
-    background: rgba(245, 158, 11, 0.10);
+    border: 1px solid var(--color-warning-border);
+    border-left: 4px solid var(--color-warning);
+    border-radius: var(--radius-sm);
+    background: var(--color-warning-bg);
     color: var(--text);
     font-weight: 700;
   }
-  tr.attention-row td {
-    background: rgba(245, 158, 11, 0.08);
-    border-bottom-color: rgba(245, 158, 11, 0.24);
-  }
-  .stat-value { display: block; margin-top: 10px; font-size: 28px; font-weight: 700; color: var(--text); }
+  tr.attention-row td { background: var(--color-warning-bg); border-bottom-color: var(--color-warning-border); }
+  .stat-value { display: block; margin-top: 10px; font-size: 26px; font-weight: 700; color: var(--text); }
   .dash-section { margin-top: 22px; }
-  .dash-table-wrap {
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-  }
+  .dash-table-wrap { width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
   .analytics-mobile-list { display: none; }
-  .analytics-mobile-row {
-    min-width: 0;
-    padding: 11px 0;
-    border-bottom: 1px solid var(--line);
-  }
+  .analytics-mobile-row { min-width: 0; padding: 11px 0; border-bottom: 1px solid var(--line); }
   .analytics-mobile-row:last-child { border-bottom: 0; }
   .analytics-mobile-row dl { display: grid; gap: 8px; margin: 0; }
-  .analytics-mobile-field {
-    display: grid;
-    grid-template-columns: minmax(76px, 0.7fr) minmax(0, 1.3fr);
-    gap: 10px;
-  }
+  .analytics-mobile-field { display: grid; grid-template-columns: minmax(76px, 0.7fr) minmax(0, 1.3fr); gap: 10px; }
   .analytics-mobile-field dt { color: var(--muted); font-size: 12px; }
-  .analytics-mobile-field dd {
-    min-width: 0;
-    margin: 0;
-    overflow-wrap: anywhere;
-    font-weight: 700;
-  }
+  .analytics-mobile-field dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-weight: 700; }
   .view-link { font-weight: 700; white-space: nowrap; }
-  .detail-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-  }
-  .detail-field {
-    padding: 12px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--panel-soft);
-  }
-  .picking-queue {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 14px;
-  }
+  .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .detail-field { padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-soft); }
+  .picking-queue { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
   .picking-order-card { margin: 0; }
-  .picking-items {
-    margin: 14px 0;
-    padding-left: 18px;
-  }
+  .picking-items { margin: 14px 0; padding-left: 18px; }
   .picking-items li { margin-bottom: 6px; }
-  .detail-field strong {
-    display: block;
-    margin-bottom: 6px;
-    color: var(--muted);
-    font-size: 13px;
-  }
-  .products-table {
-    min-width: 860px;
-  }
-  .products-table th,
-  .products-table td {
-    vertical-align: middle;
-  }
-  .products-table td:nth-child(2) {
-    min-width: 180px;
-    font-weight: 700;
-  }
-  .products-table td:nth-child(3) {
-    white-space: nowrap;
-  }
-  .product-thumb {
-    display: block;
-    width: 72px;
-    height: 54px;
-    object-fit: cover;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--panel-soft);
-  }
+  .detail-field strong { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
+  .products-table { min-width: 860px; }
+  .products-table th, .products-table td { vertical-align: middle; }
+  .products-table td:nth-child(2) { min-width: 180px; font-weight: 700; }
+  .products-table td:nth-child(3) { white-space: nowrap; }
+  .product-thumb { display: block; width: 72px; height: 54px; object-fit: cover; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-soft); }
   .product-thumb-wrap { display: inline-block; }
   .product-thumb-placeholder {
     display: grid;
@@ -532,133 +767,277 @@ def admin_css():
     text-align: center;
     white-space: normal;
   }
-  .status.active {
-    border-color: rgba(34, 197, 94, 0.45);
-    background: rgba(34, 197, 94, 0.12);
-    color: #4ade80;
-  }
-  .status.inactive {
-    border-color: rgba(148, 163, 184, 0.35);
-    background: rgba(148, 163, 184, 0.12);
-    color: #cbd5e1;
-  }
-  .products-table .action-group {
-    max-width: 170px;
-  }
-  .category-row td {
-    padding: 14px;
-    background: rgba(249, 115, 22, 0.10);
-    color: var(--text);
-    font-size: 16px;
-    font-weight: 700;
-  }
-  .quick-nav {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin: 16px 0;
-  }
-  .quick-nav a {
-    padding: 7px 10px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--panel-soft);
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 700;
-  }
-  .quick-nav a:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .mobile-quick-nav,
-  .mobile-products-list { display: none; }
+  .products-table .action-group { max-width: 170px; }
+  .category-row td { padding: 14px; background: var(--color-primary-subtle); color: var(--text); font-size: 15px; font-weight: 700; }
+  .quick-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+  .quick-nav a { padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-soft); color: var(--text); font-size: 13px; font-weight: 700; }
+  .quick-nav a:hover { border-color: var(--accent); color: var(--accent); }
+  .mobile-quick-nav, .mobile-products-list { display: none; }
   .mobile-product-category { min-width: 0; }
-  .mobile-product-category h2 {
-    margin: 0 0 10px;
-    font-size: 17px;
-  }
+  .mobile-product-category h2 { margin: 0 0 10px; font-size: 17px; }
   .mobile-product-cards { display: grid; gap: 12px; }
-  .mobile-product-card {
-    min-width: 0;
-    padding: 16px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--panel-soft);
-  }
-  .mobile-product-head {
-    display: grid;
-    grid-template-columns: 72px minmax(0, 1fr);
-    gap: 12px;
-    align-items: start;
-  }
-  .mobile-product-name {
-    margin: 3px 0 0;
-    overflow-wrap: anywhere;
-    font-size: 17px;
-    line-height: 1.35;
-  }
+  .mobile-product-card { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-soft); }
+  .mobile-product-head { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; align-items: start; }
+  .mobile-product-name { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 17px; line-height: 1.35; }
   .mobile-product-id { color: var(--muted); font-size: 12px; font-weight: 700; }
-  .mobile-product-details {
-    display: grid;
-    gap: 0;
-    margin: 14px 0;
-  }
-  .mobile-product-details div {
-    display: grid;
-    grid-template-columns: minmax(92px, 0.8fr) minmax(0, 1.2fr);
-    gap: 10px;
-    padding: 9px 0;
-    border-bottom: 1px solid var(--line);
-  }
+  .mobile-product-details { display: grid; gap: 0; margin: 14px 0; }
+  .mobile-product-details div { display: grid; grid-template-columns: minmax(92px, 0.8fr) minmax(0, 1.2fr); gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); }
   .mobile-product-details dt { color: var(--muted); font-size: 13px; }
   .mobile-product-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-  .categories-table {
-    min-width: 640px;
-  }
-  .categories-table th,
-  .categories-table td {
-    vertical-align: middle;
-  }
-  .categories-table td:nth-child(2) {
-    min-width: 180px;
-    font-weight: 700;
-  }
-  .categories-table .action-group {
-    max-width: 140px;
-  }
-  .admin-form {
-    display: grid;
-    gap: 16px;
-    max-width: 720px;
-  }
-  .admin-form label {
-    display: grid;
-    gap: 7px;
-    color: var(--muted);
-    font-size: 14px;
-    font-weight: 700;
-  }
-  .admin-form input {
+  .categories-table { min-width: 640px; }
+  .categories-table th, .categories-table td { vertical-align: middle; }
+  .categories-table td:nth-child(2) { min-width: 180px; font-weight: 700; }
+  .categories-table .action-group { max-width: 140px; }
+  .admin-form { display: grid; gap: 16px; max-width: 720px; }
+  .admin-form label { display: grid; gap: 7px; color: var(--muted); font-size: 14px; font-weight: 700; }
+  .admin-form input, .admin-form select, .admin-form textarea {
     width: 100%;
-    padding: 11px 12px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: var(--panel-soft);
+    padding: 10px 12px;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
     color: var(--text);
     font: inherit;
   }
-  .admin-form input[type="checkbox"] {
-    width: auto;
-    accent-color: var(--accent);
+  .admin-form input:focus, .admin-form select:focus, .admin-form textarea:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-subtle);
   }
-  .form-actions {
+  .admin-form input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+  .form-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 4px; }
+
+  /* ---------------------------------------------------------------------
+     New Order workspace (Checkpoint 2): category/search product picker +
+     sticky order summary. Scoped to .order-workspace-form so it never
+     affects any other admin page's inputs/labels.
+     --------------------------------------------------------------------- */
+  .order-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+  .order-workspace-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .order-workspace-form label {
     display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    align-items: center;
-    margin-top: 4px;
+    flex-direction: column;
+    gap: 6px;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    font-weight: 600;
   }
+  .order-workspace-form input:not([type="radio"]):not([type="checkbox"]):not([type="number"]),
+  .order-workspace-form select,
+  .order-workspace-form textarea {
+    padding: 9px 11px;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font: inherit;
+  }
+  .order-workspace-form input:focus,
+  .order-workspace-form select:focus,
+  .order-workspace-form textarea:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-subtle);
+  }
+  .compact-field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 8px; }
+  .chip-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    width: auto;
+    padding: 7px 12px;
+    margin: 4px 8px 0 0;
+    border: 1px solid var(--color-border-strong);
+    border-radius: 999px;
+    background: var(--color-surface);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+  }
+  .chip-toggle:has(input:checked) { background: var(--color-primary-subtle); border-color: var(--color-primary); color: var(--color-primary); }
+  .chip-toggle input { margin: 0; }
+
+  .catalog-picker-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .category-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .category-chip {
+    padding: 6px 12px;
+    border: 1px solid var(--color-border-strong);
+    border-radius: 999px;
+    background: var(--color-surface);
+    color: var(--color-text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .category-chip:hover { border-color: var(--color-primary); color: var(--color-primary); }
+  .category-chip.active { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
+  .product-search-input { flex: 1; min-width: 180px; max-width: 260px; }
+
+  .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .product-card {
+    padding: 14px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-alt);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .product-card-name { font-weight: 600; font-size: 14px; color: var(--color-text); overflow-wrap: anywhere; }
+  .product-card-price { font-size: 13px; color: var(--color-text-muted); }
+
+  .weight-input-row { display: flex; align-items: center; gap: 6px; }
+  .weight-input, .qty-input {
+    width: 72px;
+    padding: 7px 8px;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    text-align: center;
+    background: var(--color-surface);
+    color: var(--color-text);
+    font: inherit;
+  }
+  .weight-unit { font-size: 12px; color: var(--color-text-muted); }
+  .weight-presets { display: flex; gap: 6px; flex-wrap: wrap; }
+  .weight-preset {
+    padding: 4px 8px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .weight-preset:hover { border-color: var(--color-primary); color: var(--color-primary); }
+
+  .qty-stepper { display: inline-flex; align-items: stretch; border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); overflow: hidden; width: fit-content; }
+  .qty-stepper-sm { transform: scale(0.9); transform-origin: left center; }
+  .qty-step {
+    width: 28px;
+    border: 0;
+    background: var(--color-surface-alt);
+    color: var(--color-text);
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    line-height: 1;
+  }
+  .qty-step:hover { background: var(--color-primary-subtle); color: var(--color-primary); }
+  .qty-stepper .qty-input { width: 44px; border: 0; border-left: 1px solid var(--color-border-strong); border-right: 1px solid var(--color-border-strong); border-radius: 0; }
+
+  .product-options-list { display: flex; flex-direction: column; gap: 8px; }
+  .product-option-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .product-option-label { font-size: 13px; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+
+  .order-summary-panel { position: sticky; top: 20px; display: flex; flex-direction: column; gap: 12px; }
+  .order-summary-lines { display: flex; flex-direction: column; }
+  .order-summary-line {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 13px;
+  }
+  .order-summary-line:last-child { border-bottom: 0; }
+  .order-summary-line-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .order-summary-line-title { font-weight: 600; color: var(--color-text); overflow-wrap: anywhere; }
+  .order-summary-line-qty { color: var(--color-text-muted); font-size: 12px; }
+  .order-summary-line-price { font-weight: 600; color: var(--color-text); white-space: nowrap; }
+  .order-summary-line-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--color-surface-alt);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+  }
+  .order-summary-line-remove:hover { background: var(--color-danger-bg); color: var(--color-danger); }
+  .order-summary-total {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 10px;
+    border-top: 1px solid var(--color-border);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--color-text);
+  }
+  .order-summary-submit { width: 100%; justify-content: center; }
+  #orderSummaryEmpty { padding: 20px 0; }
+
+  .order-summary-mobile-bar {
+    display: none;
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 16px;
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-border);
+    box-shadow: var(--shadow-md);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  @media (max-width: 960px) {
+    .order-workspace { grid-template-columns: minmax(0, 1fr); }
+    .order-summary-panel { position: static; }
+    .order-summary-mobile-bar { display: flex; }
+  }
+
+  @media (max-width: 960px) {
+    .app-sidebar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      transform: translateX(-100%);
+      flex-basis: var(--sidebar-w);
+      width: var(--sidebar-w);
+      box-shadow: var(--shadow-md);
+      transition: transform 0.18s ease;
+    }
+    :root.sidebar-open .app-sidebar { transform: translateX(0); }
+    :root.sidebar-collapsed .app-sidebar { flex-basis: var(--sidebar-w); width: var(--sidebar-w); }
+    :root.sidebar-collapsed .sidebar-brand-text,
+    :root.sidebar-collapsed .sidebar-label,
+    :root.sidebar-collapsed .sidebar-group-label { display: initial; }
+    :root.sidebar-collapsed .sidebar-header { flex-direction: row; padding: 16px 14px; }
+    .sidebar-collapse-btn { display: none; }
+    .sidebar-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.45);
+      z-index: 35;
+    }
+    :root.sidebar-open .sidebar-backdrop { display: block; }
+    .mobile-topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      padding: 12px 16px;
+      background: var(--color-surface);
+      border-bottom: 1px solid var(--color-border);
+    }
+    .mobile-topbar-brand { font-weight: 700; font-size: 15px; color: var(--color-text); }
+    .page { padding: 20px 16px 48px; }
+  }
+
   @media (max-width: 720px) {
     body { overflow-x: hidden; }
     .admin-shell, .admin-topbar, .admin-container, .admin-card {
@@ -683,9 +1062,11 @@ def admin_css():
     .admin-links a { flex: none; }
     .admin-container { padding: 22px 18px; }
     .admin-card { padding: 18px; }
+    .page-header { align-items: flex-start; flex-direction: column; }
     .dash-hero { align-items: flex-start; flex-direction: column; }
     .dash-grid { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); }
     .dash-grid > *, .dash-card > * { min-width: 0; max-width: 100%; }
+    .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .detail-grid { grid-template-columns: 1fr; }
     .action-group { min-width: 0; max-width: 100%; flex-direction: column; }
     .action-group form { min-width: 0; max-width: 100%; }
@@ -725,6 +1106,9 @@ def admin_css():
       margin: 0;
       text-align: center;
     }
+  }
+  @media (max-width: 480px) {
+    .stat-grid { grid-template-columns: minmax(0, 1fr); }
   }
   @media (max-width: 380px) {
     .admin-nav { padding-inline: 12px; }
@@ -788,10 +1172,212 @@ document.addEventListener("submit", async function (event) {{
 """
 
 
+# ---------------------------------------------------------------------------
+# Sidebar navigation: a small data-driven nav list (group label -> list of
+# (href, label, icon_key)) so future sections (Boxes, Shipping, Inventory,
+# Analytics, Settings) can be added as one new tuple entry, without
+# restructuring admin_layout() itself. Every current destination is
+# preserved exactly -- no route added, removed, or renamed.
+# ---------------------------------------------------------------------------
+ADMIN_NAV_GROUPS = (
+    ("Операции", (
+        ("/admin", "Дашборд", "dashboard"),
+        ("/orders", "Заказы", "orders"),
+        ("/orders/new", "Новый заказ", "plus"),
+        ("/picking", "Сборка", "picking"),
+    )),
+    ("Каталог", (
+        ("/products", "Товары", "products"),
+        ("/categories", "Категории", "categories"),
+    )),
+    ("Клиенты", (
+        ("/clients", "Клиенты", "clients"),
+    )),
+    ("Коммуникации", (
+        ("/broadcasts", "Рассылка", "broadcast"),
+        ("/channel", "Канал", "channel"),
+    )),
+    ("Система", (
+        ("/logs", "Логи", "logs"),
+    )),
+)
+
+_NAV_ICON_PATHS = {
+    "dashboard": '<rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect>',
+    "orders": '<path d="M21 8l-9-5-9 5 9 5 9-5z"></path><path d="M3 8v8l9 5 9-5V8"></path><path d="M12 13v8"></path>',
+    "plus": '<circle cx="12" cy="12" r="9"></circle><path d="M12 8v8M8 12h8"></path>',
+    "picking": '<rect x="5" y="6" width="14" height="15" rx="2"></rect><path d="M9 4h6a1 1 0 0 1 1 1v1H8V5a1 1 0 0 1 1-1z"></path><path d="M9 13l2 2 4-4"></path>',
+    "products": '<path d="M3 12l8-8h7a1 1 0 0 1 1 1v7l-8 8a1 1 0 0 1-1.4 0l-6.6-6.6a1 1 0 0 1 0-1.4z"></path><circle cx="15" cy="9" r="1.2"></circle>',
+    "categories": '<path d="M12 3l8 4-8 4-8-4 8-4z"></path><path d="M4 12l8 4 8-4"></path><path d="M4 16l8 4 8-4"></path>',
+    "clients": '<circle cx="12" cy="8" r="3.3"></circle><path d="M5 20c1.2-3.8 4-5.5 7-5.5s5.8 1.7 7 5.5"></path>',
+    "broadcast": '<path d="M21 3L3 10l7 3 3 7 8-17z"></path><path d="M10 13l6-6"></path>',
+    "channel": '<path d="M3 10v4a1 1 0 0 0 1 1h2l4 3V6l-4 3H4a1 1 0 0 0-1 1z"></path><path d="M16 8a5 5 0 0 1 0 8"></path>',
+    "logs": '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"></path><path d="M14 3v5h5"></path><path d="M8 13h8M8 17h8"></path>',
+    "logout": '<path d="M9 21H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h4"></path><path d="M16 17l5-5-5-5"></path><path d="M21 12H9"></path>',
+    "hamburger": '<path d="M4 7h16M4 12h16M4 17h16"></path>',
+    "collapse": '<path d="M11 17l-5-5 5-5"></path><path d="M18 17l-5-5 5-5"></path>',
+    "arrow-right": '<path d="M5 12h14"></path><path d="M13 6l6 6-6 6"></path>',
+    "box": '<path d="M21 8l-9-5-9 5 9 5 9-5z"></path><path d="M3 8v8l9 5 9-5V8"></path><path d="M12 13v8"></path>',
+    "inbox": '<path d="M21 12h-5l-2 3h-4l-2-3H3"></path><path d="M5.5 5h13l2.5 7v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-7z"></path>',
+    "alert": '<path d="M12 3l10 18H2z"></path><path d="M12 10v4"></path><circle cx="12" cy="17.2" r="0.2" fill="currentColor" stroke="none"></circle>',
+}
+
+
+def _icon_svg(key, size=18):
+    paths = _NAV_ICON_PATHS.get(key, "")
+    return (
+        f'<svg viewBox="0 0 24 24" width="{size}" height="{size}" fill="none" '
+        f'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" '
+        f'stroke-linejoin="round" aria-hidden="true">{paths}</svg>'
+    )
+
+
+def _current_request_path():
+    request = _CURRENT_REQUEST.get()
+    return request.url.path if request is not None else ""
+
+
+def _sidebar_nav_html(active_path):
+    groups_html = ""
+    for group_label, links in ADMIN_NAV_GROUPS:
+        links_html = ""
+        for href, label, icon_key in links:
+            is_active = active_path == href
+            active_class = " active" if is_active else ""
+            aria_current = ' aria-current="page"' if is_active else ""
+            links_html += (
+                f'<a class="sidebar-link{active_class}" href="{href}"{aria_current}>'
+                f'{_icon_svg(icon_key)}<span class="sidebar-label">{html.escape(label)}</span></a>'
+            )
+        groups_html += (
+            '<div class="sidebar-group">'
+            f'<div class="sidebar-group-label">{html.escape(group_label)}</div>'
+            f"{links_html}</div>"
+        )
+    return groups_html
+
+
+# Path segment -> section label, reused for the lightweight breadcrumb below.
+# Deliberately generic (computed once in admin_layout() from the request
+# path) rather than per-page, so it covers every current and future page
+# rendered through admin_layout() without any individual page needing to
+# opt in or be redesigned.
+ADMIN_SECTION_LABELS = {
+    "orders": "Заказы",
+    "picking": "Сборка",
+    "products": "Товары",
+    "categories": "Категории",
+    "clients": "Клиенты",
+    "broadcasts": "Рассылка",
+    "channel": "Канал",
+    "logs": "Логи",
+}
+_BREADCRUMB_SKIP_LEAVES = {"export.csv"}
+
+
+def _breadcrumb_items(path):
+    """Returns a list of (label, href_or_None) for the current path, or
+    None where a breadcrumb isn't useful (dashboard itself, login, master,
+    or any path outside the known top-level sections). Only ever looks at
+    the first two path segments -- deep action paths (e.g.
+    /orders/42/fulfillment/picking) still resolve to a sensible two-level
+    trail (Заказы / DM-000042) rather than spelling out the action."""
+    if not path or path in ("/", "/admin"):
+        return None
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return None
+    section_label = ADMIN_SECTION_LABELS.get(segments[0])
+    if section_label is None:
+        return None
+    items = [("Главная", "/admin"), (section_label, f"/{segments[0]}")]
+    if len(segments) >= 2:
+        leaf = segments[1]
+        if leaf == "new":
+            items.append(("Новый", None))
+        elif leaf not in _BREADCRUMB_SKIP_LEAVES:
+            leaf_label = format_order_number(leaf) if segments[0] == "orders" else leaf
+            items.append((leaf_label, None))
+    return items
+
+
+def _breadcrumb_html(path):
+    items = _breadcrumb_items(path)
+    if not items:
+        return ""
+    last_index = len(items) - 1
+    crumbs = []
+    for index, (label, href) in enumerate(items):
+        if href and index != last_index:
+            crumbs.append(f'<a href="{html.escape(href, quote=True)}">{html.escape(label)}</a>')
+        else:
+            crumbs.append(f'<span class="breadcrumb-current">{html.escape(label)}</span>')
+    separator = '<span class="breadcrumb-sep">/</span>'
+    return f'<nav class="breadcrumb" aria-label="Путь">{separator.join(crumbs)}</nav>'
+
+
+def admin_shell_antiflicker_script():
+    return """
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("dmSidebarCollapsed") === "1") {
+      document.documentElement.classList.add("sidebar-collapsed");
+    }
+  } catch (_error) {}
+})();
+</script>
+"""
+
+
+def admin_shell_script():
+    return """
+<script>
+(function () {
+  var root = document.documentElement;
+  var collapseBtn = document.getElementById("sidebarCollapseToggle");
+  var mobileToggle = document.getElementById("sidebarToggle");
+  var backdrop = document.getElementById("sidebarBackdrop");
+
+  function setCollapsed(collapsed) {
+    root.classList.toggle("sidebar-collapsed", collapsed);
+    try { localStorage.setItem("dmSidebarCollapsed", collapsed ? "1" : "0"); } catch (_error) {}
+    if (collapseBtn) collapseBtn.setAttribute("aria-expanded", String(!collapsed));
+  }
+
+  if (collapseBtn) {
+    collapseBtn.addEventListener("click", function () {
+      setCollapsed(!root.classList.contains("sidebar-collapsed"));
+    });
+  }
+
+  function openMobileNav() {
+    root.classList.add("sidebar-open");
+    if (mobileToggle) mobileToggle.setAttribute("aria-expanded", "true");
+  }
+  function closeMobileNav() {
+    root.classList.remove("sidebar-open");
+    if (mobileToggle) mobileToggle.setAttribute("aria-expanded", "false");
+  }
+  if (mobileToggle) {
+    mobileToggle.addEventListener("click", function () {
+      if (root.classList.contains("sidebar-open")) { closeMobileNav(); } else { openMobileNav(); }
+    });
+  }
+  if (backdrop) backdrop.addEventListener("click", closeMobileNav);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") closeMobileNav();
+  });
+})();
+</script>
+"""
+
+
 def admin_layout(title, content, refresh_seconds=None):
     refresh_meta = ""
     if refresh_seconds:
         refresh_meta = f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
+    active_path = _current_request_path()
     page = f"""<!doctype html>
 <html>
 <head>
@@ -800,30 +1386,47 @@ def admin_layout(title, content, refresh_seconds=None):
   {refresh_meta}
   <title>{title}</title>
   {admin_css()}
+  {admin_shell_antiflicker_script()}
 </head>
 <body>
-  <div class="admin-shell">
-    <header class="admin-topbar">
-      <nav class="admin-nav">
-        <a class="admin-brand" href="/admin">🏠 Главная</a>
-        <div class="admin-links">
-          <a href="/orders">📦 Заказы</a>
-          <a href="/picking">📦 Сборка</a>
-          <a href="/products">🛒 Товары</a>
-          <a href="/categories">🗂 Категории</a>
-          <a href="/clients">👥 Клиенты</a>
-          <a href="/broadcasts">📨 Рассылка</a>
-          <a href="/channel">📢 Канал</a>
-          <a href="/logs">🧾 Логи</a>
-          <form class="nav-logout-form" method="post" action="/logout">
-            <button class="nav-logout-button" type="submit">Выйти</button>
-          </form>
-        </div>
+  <div class="app-shell">
+    <a class="skip-link" href="#main-content">Перейти к содержимому</a>
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+    <aside class="app-sidebar" id="appSidebar">
+      <div class="sidebar-header">
+        <a class="sidebar-brand" href="/admin">
+          <span class="sidebar-brand-mark">DM</span>
+          <span class="sidebar-brand-text">{html.escape(ADMIN_PANEL_TITLE)}</span>
+        </a>
+        <button type="button" class="sidebar-collapse-btn" id="sidebarCollapseToggle"
+                aria-label="Свернуть меню" aria-expanded="true">
+          {_icon_svg("collapse", 16)}
+        </button>
+      </div>
+      <nav class="sidebar-nav" aria-label="Основная навигация">
+        {_sidebar_nav_html(active_path)}
       </nav>
-    </header>
-    <main class="admin-container">{content}</main>
+      <div class="sidebar-footer">
+        <form class="nav-logout-form" method="post" action="/logout">
+          <button class="sidebar-logout-btn" type="submit">
+            {_icon_svg("logout")}<span class="sidebar-label">Выйти</span>
+          </button>
+        </form>
+      </div>
+    </aside>
+    <div class="app-main">
+      <div class="mobile-topbar">
+        <button type="button" class="sidebar-toggle-btn" id="sidebarToggle"
+                aria-label="Открыть меню" aria-expanded="false" aria-controls="appSidebar">
+          {_icon_svg("hamburger", 20)}
+        </button>
+        <span class="mobile-topbar-brand">{html.escape(ADMIN_PANEL_TITLE)}</span>
+      </div>
+      <main class="page" id="main-content">{_breadcrumb_html(active_path)}{content}</main>
+    </div>
   </div>
   {csrf_multipart_script()}
+  {admin_shell_script()}
 </body>
 </html>"""
     return _protect_post_forms(page, "admin")
@@ -838,6 +1441,75 @@ def admin_error_page(title, message):
     </section>
     """
     return admin_layout(title, content)
+
+
+# ---------------------------------------------------------------------------
+# Small reusable page-building primitives (Phase 1 design system). These are
+# additive -- nothing existing calls them yet except the redesigned
+# dashboard. Later phases adopt them page by page instead of every page
+# hand-writing this markup again.
+# ---------------------------------------------------------------------------
+
+def page_header(title, subtitle="", actions_html=""):
+    subtitle_html = (
+        f'<p class="page-header-subtitle">{html.escape(str(subtitle))}</p>' if subtitle else ""
+    )
+    actions = f'<div class="page-header-actions">{actions_html}</div>' if actions_html else ""
+    return f"""
+    <div class="page-header">
+      <div>
+        <h1 class="page-header-title">{html.escape(str(title))}</h1>
+        {subtitle_html}
+      </div>
+      {actions}
+    </div>
+    """
+
+
+def btn_link(label, href, variant="secondary", icon_key=None, size=""):
+    size_class = " btn-sm" if size == "sm" else ""
+    icon_html = _icon_svg(icon_key) if icon_key else ""
+    return (
+        f'<a class="btn btn-{variant}{size_class}" href="{href}">'
+        f"{icon_html}{html.escape(str(label))}</a>"
+    )
+
+
+def btn_submit(label, variant="primary", icon_key=None, size=""):
+    size_class = " btn-sm" if size == "sm" else ""
+    icon_html = _icon_svg(icon_key) if icon_key else ""
+    return (
+        f'<button type="submit" class="btn btn-{variant}{size_class}">'
+        f"{icon_html}{html.escape(str(label))}</button>"
+    )
+
+
+def stat_card(label, value, href=None, icon_key=None, warning=False):
+    warning_class = " is-warning" if warning else ""
+    icon_html = (
+        f'<span class="stat-card-icon">{_icon_svg(icon_key)}</span>' if icon_key else ""
+    )
+    inner = f"""
+      <div class="stat-card-top">
+        <span class="stat-card-label">{html.escape(str(label))}</span>
+        {icon_html}
+      </div>
+      <strong class="stat-card-value">{value}</strong>
+    """
+    if href:
+        return f'<a class="stat-card{warning_class}" href="{href}">{inner}</a>'
+    return f'<div class="stat-card{warning_class}">{inner}</div>'
+
+
+def empty_state(title, text="", icon_key="inbox"):
+    text_html = f'<p class="empty-state-text">{html.escape(str(text))}</p>' if text else ""
+    return f"""
+    <div class="empty-state">
+      <span class="empty-state-icon">{_icon_svg(icon_key, 36)}</span>
+      <p class="empty-state-title">{html.escape(str(title))}</p>
+      {text_html}
+    </div>
+    """
 
 
 def master_layout(title, content, refresh_seconds=None):
@@ -2101,12 +2773,15 @@ def normalize_product_pricing(
         stock_quantity_value = parse_optional_nonnegative_number(
             stock_quantity, "Остаток в единицах", integer=True
         )
+        unit_weight_value = parse_optional_positive_number(
+            unit_weight_grams, "Вес упаковки", integer=True
+        )
         sale_unit_value = str(sale_unit or "").strip()
         if fixed_price_value is None:
             raise ValueError("Для fixed требуется фиксированная цена")
         if not sale_unit_value:
             raise ValueError("Для fixed требуется единица продажи")
-        return mode, 0.0, fixed_price_value, sale_unit_value, None, stock_quantity_value
+        return mode, 0.0, fixed_price_value, sale_unit_value, unit_weight_value, stock_quantity_value
     if mode == "per_kg":
         per_kg_price = parse_optional_positive_number(price_per_kg, "Цена за кг")
         unit_weight_value = parse_optional_positive_number(
@@ -3513,6 +4188,7 @@ async def root():
     cc_no_image_count = 0
     cc_no_description_count = 0
     cc_never_sold_count = 0
+    stage_counts = {}
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
@@ -3803,6 +4479,16 @@ async def root():
         )
         cc_never_sold_count = cursor.fetchone()[0]
 
+        cursor.execute(
+            """
+            SELECT fulfillment_status, COUNT(*)
+            FROM orders
+            WHERE fulfillment_status IN ('new', 'confirmed', 'picking', 'packed', 'ready_to_ship')
+            GROUP BY fulfillment_status
+            """
+        )
+        stage_counts = {status: count for status, count in cursor.fetchall()}
+
         conn.close()
     except Exception:
         report_read_error(DASHBOARD_LOAD_FAILED)
@@ -3824,101 +4510,105 @@ async def root():
             today_done_revenue,
             month_done_revenue,
         ) = stats
-        awaiting_action = (
-            pending_orders
-            + awaiting_payment_orders
-            + payment_reported_orders
-            + cash_on_delivery_orders
-        )
-        stat_cards = f"""
-        <h2>Обзор</h2>
-        <div class="dash-grid">
-          <div class="dash-card"><span>Всего заказов</span><strong class="stat-value">{total_orders}</strong></div>
-          <div class="dash-card"><span>Заказов сегодня</span><strong class="stat-value">{today_orders}</strong></div>
-          <div class="dash-card"><span>Требуют внимания</span><strong class="stat-value">{awaiting_action}</strong></div>
-        </div>
-        <h2>Выручка</h2>
-        <div class="dash-grid">
-          <div class="dash-card"><span>Всего завершённых</span><strong class="stat-value">{CURRENCY_SYMBOL}{float(total_done_revenue):.2f}</strong></div>
-          <div class="dash-card"><span>Сегодня</span><strong class="stat-value">{CURRENCY_SYMBOL}{float(today_done_revenue):.2f}</strong></div>
-          <div class="dash-card"><span>За месяц</span><strong class="stat-value">{CURRENCY_SYMBOL}{float(month_done_revenue):.2f}</strong></div>
-        </div>
-        <h2>Статусы</h2>
-        <div class="dash-grid">
-          <div class="dash-card"><span>Ожидает выбора оплаты</span><strong class="stat-value">{pending_orders}</strong></div>
-          <div class="dash-card"><span>Ожидает оплаты</span><strong class="stat-value">{awaiting_payment_orders}</strong></div>
-          <div class="dash-card"><span>Оплата заявлена</span><strong class="stat-value">{payment_reported_orders}</strong></div>
-          <div class="dash-card"><span>Наличными</span><strong class="stat-value">{cash_on_delivery_orders}</strong></div>
-          <div class="dash-card"><span>Оплачен</span><strong class="stat-value">{paid_orders}</strong></div>
-          <div class="dash-card"><span>Готовится</span><strong class="stat-value">{preparing_orders}</strong></div>
-          <div class="dash-card"><span>Готов</span><strong class="stat-value">{done_orders}</strong></div>
-          <div class="dash-card"><span>Отменён</span><strong class="stat-value">{cancelled_orders}</strong></div>
-        </div>
-        """
     else:
-        stat_cards = f"""
-        <section class="admin-card">
-          <h2>Статистика недоступна</h2>
-          <p>{html.escape(error_message or 'Подключение к базе данных недоступно.')}</p>
+        payment_reported_orders = 0
+        total_done_revenue = today_done_revenue = month_done_revenue = 0
+
+    # Primary operational row: exactly what the owner needs to see first --
+    # where every order currently sits in the fulfillment pipeline, plus
+    # what's unavailable to sell. Reuses stage_counts (Orders v2
+    # fulfillment_status, queried above) and the existing low-stock/
+    # out-of-stock count -- no new business logic, only new presentation.
+    hero_stats_html = "".join((
+        stat_card(
+            "Новые", stage_counts.get("new", 0),
+            href="/orders?fulfillment_status_filter=new", icon_key="inbox",
+        ),
+        stat_card(
+            "К сборке", stage_counts.get("confirmed", 0),
+            href="/picking", icon_key="picking",
+        ),
+        stat_card(
+            "Сборка", stage_counts.get("picking", 0),
+            href="/picking", icon_key="picking",
+        ),
+        stat_card(
+            "Упаковано", stage_counts.get("packed", 0),
+            href="/picking", icon_key="box",
+        ),
+        stat_card(
+            "Готовы к отправке", stage_counts.get("ready_to_ship", 0),
+            href="/orders?fulfillment_status_filter=ready_to_ship", icon_key="arrow-right",
+        ),
+        stat_card(
+            "Нет в наличии", cc_low_stock_count,
+            href="/products?filter=low_stock", icon_key="alert",
+            warning=cc_low_stock_count > 0,
+        ),
+    ))
+
+    quick_actions_html = "".join((
+        btn_link("Новый заказ", "/orders/new", variant="primary", icon_key="plus"),
+        btn_link("Заказы", "/orders", variant="secondary", icon_key="orders"),
+        btn_link("Сборка", "/picking", variant="secondary", icon_key="picking"),
+        btn_link("Товары", "/products", variant="secondary", icon_key="products"),
+        btn_link("Клиенты", "/clients", variant="secondary", icon_key="clients"),
+    ))
+
+    attention_items = [
+        (cc_pending_weighing_count, "Ожидают взвешивания", "/orders?pending_weighing=1"),
+        (payment_reported_orders, "Клиенты сообщили об оплате", "/orders?payment_status_filter=payment_reported"),
+        (cc_recent_errors_count, "Ошибки за последние 24 часа", "/logs"),
+    ]
+    attention_html = "".join(
+        f'<a class="alert-row" href="{href}">{html.escape(label)}'
+        f'<span class="alert-row-count">{count}</span></a>'
+        for count, label, href in attention_items
+        if count > 0
+    )
+    attention_section = (
+        f'<section class="card dash-section"><h3>Требует внимания</h3>{attention_html}</section>'
+        if attention_html else ""
+    )
+
+    low_stock_rows_html = "".join(
+        f'<a class="data-row" href="/products/{product_id}/edit">'
+        f'<div class="data-row-main"><span class="data-row-title">{html.escape(str(name or "-"))}</span></div>'
+        f'<div class="data-row-meta">'
+        f'<span class="status warning">{format_stock_grams(stock_grams)} / {format_stock_grams(low_stock_threshold_grams)}</span>'
+        f"</div></a>"
+        for product_id, name, stock_grams, low_stock_threshold_grams in low_stock_products
+    )
+    low_stock_section = f"""
+        <section class="card dash-section">
+          <div class="card-header"><h3 class="card-title">Заканчивается на складе</h3></div>
+          {f'<div class="data-list">{low_stock_rows_html}</div>' if low_stock_rows_html else empty_state("Все товары в достатке", icon_key="box")}
         </section>
-        """
-
-    order_rows = ""
-    for order_id, username, phone, address, total, payment_status, fulfillment_status in latest_orders:
-        order_id_text = html.escape(str(order_id))
-        order_rows += f"""
-        <tr>
-          <td>{order_id_text}</td>
-          <td>{html.escape(str(username or '-'))}</td>
-          <td>{html.escape(str(phone or '-'))}</td>
-          <td>{html.escape(str(address or '-'))}</td>
-          <td>EUR {float(total):.2f}</td>
-          <td>{payment_status_badge(payment_status)}</td>
-          <td>{fulfillment_status_badge(fulfillment_status)}</td>
-          <td><a class="view-link" href="/orders/{order_id_text}">Открыть</a></td>
-        </tr>
-        """
-    latest_section = """
-        <p>Последних заказов пока нет.</p>
     """
-    if order_rows:
-        latest_section = f"""
-        <div class="dash-table-wrap">
-          <table>
-            <tr><th>ID заказа</th><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Сумма</th><th>Оплата</th><th>Выполнение</th><th></th></tr>
-            {order_rows}
-          </table>
-        </div>
-        """
 
-    low_stock_rows = ""
-    for product_id, name, stock_grams, low_stock_threshold_grams in low_stock_products:
-        low_stock_rows += f"""
-        <tr>
-          <td><a class="view-link" href="/products/{product_id}/edit">{html.escape(str(name or '-'))}</a></td>
-          <td>{format_stock_grams(stock_grams)}</td>
-          <td>{format_stock_grams(low_stock_threshold_grams)}</td>
-        </tr>
-        """
-    low_stock_section = """
-        <p>Все товары имеют достаточный остаток.</p>
-    """
-    if low_stock_rows:
-        low_stock_section = f"""
-        <div class="dash-table-wrap">
-          <table>
-            <tr><th>Название товара</th><th>Остаток</th><th>Порог</th></tr>
-            {low_stock_rows}
-          </table>
-        </div>
-        """
-
-    funnel_section = """
-        <section class="admin-card dash-section">
-          <h2>📊 Воронка сегодня</h2>
-          <p>Воронка пока недоступна.</p>
+    latest_rows_html = "".join(
+        f'<a class="data-row" href="/orders/{html.escape(str(order_id))}">'
+        f'<div class="data-row-main">'
+        f'<span class="data-row-title">DM-{html.escape(str(order_id))}</span>'
+        f'<span class="data-row-subtitle">{html.escape(str(username or "-"))}</span>'
+        f"</div>"
+        f'<div class="data-row-meta">'
+        f"<span>{CURRENCY_SYMBOL}{float(total):.2f}</span>"
+        f"{payment_status_badge(payment_status)}{fulfillment_status_badge(fulfillment_status)}"
+        f"</div></a>"
+        for order_id, username, phone, address, total, payment_status, fulfillment_status in latest_orders
+    )
+    latest_section = f"""
+        <section class="card dash-section">
+          <div class="card-header">
+            <h3 class="card-title">Последние заказы</h3>
+            <a class="btn btn-ghost btn-sm" href="/orders">Все заказы</a>
+          </div>
+          {f'<div class="data-list">{latest_rows_html}</div>' if latest_rows_html else empty_state("Заказов пока нет", icon_key="inbox")}
         </section>
     """
+
+    funnel_table_html = "<p>Воронка пока недоступна.</p>"
     if funnel_rows:
         funnel_table_rows = ""
         previous_count = None
@@ -3936,133 +4626,73 @@ async def root():
             </tr>
             """
             previous_count = users_value
-        funnel_section = f"""
-        <section class="admin-card dash-section">
-          <h2>📊 Воронка сегодня</h2>
-          <div class="dash-table-wrap">
-            <table>
-              <tr><th>Этап</th><th>Клиентов</th><th>Конверсия</th></tr>
-              {funnel_table_rows}
-            </table>
-          </div>
-        </section>
+        funnel_table_html = f"""
+        <div class="dash-table-wrap">
+          <table>
+            <tr><th>Этап</th><th>Клиентов</th><th>Конверсия</th></tr>
+            {funnel_table_rows}
+          </table>
+        </div>
         """
 
-    analytics_section = f"""
-        <section class="admin-card dash-section">
-          <h2>Аналитика продаж</h2>
-          <div class="dash-grid">
-            <div class="dash-card">
-              <strong>Топ товары</strong>
-              {render_product_analytics(top_products)}
+    catalog_backlog_items = (
+        (cc_no_recommendations_count, "Без рекомендаций", "/products?filter=no_recommendations"),
+        (cc_no_promotion_count, "Не отмечены как акционные", "/products?filter=no_promotion"),
+        (cc_no_sales_count, "Без продаж за 14 дней", "/products?filter=no_sales&days=14"),
+        (cc_no_image_count, "Без фотографии", "/products?filter=no_image"),
+        (cc_no_description_count, "Без описания", "/products?filter=no_description"),
+        (cc_never_sold_count, "Никогда не продавались", "/products?filter=never_sold"),
+    )
+    catalog_backlog_html = "".join(
+        f'<a class="data-row" href="{href}">'
+        f'<div class="data-row-main"><span class="data-row-title">{html.escape(label)}</span></div>'
+        f'<div class="data-row-meta"><span class="status neutral">{count}</span></div></a>'
+        for count, label, href in catalog_backlog_items
+    )
+
+    analytics_disclosure = f"""
+        <details class="disclosure">
+          <summary>Аналитика и выручка <span class="disclosure-chevron">▾</span></summary>
+          <div class="disclosure-body">
+            <div class="stat-grid">
+              <div class="stat-card"><div class="stat-card-top"><span class="stat-card-label">Выручка всего</span></div><strong class="stat-card-value">{CURRENCY_SYMBOL}{float(total_done_revenue):.2f}</strong></div>
+              <div class="stat-card"><div class="stat-card-top"><span class="stat-card-label">Сегодня</span></div><strong class="stat-card-value">{CURRENCY_SYMBOL}{float(today_done_revenue):.2f}</strong></div>
+              <div class="stat-card"><div class="stat-card-top"><span class="stat-card-label">За месяц</span></div><strong class="stat-card-value">{CURRENCY_SYMBOL}{float(month_done_revenue):.2f}</strong></div>
             </div>
-            <div class="dash-card">
-              <strong>Слабые товары</strong>
-              {render_product_analytics(worst_products)}
+            <h3>Воронка сегодня</h3>
+            {funnel_table_html}
+            <h3>Товары и клиенты</h3>
+            <div class="dash-grid">
+              <div class="dash-card"><strong>Топ товары</strong>{render_product_analytics(top_products)}</div>
+              <div class="dash-card"><strong>Слабые товары</strong>{render_product_analytics(worst_products)}</div>
+              <div class="dash-card"><strong>Лучшие клиенты</strong>{render_customer_analytics(best_customers, "Заказов")}</div>
+              <div class="dash-card"><strong>Повторные клиенты</strong>{render_customer_analytics(repeat_customers, "Заказов")}</div>
             </div>
-            <div class="dash-card">
-              <strong>Лучшие клиенты</strong>
-              {render_customer_analytics(best_customers, "Заказов")}
-            </div>
-            <div class="dash-card">
-              <strong>Повторные клиенты</strong>
-              {render_customer_analytics(repeat_customers, "Заказов")}
-            </div>
+            <h3>Каталог: на что обратить внимание</h3>
+            <div class="data-list">{catalog_backlog_html}</div>
           </div>
-        </section>
+        </details>
     """
 
-    control_center_section = f"""
-        <section class="admin-card dash-section">
-          <h2>🧠 Центр управления владельца</h2>
-
-          <h3>🔴 Срочно</h3>
-          <div class="dash-grid">
-            <a class="dash-card priority-urgent" href="/orders?pending_weighing=1">
-              <strong>⚖️ Ожидают взвешивания</strong>
-              <span>Заказы с товарами, которые ещё нужно взвесить</span>
-              <strong class="stat-value">{cc_pending_weighing_count}</strong>
-            </a>
-            <a class="dash-card priority-urgent" href="/products?filter=low_stock">
-              <strong>⚠️ Низкий остаток</strong>
-              <span>Товары заканчиваются или уже отсутствуют</span>
-              <strong class="stat-value">{cc_low_stock_count}</strong>
-            </a>
-            <a class="dash-card priority-urgent" href="/logs">
-              <strong>🛑 Ошибки за 24 часа</strong>
-              <span>Системные ошибки за последние сутки</span>
-              <strong class="stat-value">{cc_recent_errors_count}</strong>
-            </a>
-          </div>
-
-          <h3>🟡 Стоит сделать сегодня</h3>
-          <div class="dash-grid">
-            <a class="dash-card priority-today" href="/products?filter=no_recommendations">
-              <strong>🎯 Без рекомендаций</strong>
-              <span>Товары без настроенных сопутствующих рекомендаций</span>
-              <strong class="stat-value">{cc_no_recommendations_count}</strong>
-            </a>
-            <a class="dash-card priority-today" href="/products?filter=no_promotion">
-              <strong>🔥 Без акции</strong>
-              <span>Товары, не отмеченные как акционные</span>
-              <strong class="stat-value">{cc_no_promotion_count}</strong>
-            </a>
-            <a class="dash-card priority-today" href="/products?filter=no_sales&days=14">
-              <strong>📉 Без продаж 14 дней</strong>
-              <span>Товары без продаж за последние 14 дней</span>
-              <strong class="stat-value">{cc_no_sales_count}</strong>
-            </a>
-          </div>
-
-          <h3>🔵 Можно улучшить позже</h3>
-          <div class="dash-grid">
-            <a class="dash-card priority-later" href="/products?filter=no_image">
-              <strong>📷 Без фотографии</strong>
-              <span>Товары без изображения в карточке</span>
-              <strong class="stat-value">{cc_no_image_count}</strong>
-            </a>
-            <a class="dash-card priority-later" href="/products?filter=no_description">
-              <strong>📝 Без описания</strong>
-              <span>Товары без текстового описания</span>
-              <strong class="stat-value">{cc_no_description_count}</strong>
-            </a>
-            <a class="dash-card priority-later" href="/products?filter=never_sold">
-              <strong>📦 Никогда не продавались</strong>
-              <span>Товары без единой продажи за всё время</span>
-              <strong class="stat-value">{cc_never_sold_count}</strong>
-            </a>
-          </div>
+    if not stats:
+        error_section = f"""
+        <section class="card dash-section">
+          <p>{html.escape(error_message or 'Подключение к базе данных недоступно.')}</p>
         </section>
-    """
+        """
+    else:
+        error_section = ""
 
     return admin_layout(
         ADMIN_PANEL_TITLE,
         f"""
-        <section class="dash-hero">
-          <div>
-            <p class="dash-kicker">Панель управления</p>
-            <h1>{html.escape(ADMIN_PANEL_TITLE)}</h1>
-            <p>Быстрый доступ к заказам, каталогу, категориям и клиентам.</p>
-          </div>
-        </section>
-
-        {control_center_section}
-
-        {stat_cards}
-
-        {funnel_section}
-
-        <section class="admin-card dash-section">
-          <h2>⚠️ Низкий остаток</h2>
-          {low_stock_section}
-        </section>
-
-        <section class="admin-card dash-section">
-          <h2>Последние заказы</h2>
-          {latest_section}
-        </section>
-
-        {analytics_section}
+        {page_header(ADMIN_PANEL_TITLE, "Оперативная сводка и быстрые действия", quick_actions_html)}
+        {error_section}
+        <div class="stat-grid">{hero_stats_html}</div>
+        {attention_section}
+        {low_stock_section}
+        {latest_section}
+        {analytics_disclosure}
         """,
         refresh_seconds=60,
     )
@@ -4995,9 +5625,17 @@ def format_order_number(value):
 
 
 def _manual_order_catalog(cursor):
+    """Returns (products, options, categories) for the manual-order form.
+
+    category_id is included (Checkpoint 1 of the New Order UX redesign) so
+    a later checkpoint can build a category/search product picker -- this
+    checkpoint only adds the data, no picker UI yet. categories uses the
+    exact same WHERE is_active = TRUE / ORDER BY sort_order, id semantics
+    already used by the customer-facing storefront catalog query
+    (storefront.py), not a new/invented ordering rule."""
     cursor.execute(
         """
-        SELECT id, name, pricing_mode, price_per_kg, fixed_price, sale_unit
+        SELECT id, name, pricing_mode, price_per_kg, fixed_price, sale_unit, category_id
         FROM products
         WHERE is_active = TRUE
         ORDER BY sort_order, name
@@ -5014,7 +5652,16 @@ def _manual_order_catalog(cursor):
         """
     )
     options = cursor.fetchall()
-    return products, options
+    cursor.execute(
+        """
+        SELECT id, name
+        FROM categories
+        WHERE is_active = TRUE
+        ORDER BY sort_order, id
+        """
+    )
+    categories = cursor.fetchall()
+    return products, options, categories
 
 
 def _search_clients_for_manual_order(cursor, query):
@@ -5026,10 +5673,11 @@ def _search_clients_for_manual_order(cursor, query):
             SELECT id, first_name, last_name, phone, telegram_id
             FROM clients
             WHERE first_name ILIKE %s OR last_name ILIKE %s OR phone ILIKE %s
+               OR CAST(telegram_id AS TEXT) ILIKE %s
             ORDER BY id DESC
             LIMIT 10
             """,
-            (search_value, search_value, search_value),
+            (search_value, search_value, search_value, search_value),
         )
     else:
         cursor.execute(
@@ -5060,52 +5708,298 @@ def _manual_order_client_options_html(matching_clients, selected_client_id):
     return rows_html
 
 
-def _manual_order_product_rows_html(products, options, form_values):
+def _manual_order_client_search_results_html(matching_clients):
+    """Small HTML fragment (not a full page, not wrapped in admin_layout)
+    for the client-autocomplete endpoint below. Each result is a clickable
+    button carrying data-* attributes -- Checkpoint 1 only adds this data
+    source; the JS that fetches this endpoint and wires clicks to the
+    order form's client_id field is a later checkpoint."""
+    if not matching_clients:
+        return '<p class="empty-state-text">Клиенты не найдены.</p>'
+    items_html = ""
+    for client_id, first_name, last_name, phone, telegram_id in matching_clients:
+        full_name = " ".join(part for part in (first_name, last_name) if part) or "Без имени"
+        phone_text = str(phone or "-")
+        telegram_text = str(telegram_id) if telegram_id else ""
+        items_html += (
+            '<button type="button" class="manual-order-client-result" '
+            f'data-client-id="{client_id}" '
+            f'data-client-name="{escape(full_name, quote=True)}" '
+            f'data-client-phone="{escape(phone_text, quote=True)}" '
+            f'data-client-telegram-id="{escape(telegram_text, quote=True)}">'
+            f'{escape(full_name, quote=True)} · {escape(phone_text, quote=True)}'
+            + (f' · Telegram ID: {escape(telegram_text, quote=True)}' if telegram_text else "")
+            + '</button>'
+        )
+    return items_html
+
+
+def _manual_order_category_chips_html(categories, has_uncategorized):
+    """Category filter chips for the product picker (Checkpoint 2). Purely
+    database-driven -- built entirely from the categories query result,
+    nothing hardcoded. Filtering itself happens client-side in JS; this
+    only emits the chip markup + the data-category-id each product card
+    needs to match against."""
+    chips_html = '<button type="button" class="category-chip active" data-category-filter="all">Все</button>'
+    for category_id, name in categories:
+        chips_html += (
+            f'<button type="button" class="category-chip" data-category-filter="{category_id}">'
+            f"{escape(str(name), quote=True)}</button>"
+        )
+    if has_uncategorized:
+        chips_html += (
+            '<button type="button" class="category-chip" data-category-filter="none">'
+            "Без категории</button>"
+        )
+    return chips_html
+
+
+def _non_negative_int_value(form_values, field_name):
+    """Same coercion POST /orders/new already applies when parsing these
+    fields -- reused here only for redisplaying a safe value after a
+    validation error, never for pricing."""
+    raw = str(form_values.get(field_name, "0") or "0")
+    try:
+        return str(max(int(raw), 0))
+    except ValueError:
+        return "0"
+
+
+def _manual_order_catalog_picker_html(products, options, form_values):
+    """Renders the product-card grid. Each product/option's real
+    weight_{id}/qty_{id}/optqty_{id} input lives directly in its card --
+    there is exactly one source of truth for order-line state (these
+    inputs); the summary panel is a JS view over them, not a second data
+    model. Cards for every product are always rendered (category/search
+    filtering hides non-matching cards client-side via CSS, it never
+    removes their inputs), so a value entered before switching category or
+    searching is never lost.
+
+    Returns (cards_html, has_uncategorized)."""
     options_by_product = {}
     for option_id, product_id, label, price in options:
         options_by_product.setdefault(product_id, []).append((option_id, label, price))
 
-    rows = ""
-    for product_id, name, pricing_mode, price_per_kg, fixed_price, sale_unit in products:
+    cards_html = ""
+    has_uncategorized = False
+    for product_id, name, pricing_mode, price_per_kg, fixed_price, sale_unit, category_id in products:
         name_text = escape(str(name), quote=True)
+        if category_id is None:
+            has_uncategorized = True
+            category_attr = "none"
+        else:
+            category_attr = str(category_id)
+        search_attr = escape(str(name).lower(), quote=True)
+
         if pricing_mode == "per_kg":
             field_name = f"weight_{product_id}"
             existing_value = escape(str(form_values.get(field_name, "")), quote=True)
-            input_html = (
-                f'<input type="number" name="{field_name}" min="1" step="1" '
-                f'value="{existing_value}" placeholder="г"/>'
-            )
-            price_text = f"{float(price_per_kg or 0):.2f} {CURRENCY_SYMBOL}/кг"
+            price_value = float(price_per_kg or 0)
+            body_html = f"""
+              <div class="product-card-price">{price_value:.2f} {CURRENCY_SYMBOL}/кг</div>
+              <div class="weight-input-row">
+                <input type="number" id="{field_name}" name="{field_name}" min="1" step="1"
+                       class="weight-input" placeholder="г" value="{existing_value}"
+                       data-line-kind="weight" data-price="{price_value}"
+                       data-label="{name_text}" data-qty-label="{{value}} г"/>
+                <span class="weight-unit">г</span>
+              </div>
+              <div class="weight-presets">
+                <button type="button" class="weight-preset" data-preset-target="{field_name}" data-preset-value="250">250г</button>
+                <button type="button" class="weight-preset" data-preset-target="{field_name}" data-preset-value="500">500г</button>
+                <button type="button" class="weight-preset" data-preset-target="{field_name}" data-preset-value="1000">1кг</button>
+              </div>
+            """
         elif pricing_mode == "fixed":
             field_name = f"qty_{product_id}"
-            existing_value = escape(str(form_values.get(field_name, "0") or "0"), quote=True)
+            existing_value = _non_negative_int_value(form_values, field_name)
             unit_text = escape(str(sale_unit or "шт"), quote=True)
-            input_html = (
-                f'<input type="number" name="{field_name}" min="0" step="1" '
-                f'value="{existing_value}"/> {unit_text}'
-            )
-            price_text = f"{float(fixed_price or 0):.2f} {CURRENCY_SYMBOL}"
+            price_value = float(fixed_price or 0)
+            body_html = f"""
+              <div class="product-card-price">{price_value:.2f} {CURRENCY_SYMBOL}</div>
+              <div class="qty-stepper">
+                <button type="button" class="qty-step" data-step="-1" data-step-target="{field_name}" aria-label="Меньше">−</button>
+                <input type="number" id="{field_name}" name="{field_name}" min="0" step="1"
+                       class="qty-input" value="{existing_value}"
+                       data-line-kind="qty" data-price="{price_value}"
+                       data-label="{name_text}" data-qty-label="{{value}} {unit_text}"/>
+                <button type="button" class="qty-step" data-step="1" data-step-target="{field_name}" aria-label="Больше">+</button>
+              </div>
+            """
         else:
             product_options = options_by_product.get(product_id, [])
             if not product_options:
                 continue
-            option_inputs = ""
+            option_rows_html = ""
             for option_id, label, price in product_options:
                 field_name = f"optqty_{option_id}"
-                existing_value = escape(str(form_values.get(field_name, "0") or "0"), quote=True)
-                option_inputs += (
-                    f'<div>{escape(str(label), quote=True)} '
-                    f'({float(price):.2f} {CURRENCY_SYMBOL}) '
-                    f'<input type="number" name="{field_name}" min="0" step="1" '
-                    f'value="{existing_value}"/></div>'
-                )
-            input_html = option_inputs
-            price_text = "варианты"
-        rows += f"<tr><td>{name_text}</td><td>{price_text}</td><td>{input_html}</td></tr>"
-    return rows
+                existing_value = _non_negative_int_value(form_values, field_name)
+                option_label_text = escape(str(label), quote=True)
+                option_price = float(price)
+                combined_label = f"{name_text} — {option_label_text}"
+                option_rows_html += f"""
+                <div class="product-option-row">
+                  <span class="product-option-label">{option_label_text} · {option_price:.2f} {CURRENCY_SYMBOL}</span>
+                  <div class="qty-stepper qty-stepper-sm">
+                    <button type="button" class="qty-step" data-step="-1" data-step-target="{field_name}" aria-label="Меньше">−</button>
+                    <input type="number" id="{field_name}" name="{field_name}" min="0" step="1"
+                           class="qty-input" value="{existing_value}"
+                           data-line-kind="optqty" data-price="{option_price}"
+                           data-label="{combined_label}" data-qty-label="{{value}} шт"/>
+                    <button type="button" class="qty-step" data-step="1" data-step-target="{field_name}" aria-label="Больше">+</button>
+                  </div>
+                </div>
+                """
+            body_html = f'<div class="product-options-list">{option_rows_html}</div>'
+
+        cards_html += f"""
+        <div class="product-card" data-category-id="{category_attr}" data-name="{search_attr}">
+          <div class="product-card-name">{name_text}</div>
+          {body_html}
+        </div>
+        """
+    return cards_html, has_uncategorized
 
 
-def _render_new_order_form(products, options, matching_clients, client_query,
+def _new_order_picker_script():
+    """Vanilla JS, scoped to this page only (not injected into the shared
+    admin_layout() shell). Owns exactly three things: category/search
+    filtering (hides non-matching .product-card elements, never removes
+    their inputs), quantity steppers/weight presets (write directly to the
+    real weight_/qty_/optqty_ inputs), and the summary panel, which is
+    purely a re-render driven by scanning those same inputs for a
+    current non-zero value -- there is no separate cart array, so it can
+    never drift out of sync with what POST /orders/new will actually
+    receive, and it doubles as the error-redisplay reconstruction (it
+    renders whatever values the server already put in the inputs on
+    load, exactly as it does after any other change). Totals computed
+    here are DISPLAY ONLY -- order_creation.price_single_line remains the
+    only authoritative pricing calculation, on submit."""
+    return """
+<script>
+(function () {
+  var form = document.getElementById("manualOrderForm");
+  if (!form) return;
+  var currency = form.dataset.currencySymbol || "";
+
+  var searchInput = document.getElementById("productSearchInput");
+  var cards = Array.prototype.slice.call(form.querySelectorAll(".product-card"));
+  var catalogEmptyState = document.getElementById("catalogEmptyState");
+  var activeCategory = "all";
+
+  function applyFilter() {
+    var term = (searchInput && searchInput.value ? searchInput.value : "").trim().toLowerCase();
+    var visibleCount = 0;
+    cards.forEach(function (card) {
+      var matchesCategory = activeCategory === "all" || card.dataset.categoryId === activeCategory;
+      var matchesSearch = !term || card.dataset.name.indexOf(term) !== -1;
+      var visible = matchesCategory && matchesSearch;
+      card.hidden = !visible;
+      if (visible) visibleCount += 1;
+    });
+    if (catalogEmptyState) catalogEmptyState.hidden = visibleCount !== 0;
+  }
+
+  Array.prototype.slice.call(form.querySelectorAll(".category-chip")).forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      Array.prototype.slice.call(form.querySelectorAll(".category-chip")).forEach(function (c) {
+        c.classList.remove("active");
+      });
+      chip.classList.add("active");
+      activeCategory = chip.dataset.categoryFilter;
+      applyFilter();
+    });
+  });
+  if (searchInput) searchInput.addEventListener("input", applyFilter);
+
+  var lineInputs = Array.prototype.slice.call(form.querySelectorAll("[data-line-kind]"));
+  var summaryLines = document.getElementById("orderSummaryLines");
+  var summaryEmpty = document.getElementById("orderSummaryEmpty");
+  var summaryTotal = document.getElementById("orderSummaryTotal");
+  var mobileBar = document.getElementById("orderSummaryMobileBar");
+
+  function computeLinePrice(input) {
+    var price = parseFloat(input.dataset.price || "0");
+    var value = parseFloat(input.value || "0");
+    if (!value || value <= 0 || !price) return 0;
+    return input.dataset.lineKind === "weight" ? (price * value) / 1000 : price * value;
+  }
+
+  function renderSummary() {
+    var linesHtml = "";
+    var total = 0;
+    var count = 0;
+    lineInputs.forEach(function (input) {
+      var value = parseFloat(input.value || "0");
+      if (!value || value <= 0) return;
+      var linePrice = computeLinePrice(input);
+      total += linePrice;
+      count += 1;
+      var qtyText = (input.dataset.qtyLabel || "{value}").replace("{value}", input.value);
+      linesHtml +=
+        '<div class="order-summary-line">' +
+          '<div class="order-summary-line-main">' +
+            '<span class="order-summary-line-title">' + input.dataset.label + "</span>" +
+            '<span class="order-summary-line-qty">' + qtyText + "</span>" +
+          "</div>" +
+          '<span class="order-summary-line-price">' + currency + linePrice.toFixed(2) + "</span>" +
+          '<button type="button" class="order-summary-line-remove" data-reset-target="' +
+            input.id + '" aria-label="Удалить">×</button>' +
+        "</div>";
+    });
+    if (summaryLines) summaryLines.innerHTML = linesHtml;
+    if (summaryEmpty) summaryEmpty.hidden = count !== 0;
+    if (summaryTotal) summaryTotal.textContent = currency + total.toFixed(2);
+    if (mobileBar) {
+      var countEl = mobileBar.querySelector(".order-summary-mobile-count");
+      var totalEl = mobileBar.querySelector(".order-summary-mobile-total");
+      if (countEl) countEl.textContent = count;
+      if (totalEl) totalEl.textContent = currency + total.toFixed(2);
+    }
+  }
+
+  form.addEventListener("input", function (event) {
+    if (event.target.matches && event.target.matches("[data-line-kind]")) renderSummary();
+  });
+
+  form.addEventListener("click", function (event) {
+    var stepper = event.target.closest("[data-step-target]");
+    if (stepper) {
+      var stepInput = document.getElementById(stepper.dataset.stepTarget);
+      if (stepInput) {
+        var next = (parseInt(stepInput.value, 10) || 0) + parseInt(stepper.dataset.step, 10);
+        stepInput.value = Math.max(0, next);
+        stepInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      return;
+    }
+    var preset = event.target.closest("[data-preset-target]");
+    if (preset) {
+      var presetInput = document.getElementById(preset.dataset.presetTarget);
+      if (presetInput) {
+        presetInput.value = preset.dataset.presetValue;
+        presetInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      return;
+    }
+    var removeBtn = event.target.closest("[data-reset-target]");
+    if (removeBtn) {
+      var resetInput = document.getElementById(removeBtn.dataset.resetTarget);
+      if (resetInput) {
+        resetInput.value = "";
+        resetInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+  });
+
+  applyFilter();
+  renderSummary();
+})();
+</script>
+"""
+
+
+def _render_new_order_form(products, options, categories, matching_clients, client_query,
                             form_values=None, errors=None):
     form_values = form_values or {}
     errors = errors or []
@@ -5148,67 +6042,114 @@ def _render_new_order_form(products, options, matching_clients, client_query,
     client_options_html = _manual_order_client_options_html(
         matching_clients, form_values.get("client_id")
     )
-    product_rows_html = _manual_order_product_rows_html(products, options, form_values)
+    product_cards_html, has_uncategorized = _manual_order_catalog_picker_html(
+        products, options, form_values
+    )
+    category_chips_html = _manual_order_category_chips_html(categories, has_uncategorized)
+    currency_attr = escape(str(CURRENCY_SYMBOL), quote=True)
 
     return f"""
-    <section class="admin-card">
-      <h1>➕ Новый заказ</h1>
-      <p><a href="/orders">← К заказам</a></p>
-      {error_html}
-      <form class="admin-form" method="get">
-        <label>Поиск клиента (имя или телефон)
-          <input name="client_query" value="{escape(client_query, quote=True)}"/>
-        </label>
-        <div class="form-actions"><button class="button secondary" type="submit">Искать</button></div>
-      </form>
-      <form class="admin-form" method="post" action="/orders/new">
-        <h2>Источник заказа</h2>
-        <label>Канал <select name="source">{source_options_html}</select></label>
-        <label>Референс источника
-          <input name="source_reference" value="{fv('source_reference')}" placeholder="@instagram, номер WhatsApp..."/>
-        </label>
+    {page_header(
+        "➕ Новый заказ",
+        "Ручное оформление для каналов вне Telegram/сайта — Instagram, WhatsApp, Viber, телефон, лично",
+        btn_link("К заказам", "/orders", variant="secondary"),
+    )}
+    {error_html}
+    <form class="admin-form" method="get" style="max-width:360px; margin-bottom:16px;">
+      <label>Поиск клиента (имя или телефон)
+        <input name="client_query" value="{escape(client_query, quote=True)}"/>
+      </label>
+      <div class="form-actions"><button class="btn btn-secondary btn-sm" type="submit">Искать</button></div>
+    </form>
 
-        <h2>Клиент</h2>
-        <label><input type="radio" name="customer_mode" value="existing" {existing_checked}/> Существующий клиент</label>
-        <label><input type="radio" name="customer_mode" value="new" {new_checked}/> Новый клиент</label>
-        <div class="manual-order-existing-client">
-          {client_options_html}
+    <form class="order-workspace-form" method="post" action="/orders/new"
+          id="manualOrderForm" data-currency-symbol="{currency_attr}">
+      <div class="order-workspace">
+        <div class="order-workspace-main">
+
+          <section class="card">
+            <div class="card-header"><h3 class="card-title">Источник и клиент</h3></div>
+            <div class="compact-field-grid">
+              <label>Канал <select name="source">{source_options_html}</select></label>
+              <label>Референс источника
+                <input name="source_reference" value="{fv('source_reference')}" placeholder="@instagram, номер WhatsApp..."/>
+              </label>
+            </div>
+            <div style="margin-top:14px;">
+              <label class="chip-toggle"><input type="radio" name="customer_mode" value="existing" {existing_checked}/> Существующий клиент</label>
+              <label class="chip-toggle"><input type="radio" name="customer_mode" value="new" {new_checked}/> + Новый клиент</label>
+            </div>
+            <div class="manual-order-existing-client" style="margin-top:10px;">
+              {client_options_html}
+            </div>
+            <div class="manual-order-new-client compact-field-grid">
+              <label>Имя <input name="new_first_name" value="{fv('new_first_name')}"/></label>
+              <label>Фамилия (необязательно) <input name="new_last_name" value="{fv('new_last_name')}"/></label>
+              <label>Телефон <input name="new_phone" value="{fv('new_phone')}"/></label>
+              <label>Telegram ID (необязательно) <input name="new_telegram_id" value="{fv('new_telegram_id')}"/></label>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-header"><h3 class="card-title">Товары</h3></div>
+            <div class="catalog-picker-controls">
+              <div class="category-chips">{category_chips_html}</div>
+              <input type="search" id="productSearchInput" class="product-search-input" placeholder="Поиск товара..."/>
+            </div>
+            <div class="product-grid" id="productGrid">
+              {product_cards_html}
+            </div>
+            <p class="empty-state-text catalog-empty-state" id="catalogEmptyState" hidden>Товары не найдены.</p>
+          </section>
+
+          <section class="card">
+            <div class="card-header"><h3 class="card-title">Доставка</h3></div>
+            <div>
+              <label class="chip-toggle"><input type="radio" name="delivery_method" value="pickup" {pickup_checked}/> Самовывоз</label>
+              <label class="chip-toggle"><input type="radio" name="delivery_method" value="delivery" {delivery_checked}/> Доставка</label>
+            </div>
+            <div class="manual-order-delivery-fields compact-field-grid">
+              <label>Улица <input name="delivery_street" value="{fv('delivery_street')}"/></label>
+              <label>Дом/корпус <input name="delivery_house_number" value="{fv('delivery_house_number')}"/></label>
+              <label>Индекс <input name="delivery_postcode" value="{fv('delivery_postcode')}"/></label>
+              <label>Город <input name="delivery_city" value="{fv('delivery_city')}"/></label>
+              <label>Страна <input name="delivery_country" value="{fv('delivery_country')}"/></label>
+              <label>Комментарий <input name="delivery_notes" value="{fv('delivery_notes')}"/></label>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-header"><h3 class="card-title">Оплата</h3></div>
+            <div class="compact-field-grid">
+              <label>Способ оплаты <select name="payment_method">{payment_method_options_html}</select></label>
+              <label>Статус оплаты <select name="payment_status">{payment_status_options_html}</select></label>
+            </div>
+          </section>
+
         </div>
-        <div class="manual-order-new-client">
-          <label>Имя <input name="new_first_name" value="{fv('new_first_name')}"/></label>
-          <label>Фамилия (необязательно) <input name="new_last_name" value="{fv('new_last_name')}"/></label>
-          <label>Телефон <input name="new_phone" value="{fv('new_phone')}"/></label>
-          <label>Telegram ID (необязательно) <input name="new_telegram_id" value="{fv('new_telegram_id')}"/></label>
-        </div>
 
-        <h2>Доставка</h2>
-        <label><input type="radio" name="delivery_method" value="pickup" {pickup_checked}/> Самовывоз</label>
-        <label><input type="radio" name="delivery_method" value="delivery" {delivery_checked}/> Доставка</label>
-        <div class="manual-order-delivery-fields">
-          <label>Улица <input name="delivery_street" value="{fv('delivery_street')}"/></label>
-          <label>Дом/корпус <input name="delivery_house_number" value="{fv('delivery_house_number')}"/></label>
-          <label>Индекс <input name="delivery_postcode" value="{fv('delivery_postcode')}"/></label>
-          <label>Город <input name="delivery_city" value="{fv('delivery_city')}"/></label>
-          <label>Страна <input name="delivery_country" value="{fv('delivery_country')}"/></label>
-          <label>Комментарий <input name="delivery_notes" value="{fv('delivery_notes')}"/></label>
-        </div>
-
-        <h2>Товары</h2>
-        <div class="dash-table-wrap"><table>
-          <tr><th>Товар</th><th>Цена</th><th>Количество / вес</th></tr>
-          {product_rows_html}
-        </table></div>
-
-        <h2>Оплата</h2>
-        <label>Способ оплаты <select name="payment_method">{payment_method_options_html}</select></label>
-        <label>Статус оплаты <select name="payment_status">{payment_status_options_html}</select></label>
-
-        <div class="form-actions">
-          <button class="button" type="submit">Создать заказ</button>
-          <a class="button button-link secondary" href="/orders">Отмена</a>
-        </div>
-      </form>
-    </section>
+        <aside class="card order-summary-panel" id="orderSummaryPanel">
+          <div class="card-header"><h3 class="card-title">Текущий заказ</h3></div>
+          <div class="order-summary-lines" id="orderSummaryLines"></div>
+          <div class="empty-state" id="orderSummaryEmpty">
+            <span class="empty-state-icon">{_icon_svg("box", 32)}</span>
+            <p class="empty-state-title">Добавьте товары</p>
+          </div>
+          <div class="order-summary-total">
+            <span>Итого</span>
+            <strong id="orderSummaryTotal">{currency_attr}0.00</strong>
+          </div>
+          <button class="btn btn-primary order-summary-submit" type="submit">Создать заказ</button>
+          <a class="btn btn-ghost btn-sm" href="/orders" style="width:100%; justify-content:center; margin-top:6px;">Отмена</a>
+        </aside>
+      </div>
+    </form>
+    <div class="order-summary-mobile-bar" id="orderSummaryMobileBar">
+      <span><span class="order-summary-mobile-count">0</span> товар(ов)</span>
+      <span class="order-summary-mobile-total">{currency_attr}0.00</span>
+      <a href="#orderSummaryPanel" class="btn btn-primary btn-sm">К заказу</a>
+    </div>
+    {_new_order_picker_script()}
     """
 
 
@@ -5217,16 +6158,38 @@ async def new_order_form(client_query: str = ""):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        products, options = _manual_order_catalog(cursor)
+        products, options, categories = _manual_order_catalog(cursor)
         matching_clients = _search_clients_for_manual_order(cursor, client_query)
         conn.close()
         page = _render_new_order_form(
-            products, options, matching_clients, client_query
+            products, options, categories, matching_clients, client_query
         )
         return admin_layout("➕ Новый заказ", page)
     except Exception:
         report_read_error("manual_order_form_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+@app.get("/orders/new/clients", response_class=HTMLResponse)
+async def new_order_client_search(q: str = ""):
+    """Read-only client-autocomplete data source for the New Order UX
+    redesign (Checkpoint 1: backend only -- nothing fetches this yet).
+    Returns a small HTML fragment, not a full admin_layout() page, since
+    it's meant to be dropped into a dropdown by JS in a later checkpoint.
+    No CSRF dependency: GET, read-only, same convention as every other GET
+    route in this file."""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        matching_clients = _search_clients_for_manual_order(cursor, q)
+        conn.close()
+        return HTMLResponse(_manual_order_client_search_results_html(matching_clients))
+    except Exception:
+        report_read_error("manual_order_client_search_failed")
+        return HTMLResponse(
+            '<p class="empty-state-text">Не удалось выполнить поиск. Попробуйте позже.</p>',
+            status_code=200,
+        )
 
 
 @app.post(
@@ -5243,7 +6206,7 @@ async def create_manual_order(request: Request):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        products, options = _manual_order_catalog(cursor)
+        products, options, categories = _manual_order_catalog(cursor)
 
         source = str(form.get("source") or "")
         if source not in ORDER_SOURCE_VALUES:
@@ -5348,7 +6311,7 @@ async def create_manual_order(request: Request):
         priced_items = []
         products_by_id = {row[0]: row for row in products}
 
-        for product_id, name, pricing_mode, price_per_kg, fixed_price, sale_unit in products:
+        for product_id, name, pricing_mode, price_per_kg, fixed_price, sale_unit, _category_id in products:
             product_dict = {
                 "pricing_mode": pricing_mode,
                 "price_per_kg": price_per_kg,
@@ -5417,7 +6380,7 @@ async def create_manual_order(request: Request):
                 cursor, str(form.get("client_query") or "")
             )
             page = _render_new_order_form(
-                products, options, matching_clients, str(form.get("client_query") or ""),
+                products, options, categories, matching_clients, str(form.get("client_query") or ""),
                 form_values=form_values, errors=errors,
             )
             return admin_layout("➕ Новый заказ", page)
@@ -7202,39 +8165,202 @@ async def products(filter: str = "", days: int = 14):
     except Exception:
         report_read_error("product_list_failed")
         return admin_error_page("Ошибка", "Не удалось выполнить операцию. Проверьте журнал или попробуйте позже.")
+
+
+def _product_form_defaults():
+    return {
+        "category_id": "", "name": "", "pricing_mode": "per_kg",
+        "price_per_kg": "", "fixed_price": "", "sale_unit": "",
+        "unit_weight_grams": "", "stock_quantity": "",
+        "description": "", "image_url": "",
+        "stock_grams": "0", "low_stock_threshold_grams": "500",
+        "sort_order": "0", "is_active": True, "is_out_of_stock": False,
+    }
+
+
+def _product_sale_fields_html(values, product_id=None):
+    def fv(name, default=""):
+        raw = values.get(name, default)
+        return escape(str(raw if raw is not None and raw != "" else default), quote=True)
+
+    mode = str(values.get("pricing_mode") or "per_kg")
+    if mode not in PRICING_MODES:
+        mode = "per_kg"
+    per_kg_checked = "checked" if mode == "per_kg" else ""
+    fixed_checked = "checked" if mode == "fixed" else ""
+    options_checked = "checked" if mode == "options" else ""
+    per_kg_hidden = "" if mode == "per_kg" else "hidden"
+    fixed_hidden = "" if mode == "fixed" else "hidden"
+    options_hidden = "" if mode == "options" else "hidden"
+
+    weight_raw = values.get("unit_weight_grams")
+    weight_known = weight_raw not in (None, "", 0, "0")
+    weight_wrap_hidden = "hidden" if mode == "options" else ""
+    weight_toggle_hidden = "" if mode == "fixed" else "hidden"
+    weight_toggle_checked = "checked" if (mode == "fixed" and weight_known) else ""
+    weight_field_hidden = "hidden" if (mode == "fixed" and not weight_known) else ""
+    weight_field_value = fv("unit_weight_grams") if mode in ("per_kg", "fixed") else ""
+    weight_label_text = (
+        "Вес упаковки, г" if mode == "fixed" else "Ориентировочный вес, г (необязательно)"
+    )
+    weight_hint_hidden = "" if (mode == "fixed" and weight_known) else "hidden"
+
+    if product_id:
+        options_hint = (
+            "<p class=\"empty-state-text\">Цена, вес и остаток задаются в вариантах товара ниже "
+            f"(например: 250 г / 500 г / 1 кг). <a href=\"/products/{product_id}/options/new\">➕ Добавить вариант</a></p>"
+        )
+    else:
+        options_hint = (
+            "<p class=\"empty-state-text\">Варианты (например: 250 г / 500 г / 1 кг) — со своей ценой, "
+            "весом и остатком — можно добавить на странице товара после сохранения.</p>"
+        )
+
+    return f"""
+    <section class="card">
+      <div class="card-header"><h3 class="card-title">Основное</h3></div>
+      <div class="compact-field-grid">
+        <label>Категория <input name="category_id" value="{fv('category_id')}"/></label>
+        <label>Название товара <input name="name" value="{fv('name')}"/></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header"><h3 class="card-title">Как продаётся?</h3></div>
+      <div>
+        <label class="chip-toggle"><input type="radio" name="pricing_mode" value="per_kg" data-mode-radio {per_kg_checked}/> ⚖️ По весу</label>
+        <label class="chip-toggle"><input type="radio" name="pricing_mode" value="fixed" data-mode-radio {fixed_checked}/> 📦 Поштучно / упаковкой</label>
+        <label class="chip-toggle"><input type="radio" name="pricing_mode" value="options" data-mode-radio {options_checked}/> 🔀 Готовые варианты</label>
+      </div>
+
+      <div class="compact-field-grid" data-mode-panel="per_kg" style="margin-top:14px;" {per_kg_hidden}>
+        <label>Цена за кг (€) <input name="price_per_kg" type="number" min="0.01" step="0.01" value="{fv('price_per_kg')}"/></label>
+        <label>Остаток, г <input name="stock_grams" type="number" min="0" value="{fv('stock_grams', '0')}"/></label>
+        <label>Минимальный остаток, г <input name="low_stock_threshold_grams" type="number" min="0" value="{fv('low_stock_threshold_grams', '500')}"/></label>
+      </div>
+
+      <div class="compact-field-grid" data-mode-panel="fixed" style="margin-top:14px;" {fixed_hidden}>
+        <label>Цена за штуку / упаковку (€) <input name="fixed_price" type="number" min="0.01" step="0.01" value="{fv('fixed_price')}"/></label>
+        <label>Единица продажи <input name="sale_unit" value="{fv('sale_unit')}" placeholder="шт, банка, упаковка"/></label>
+        <label>Остаток в единицах <input name="stock_quantity" type="number" min="0" value="{fv('stock_quantity')}"/></label>
+      </div>
+
+      <div data-mode-panel="options" style="margin-top:14px;" {options_hidden}>
+        {options_hint}
+      </div>
+
+      <div id="weightFieldWrap" style="margin-top:14px;" {weight_wrap_hidden}>
+        <label class="chip-toggle" id="fixedWeightToggleWrap" style="margin:0 0 10px;" {weight_toggle_hidden}>
+          <input type="checkbox" id="fixedWeightKnownToggle" {weight_toggle_checked}/> У товара известен фиксированный вес упаковки
+        </label>
+        <div class="compact-field-grid" id="weightFieldGrid" {weight_field_hidden}>
+          <label id="weightFieldLabel"><span id="weightFieldLabelText">{weight_label_text}</span>
+            <input name="unit_weight_grams" id="weightInput" type="number" min="1" value="{weight_field_value}"/>
+          </label>
+        </div>
+        <p class="empty-state-text" id="weightExampleHint" {weight_hint_hidden}>
+          Пример: цена €12.50, единица «банка», вес упаковки 250 г → 1 банка = 250 г = €12.50; 2 банки = 500 г total = €25.00.
+        </p>
+      </div>
+    </section>
+    """
+
+
+def _product_extra_fields_html(values):
+    def fv(name, default=""):
+        raw = values.get(name, default)
+        return escape(str(raw if raw is not None else default), quote=True)
+
+    active_checked = "checked" if values.get("is_active") else ""
+    out_of_stock_checked = "checked" if values.get("is_out_of_stock") else ""
+    return f"""
+    <section class="card">
+      <div class="card-header"><h3 class="card-title">Дополнительно</h3></div>
+      <div class="compact-field-grid">
+        <label>Описание <input name="description" value="{fv('description')}"/></label>
+        <label>Ссылка на фото <input name="image_url" value="{fv('image_url')}"/></label>
+        <label>Порядок сортировки <input name="sort_order" value="{fv('sort_order', '0')}"/></label>
+      </div>
+      <div style="margin-top:10px;">
+        <label class="chip-toggle"><input type="checkbox" name="is_active" value="1" {active_checked}/> Товар активен</label>
+        <label class="chip-toggle"><input type="checkbox" name="is_out_of_stock" value="true" {out_of_stock_checked}/> Нет в наличии</label>
+      </div>
+    </section>
+    """
+
+
+def _product_form_script():
+    return """
+    <script>
+    (function () {
+      var form = document.getElementById('productForm');
+      if (!form) { return; }
+      var weightInput = document.getElementById('weightInput');
+      var weightGrid = document.getElementById('weightFieldGrid');
+      var weightHint = document.getElementById('weightExampleHint');
+      var weightWrap = document.getElementById('weightFieldWrap');
+      var toggleWrap = document.getElementById('fixedWeightToggleWrap');
+      var knownToggle = document.getElementById('fixedWeightKnownToggle');
+      var labelText = document.getElementById('weightFieldLabelText');
+
+      function currentMode() {
+        var checked = form.querySelector('[data-mode-radio]:checked');
+        return checked ? checked.value : 'per_kg';
+      }
+
+      function applyMode() {
+        var mode = currentMode();
+        form.querySelectorAll('[data-mode-panel]').forEach(function (panel) {
+          panel.hidden = panel.getAttribute('data-mode-panel') !== mode;
+        });
+
+        if (mode === 'options') {
+          weightWrap.hidden = true;
+          weightInput.value = '';
+          return;
+        }
+        weightWrap.hidden = false;
+
+        if (mode === 'per_kg') {
+          toggleWrap.hidden = true;
+          weightGrid.hidden = false;
+          weightHint.hidden = true;
+          labelText.textContent = 'Ориентировочный вес, г (необязательно)';
+          return;
+        }
+
+        // mode === 'fixed'
+        toggleWrap.hidden = false;
+        labelText.textContent = 'Вес упаковки, г';
+        var known = knownToggle.checked;
+        weightGrid.hidden = !known;
+        weightHint.hidden = !known;
+        if (!known) { weightInput.value = ''; }
+      }
+
+      form.querySelectorAll('[data-mode-radio]').forEach(function (radio) {
+        radio.addEventListener('change', applyMode);
+      });
+      knownToggle.addEventListener('change', applyMode);
+      applyMode();
+    })();
+    </script>
+    """
+
+
 @app.get("/products/new", response_class=HTMLResponse)
 async def new_product_form():
-    html = """
-    <section class="admin-card">
-      <h1>➕ Новый товар</h1>
-      <p><a href="/products">← Назад к товарам</a></p>
-      <form class="admin-form" method="post" action="/products/new">
-        <label>Категория <input name="category_id"/></label>
-        <label>Название товара <input name="name"/></label>
-        <label>Режим цены
-          <select name="pricing_mode">
-            <option value="fixed">Фиксированная цена</option>
-            <option value="per_kg" selected>Цена за килограмм</option>
-            <option value="options">Готовые варианты</option>
-          </select>
-        </label>
-        <label>Цена за кг (€) <input name="price_per_kg" type="number" min="0.01" step="0.01"/></label>
-        <label>Фиксированная цена (€) <input name="fixed_price" type="number" min="0.01" step="0.01"/></label>
-        <label>Единица продажи <input name="sale_unit" placeholder="за упаковку / за штуку"/></label>
-        <label>Ориентировочный вес, г <input name="unit_weight_grams" type="number" min="1"/></label>
-        <label>Остаток в единицах <input name="stock_quantity" type="number" min="0"/></label>
-        <label>Описание <input name="description"/></label>
-        <label>Ссылка на фото <input name="image_url"/></label>
-        <label>Остаток, г <input name="stock_grams" type="number" min="0" value="0"/></label>
-        <label>Минимальный остаток, г <input name="low_stock_threshold_grams" type="number" min="0" value="500"/></label>
-        <label>Порядок сортировки <input name="sort_order" value="0"/><small>Меньше число = выше в списке</small></label>
-        <label>Товар активен <input type="checkbox" name="is_active" value="1"/></label>
-        <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true"/></label>
-        <div class="form-actions">
-          <input class="button" type="submit" value="Создать товар"/>
-        </div>
-      </form>
-    </section>
+    values = _product_form_defaults()
+    html = f"""
+    {page_header("➕ Новый товар", "", btn_link("К товарам", "/products"))}
+    <form class="admin-form" method="post" action="/products/new" id="productForm">
+      {_product_sale_fields_html(values)}
+      {_product_extra_fields_html(values)}
+      <div class="form-actions">
+        {btn_submit("Создать товар")}
+      </div>
+    </form>
+    {_product_form_script()}
     """
     return admin_layout("➕ Новый товар", html)
 
@@ -7281,10 +8407,29 @@ async def create_product(
         stock_value = normalize_product_stock_grams(
             pricing_mode_value, stock_grams
         )
-    except ValueError:
-        return admin_error_page(
-            "Некорректная цена", "Проверьте значения цены и единицы продажи."
-        )
+    except ValueError as e:
+        values = {
+            "category_id": category_id, "name": name, "pricing_mode": pricing_mode,
+            "price_per_kg": price_per_kg, "fixed_price": fixed_price, "sale_unit": sale_unit,
+            "unit_weight_grams": unit_weight_grams, "stock_quantity": stock_quantity,
+            "description": description, "image_url": image_url, "stock_grams": stock_grams,
+            "low_stock_threshold_grams": low_stock_threshold_grams, "sort_order": sort_order,
+            "is_active": active, "is_out_of_stock": is_out_of_stock,
+        }
+        error_html = f'<div class="attention-banner">⚠️ {escape(str(e), quote=True)}</div>'
+        html = f"""
+        {page_header("➕ Новый товар", "", btn_link("К товарам", "/products"))}
+        {error_html}
+        <form class="admin-form" method="post" action="/products/new" id="productForm">
+          {_product_sale_fields_html(values)}
+          {_product_extra_fields_html(values)}
+          <div class="form-actions">
+            {btn_submit("Создать товар")}
+          </div>
+        </form>
+        {_product_form_script()}
+        """
+        return admin_layout("➕ Новый товар", html)
     try:
         low_stock_threshold_value = max(int(low_stock_threshold_grams or 0), 0)
     except (TypeError, ValueError):
@@ -7428,53 +8573,38 @@ async def edit_product_form(product_id: int):
         ) = row
         if pricing_mode not in PRICING_MODES:
             raise ValueError(f"Неизвестный режим цены: {pricing_mode!r}")
-        checked = "checked" if is_active else ""
-        out_of_stock_checked = "checked" if is_out_of_stock else ""
-        image_url_value = escape(str(image_url or ""), quote=True)
         promotion_checked = "checked" if is_promotion else ""
         promotion_title_value = escape(str(promotion_title or ""), quote=True)
-        fixed_selected = "selected" if pricing_mode == "fixed" else ""
-        per_kg_selected = "selected" if pricing_mode == "per_kg" else ""
-        options_selected = "selected" if pricing_mode == "options" else ""
+        values = {
+            "category_id": category_id, "name": name, "pricing_mode": pricing_mode,
+            "price_per_kg": price_per_kg, "fixed_price": fixed_price, "sale_unit": sale_unit,
+            "unit_weight_grams": unit_weight_grams, "stock_quantity": stock_quantity,
+            "description": description, "image_url": image_url,
+            "stock_grams": max(int(stock_grams or 0), 0),
+            "low_stock_threshold_grams": max(int(low_stock_threshold_grams or 0), 0),
+            "sort_order": sort_order, "is_active": bool(is_active),
+            "is_out_of_stock": bool(is_out_of_stock),
+        }
         html = f"""
-        <section class="admin-card">
-          <h1>✏️ Редактировать товар</h1>
-          <p><a href="/products">← Назад к товарам</a></p>
-          <form class="admin-form" method="post" action="/products/{product_id}/edit">
-            <label>Категория <input name="category_id" value="{category_id}"/></label>
-            <label>Название товара <input name="name" value="{name}"/></label>
-            <label>Режим цены
-              <select name="pricing_mode">
-                <option value="fixed" {fixed_selected}>Фиксированная цена</option>
-                <option value="per_kg" {per_kg_selected}>Цена за килограмм</option>
-                <option value="options" {options_selected}>Готовые варианты</option>
-              </select>
-            </label>
-            <label>Цена за кг (€) <input name="price_per_kg" type="number" min="0.01" step="0.01" value="{price_per_kg}"/></label>
-            <label>Фиксированная цена (€) <input name="fixed_price" type="number" min="0.01" step="0.01" value="{fixed_price if fixed_price is not None else ''}"/></label>
-            <label>Единица продажи <input name="sale_unit" value="{escape(str(sale_unit or ''), quote=True)}"/></label>
-            <label>Ориентировочный вес, г <input name="unit_weight_grams" type="number" min="1" value="{unit_weight_grams if unit_weight_grams is not None else ''}"/></label>
-            <label>Остаток в единицах <input name="stock_quantity" type="number" min="0" value="{stock_quantity if stock_quantity is not None else ''}"/></label>
-            <label>Описание <input name="description" value="{description or ''}"/></label>
-            <label>Ссылка на фото <input name="image_url" value="{image_url_value}"/></label>
-            <label>Остаток, г <input name="stock_grams" type="number" min="0" value="{max(int(stock_grams or 0), 0)}"/></label>
-            <label>Минимальный остаток, г <input name="low_stock_threshold_grams" type="number" min="0" value="{max(int(low_stock_threshold_grams or 0), 0)}"/></label>
-            <label>Порядок сортировки <input name="sort_order" value="{sort_order}"/><small>Меньше число = выше в списке</small></label>
-            <label>Товар активен <input type="checkbox" name="is_active" value="1" {checked}/></label>
-            <label>Нет в наличии <input type="checkbox" name="is_out_of_stock" value="true" {out_of_stock_checked}/></label>
-            <fieldset>
-              <legend>🔥 Продвижение товара</legend>
-              <label>☑️ Показывать в разделе "Акции" <input type="checkbox" name="is_promotion" value="1" {promotion_checked}/></label>
+        {page_header("✏️ Редактировать товар", "", btn_link("К товарам", "/products"))}
+        <form class="admin-form" method="post" action="/products/{product_id}/edit" id="productForm">
+          {_product_sale_fields_html(values, product_id=product_id)}
+          {_product_extra_fields_html(values)}
+          <section class="card">
+            <div class="card-header"><h3 class="card-title">🔥 Продвижение товара</h3></div>
+            <label class="chip-toggle"><input type="checkbox" name="is_promotion" value="1" {promotion_checked}/> Показывать в разделе "Акции"</label>
+            <div class="compact-field-grid" style="margin-top:10px;">
               <label>Название акции
                 <input name="promotion_title" value="{promotion_title_value}" placeholder="🔥 Хит недели / 🔥 Новинка / 🔥 Скидка 10% / 🔥 Лучший выбор"/>
               </label>
               <label>Порядок показа <input name="promotion_sort_order" type="number" value="{promotion_sort_order}"/></label>
-            </fieldset>
-            <div class="form-actions">
-              <input class="button" type="submit" value="Сохранить изменения"/>
             </div>
-          </form>
-        </section>
+          </section>
+          <div class="form-actions">
+            {btn_submit("Сохранить изменения")}
+          </div>
+        </form>
+        {_product_form_script()}
         """
         movement_rows = ""
         for movement_type, quantity_grams, stock_before, stock_after, order_id, note, created_at in inventory_movements:
@@ -8068,10 +9198,41 @@ async def update_product(
             if pricing_mode_value == "per_kg"
             else None
         )
-    except ValueError:
-        return admin_error_page(
-            "Некорректная цена", "Проверьте значения цены и единицы продажи."
-        )
+    except ValueError as e:
+        values = {
+            "category_id": category_id, "name": name, "pricing_mode": pricing_mode,
+            "price_per_kg": price_per_kg, "fixed_price": fixed_price, "sale_unit": sale_unit,
+            "unit_weight_grams": unit_weight_grams, "stock_quantity": stock_quantity,
+            "description": description, "image_url": image_url, "stock_grams": stock_grams,
+            "low_stock_threshold_grams": low_stock_threshold_grams, "sort_order": sort_order,
+            "is_active": active, "is_out_of_stock": is_out_of_stock,
+        }
+        promotion_checked = "checked" if is_promotion else ""
+        promotion_title_value = escape(str(promotion_title or ""), quote=True)
+        error_html = f'<div class="attention-banner">⚠️ {escape(str(e), quote=True)}</div>'
+        html = f"""
+        {page_header("✏️ Редактировать товар", "", btn_link("К товарам", "/products"))}
+        {error_html}
+        <form class="admin-form" method="post" action="/products/{product_id}/edit" id="productForm">
+          {_product_sale_fields_html(values, product_id=product_id)}
+          {_product_extra_fields_html(values)}
+          <section class="card">
+            <div class="card-header"><h3 class="card-title">🔥 Продвижение товара</h3></div>
+            <label class="chip-toggle"><input type="checkbox" name="is_promotion" value="1" {promotion_checked}/> Показывать в разделе "Акции"</label>
+            <div class="compact-field-grid" style="margin-top:10px;">
+              <label>Название акции
+                <input name="promotion_title" value="{promotion_title_value}" placeholder="🔥 Хит недели / 🔥 Новинка / 🔥 Скидка 10% / 🔥 Лучший выбор"/>
+              </label>
+              <label>Порядок показа <input name="promotion_sort_order" type="number" value="{promotion_sort_order}"/></label>
+            </div>
+          </section>
+          <div class="form-actions">
+            {btn_submit("Сохранить изменения")}
+          </div>
+        </form>
+        {_product_form_script()}
+        """
+        return admin_layout("✏️ Редактировать товар", html)
     try:
         low_stock_threshold_value = max(int(low_stock_threshold_grams or 0), 0)
     except (TypeError, ValueError):

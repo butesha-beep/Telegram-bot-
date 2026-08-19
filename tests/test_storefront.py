@@ -150,7 +150,7 @@ class StorefrontTests(unittest.TestCase):
             "options", "31.25", "12.50", "за упаковку", "300", "7"
         )
 
-        self.assertEqual(fixed, ("fixed", 0.0, 12.5, "за упаковку", None, 7))
+        self.assertEqual(fixed, ("fixed", 0.0, 12.5, "за упаковку", 500, 7))
         self.assertEqual(per_kg, ("per_kg", 31.25, None, None, 300, None))
         self.assertEqual(options, ("options", 0.0, None, None, None, None))
 

@@ -10,6 +10,9 @@ from fastapi import Request
 os.environ.setdefault("DATABASE_URL", "postgresql://unit-test.invalid/manual-order-admin")
 os.environ.setdefault("ADMIN_PASSWORD", "unit-test-password")
 os.environ.setdefault("ADMIN_SESSION_SECRET", "unit-test-session-secret")
+os.environ.setdefault(
+    "BOT_TOKEN", "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+)
 
 import admin_app
 
@@ -119,13 +122,18 @@ def _get_request(path="/orders/new", query_string=""):
     )
 
 
-PER_KG_PRODUCT_ROW = (1, "Лосось", "per_kg", 24.0, None, None)
-FIXED_PRODUCT_ROW = (2, "Подарочный набор", "fixed", None, 15.0, "за упаковку")
-OPTIONS_PRODUCT_ROW = (3, "Рыба на вес", "options", None, None, None)
+# Row shape: id, name, pricing_mode, price_per_kg, fixed_price, sale_unit,
+# category_id (category_id added for the New Order UX redesign, Checkpoint 1).
+PER_KG_PRODUCT_ROW = (1, "Лосось", "per_kg", 24.0, None, None, 1)
+FIXED_PRODUCT_ROW = (2, "Подарочный набор", "fixed", None, 15.0, "за упаковку", 2)
+OPTIONS_PRODUCT_ROW = (3, "Рыба на вес", "options", None, None, None, 1)
 OPTION_ROW = (10, 3, "Средняя 200-300г", 8.0)
+CATEGORY_ROW_FISH = (1, "Рыба")
+CATEGORY_ROW_SETS = (2, "Наборы")
 
 FULL_CATALOG_PRODUCTS = [PER_KG_PRODUCT_ROW, FIXED_PRODUCT_ROW, OPTIONS_PRODUCT_ROW]
 FULL_CATALOG_OPTIONS = [OPTION_ROW]
+FULL_CATALOG_CATEGORIES = [CATEGORY_ROW_FISH, CATEGORY_ROW_SETS]
 
 
 def _base_form(**overrides):
@@ -197,7 +205,7 @@ class SourceAndReferenceTests(unittest.TestCase):
                 ("Ivan", "Petrov", "+31600000001", None, None),  # existing client lookup
                 (101,),  # orders INSERT RETURNING id
             ],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(
@@ -229,7 +237,7 @@ class CustomerResolutionTests(unittest.TestCase):
                 ("Ivan", "Petrov", "+31600000001", 555555, None),
                 (101,),
             ],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(client_id="5", weight_1="200"))
@@ -249,7 +257,7 @@ class CustomerResolutionTests(unittest.TestCase):
     def test_new_client_created_without_telegram_id(self):
         cursor = ScriptedCursor(
             fetchone_values=[(77,), (102,)],  # clients INSERT RETURNING id, orders RETURNING id
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(
@@ -276,7 +284,7 @@ class CustomerResolutionTests(unittest.TestCase):
                 ("OldFirst", "OldLast", "+31600000000", None, None),
                 (101,),
             ],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(client_id="5", weight_1="200"))
@@ -301,7 +309,7 @@ class DeliveryTests(unittest.TestCase):
                 ("Ivan", None, "+31600000001", None, None),
                 (101,),
             ],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(delivery_method="pickup", weight_1="200"))
@@ -319,7 +327,7 @@ class DeliveryTests(unittest.TestCase):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None)],  # existing client resolution
             fetchall_values=[
-                FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS,  # catalog for the POST handler
+                FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES,  # catalog for the POST handler
                 [(5, "Ivan", None, "+31600000001", None)],  # client search redisplay (id, first, last, phone, tg_id)
             ],
         )
@@ -341,7 +349,7 @@ class DeliveryTests(unittest.TestCase):
                 ("Ivan", None, "+31600000001", None, None),
                 (101,),
             ],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(
@@ -370,7 +378,7 @@ class PricingModeLinesTests(unittest.TestCase):
                 ("Ivan", None, "+31600000001", None, None),
                 (101,),
             ],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(
@@ -392,7 +400,7 @@ class PricingModeLinesTests(unittest.TestCase):
     def test_per_kg_line_snapshots_current_price_per_kg(self):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None), (101,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(weight_1="500"))
@@ -409,7 +417,7 @@ class PricingModeLinesTests(unittest.TestCase):
     def test_fixed_line_uses_fixed_price(self):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None), (101,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(qty_2="1"))
@@ -423,7 +431,7 @@ class PricingModeLinesTests(unittest.TestCase):
     def test_options_line_uses_selected_option_price(self):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None), (101,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(optqty_10="1"))
@@ -444,7 +452,7 @@ class NoStockDeductionTests(unittest.TestCase):
     def test_unpaid_creation_does_not_touch_inventory(self):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None), (101,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(payment_status="unpaid", weight_1="200"))
@@ -459,7 +467,7 @@ class NoStockDeductionTests(unittest.TestCase):
     def test_paid_at_creation_still_does_not_deduct_stock(self):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None), (101,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(payment_status="paid", weight_1="200"))
@@ -482,7 +490,7 @@ class InitialStateAndRefundedTests(unittest.TestCase):
     def test_starts_fulfillment_status_new(self):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None), (101,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(weight_1="200"))
@@ -497,7 +505,7 @@ class InitialStateAndRefundedTests(unittest.TestCase):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None)],  # existing client resolution
             fetchall_values=[
-                FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS,
+                FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES,
                 [(5, "Ivan", None, "+31600000001", None)],  # (id, first, last, phone, tg_id)
             ],
         )
@@ -510,7 +518,7 @@ class InitialStateAndRefundedTests(unittest.TestCase):
         self.assertEqual(cursor.inserts_into("orders"), [])
 
     def test_form_never_renders_refunded_as_a_payment_status_option(self):
-        page = admin_app._render_new_order_form([], [], [], "")
+        page = admin_app._render_new_order_form([], [], [], [], "")
         self.assertNotIn('value="refunded"', page)
 
 
@@ -522,7 +530,7 @@ class TelegramNullTests(unittest.TestCase):
     def test_order_with_null_telegram_id_is_created_successfully(self):
         cursor = ScriptedCursor(
             fetchone_values=[(77,), (101,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(
@@ -543,7 +551,7 @@ class OrderEventTests(unittest.TestCase):
     def test_order_created_event_is_logged(self):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None), (101,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(source="whatsapp", weight_1="200"))
@@ -566,7 +574,7 @@ class RedirectTests(unittest.TestCase):
     def test_redirects_to_order_detail(self):
         cursor = ScriptedCursor(
             fetchone_values=[("Ivan", None, "+31600000001", None, None), (555,)],
-            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS],
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
         )
         connection = ScriptedConnection(cursor)
         request = _form_request(_base_form(weight_1="200"))
@@ -583,6 +591,333 @@ class FriendlyOrderNumberTests(unittest.TestCase):
     def test_format_order_number(self):
         self.assertEqual(admin_app.format_order_number(127), "DM-000127")
         self.assertEqual(admin_app.format_order_number(1), "DM-000001")
+
+
+# ---------------------------------------------------------------------------
+# New Order UX redesign -- Checkpoint 1 (backend preparation only: category
+# data on the catalog read, telegram_id in client search, and the read-only
+# client-autocomplete endpoint/renderer). No picker/autocomplete JS and no
+# _render_new_order_form changes exist yet -- those are later checkpoints.
+# ---------------------------------------------------------------------------
+
+class ManualOrderCatalogCategoriesTests(unittest.TestCase):
+    """_manual_order_catalog now also returns active categories, and the
+    products query now includes category_id -- both purely additive reads
+    for the future category/search product picker."""
+
+    def test_catalog_returns_categories_as_third_element(self):
+        cursor = ScriptedCursor(
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
+        )
+        products, options, categories = admin_app._manual_order_catalog(cursor)
+        self.assertEqual(products, FULL_CATALOG_PRODUCTS)
+        self.assertEqual(options, FULL_CATALOG_OPTIONS)
+        self.assertEqual(categories, FULL_CATALOG_CATEGORIES)
+
+    def test_products_query_selects_category_id(self):
+        cursor = ScriptedCursor(
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
+        )
+        admin_app._manual_order_catalog(cursor)
+        products_query = cursor.queries[0][0]
+        self.assertIn("category_id", products_query)
+
+    def test_categories_query_uses_same_availability_semantics_as_storefront(self):
+        # Same WHERE is_active = TRUE / ORDER BY sort_order, id semantics
+        # already used by the customer-facing storefront catalog query --
+        # not a new/invented ordering rule.
+        cursor = ScriptedCursor(
+            fetchall_values=[FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES],
+        )
+        admin_app._manual_order_catalog(cursor)
+        categories_query = cursor.queries[2][0]
+        self.assertIn("FROM categories", categories_query)
+        self.assertIn("WHERE is_active = TRUE", categories_query)
+        self.assertIn("ORDER BY sort_order, id", categories_query)
+
+
+class ManualOrderClientSearchTelegramIdTests(unittest.TestCase):
+    """Requirement: client search must also match Telegram ID, not just
+    name/phone (it was displayed but not searchable before)."""
+
+    def test_search_query_matches_telegram_id_too(self):
+        cursor = ScriptedCursor(fetchall_values=[[]])
+        admin_app._search_clients_for_manual_order(cursor, "555")
+        query, params = cursor.queries[0]
+        self.assertIn("telegram_id", query)
+        self.assertEqual(params, ("%555%", "%555%", "%555%", "%555%"))
+
+    def test_empty_query_still_lists_recent_clients_unfiltered(self):
+        cursor = ScriptedCursor(fetchall_values=[[]])
+        admin_app._search_clients_for_manual_order(cursor, "")
+        query, params = cursor.queries[0]
+        self.assertNotIn("WHERE", query)
+        self.assertIsNone(params)
+
+
+class ManualOrderClientSearchResultsHtmlTests(unittest.TestCase):
+    """Fragment renderer for the new autocomplete endpoint -- data-*
+    attributes are the contract the (later checkpoint's) JS will read."""
+
+    def test_empty_results_render_a_clear_empty_state(self):
+        html_out = admin_app._manual_order_client_search_results_html([])
+        self.assertIn("не найдены", html_out)
+        self.assertNotIn("<button", html_out)
+
+    def test_result_carries_expected_data_attributes(self):
+        clients = [(5, "Ivan", "Petrov", "+31600000001", 555)]
+        html_out = admin_app._manual_order_client_search_results_html(clients)
+        self.assertIn('data-client-id="5"', html_out)
+        self.assertIn('data-client-name="Ivan Petrov"', html_out)
+        self.assertIn('data-client-phone="+31600000001"', html_out)
+        self.assertIn('data-client-telegram-id="555"', html_out)
+        self.assertIn("Telegram ID: 555", html_out)
+
+    def test_client_without_telegram_id_omits_telegram_id_text(self):
+        clients = [(6, "Olga", None, "+31600000002", None)]
+        html_out = admin_app._manual_order_client_search_results_html(clients)
+        self.assertIn('data-client-telegram-id=""', html_out)
+        self.assertNotIn("Telegram ID:", html_out)
+
+    def test_escapes_client_supplied_text(self):
+        clients = [(7, "<script>", None, "+31600000003", None)]
+        html_out = admin_app._manual_order_client_search_results_html(clients)
+        self.assertNotIn("<script>", html_out)
+        self.assertIn("&lt;script&gt;", html_out)
+
+
+class ManualOrderClientSearchRouteTests(unittest.TestCase):
+    """GET /orders/new/clients: read-only, admin-auth-gated (via the
+    existing global middleware, no per-route code), no CSRF (GET), returns
+    a small fragment rather than a full admin_layout() page."""
+
+    def test_requires_admin_auth(self):
+        async def call_next(_request):
+            raise AssertionError("handler must not run without authentication")
+
+        response = asyncio.run(
+            admin_app.require_admin_login(
+                _get_request("/orders/new/clients", query_string="q=ivan"), call_next
+            )
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/login")
+
+    def test_route_declares_no_csrf_dependency(self):
+        found = False
+        for route in admin_app.app.routes:
+            if route.path == "/orders/new/clients" and "GET" in getattr(route, "methods", set()):
+                dependency_names = {
+                    getattr(dependency.call, "__name__", "")
+                    for dependency in route.dependant.dependencies
+                }
+                self.assertNotIn("require_admin_csrf", dependency_names)
+                found = True
+        self.assertTrue(found, "GET /orders/new/clients route was not registered")
+
+    def test_returns_matching_clients_fragment(self):
+        cursor = ScriptedCursor(
+            fetchall_values=[[(5, "Ivan", "Petrov", "+31600000001", 555)]],
+        )
+        connection = ScriptedConnection(cursor)
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
+            response = asyncio.run(admin_app.new_order_client_search("ivan"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.body.decode("utf-8")
+        self.assertIn('data-client-id="5"', body)
+        self.assertTrue(connection.closed)
+
+    def test_no_query_still_returns_a_fragment_not_a_full_page(self):
+        cursor = ScriptedCursor(fetchall_values=[[]])
+        connection = ScriptedConnection(cursor)
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
+            response = asyncio.run(admin_app.new_order_client_search(""))
+
+        body = response.body.decode("utf-8")
+        self.assertNotIn("<html", body)
+        self.assertIn("не найдены", body)
+
+    def test_query_failure_degrades_gracefully_instead_of_500(self):
+        class ExplodingCursor(ScriptedCursor):
+            def execute(self, query, params=None):
+                raise RuntimeError("db unavailable")
+
+        connection = ScriptedConnection(ExplodingCursor())
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
+            response = asyncio.run(admin_app.new_order_client_search("ivan"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Не удалось", response.body.decode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# New Order UX redesign -- Checkpoint 2 (workspace layout, category/search
+# product picker, order summary). Client autocomplete and delivery/payment
+# redesign are explicitly deferred to a later checkpoint -- not tested here
+# because they were not touched.
+# ---------------------------------------------------------------------------
+
+def _uncategorized_product_row(product_id=99, name="Пробный товар"):
+    return (product_id, name, "fixed", None, 9.5, "шт", None)
+
+
+class CategoryChipsAreDatabaseDrivenTests(unittest.TestCase):
+    """Requirement 2: category chips come only from the categories query
+    result -- nothing hardcoded, and the uncategorized chip only appears
+    when a product genuinely has no category."""
+
+    def test_chips_render_exactly_the_given_categories(self):
+        html_out = admin_app._manual_order_category_chips_html(FULL_CATALOG_CATEGORIES, False)
+        self.assertIn(">Все<", html_out)
+        self.assertIn('data-category-filter="1"', html_out)
+        self.assertIn("Рыба", html_out)
+        self.assertIn('data-category-filter="2"', html_out)
+        self.assertIn("Наборы", html_out)
+        # Proves nothing is hardcoded: a category name never supplied by
+        # the (fake, in this test) DB must never appear.
+        self.assertNotIn("Рыбные снеки", html_out)
+        self.assertNotIn("Мясные снеки", html_out)
+
+    def test_uncategorized_chip_only_appears_when_flagged(self):
+        with_flag = admin_app._manual_order_category_chips_html(FULL_CATALOG_CATEGORIES, True)
+        without_flag = admin_app._manual_order_category_chips_html(FULL_CATALOG_CATEGORIES, False)
+        self.assertIn("Без категории", with_flag)
+        self.assertNotIn("Без категории", without_flag)
+
+    def test_empty_categories_still_renders_the_all_chip(self):
+        html_out = admin_app._manual_order_category_chips_html([], False)
+        self.assertIn(">Все<", html_out)
+
+
+class ProductCardCategoryMetadataTests(unittest.TestCase):
+    """Requirement: each product card must carry the correct
+    data-category-id so client-side filtering can match it against the
+    active category chip."""
+
+    def test_cards_carry_their_own_category_id(self):
+        cards_html, has_uncategorized = admin_app._manual_order_catalog_picker_html(
+            FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, {}
+        )
+        self.assertIn('data-category-id="1"', cards_html)  # PER_KG_PRODUCT_ROW, OPTIONS_PRODUCT_ROW
+        self.assertIn('data-category-id="2"', cards_html)  # FIXED_PRODUCT_ROW
+        self.assertFalse(has_uncategorized)
+
+    def test_uncategorized_product_gets_none_marker_and_sets_flag(self):
+        products = FULL_CATALOG_PRODUCTS + [_uncategorized_product_row()]
+        cards_html, has_uncategorized = admin_app._manual_order_catalog_picker_html(
+            products, FULL_CATALOG_OPTIONS, {}
+        )
+        self.assertIn('data-category-id="none"', cards_html)
+        self.assertTrue(has_uncategorized)
+
+
+class PickerPreservesExistingFieldContractTests(unittest.TestCase):
+    """Requirement: the redesigned picker must keep emitting the exact
+    same weight_{product_id}/qty_{product_id}/optqty_{option_id} field
+    names POST /orders/new already parses -- only the surrounding
+    presentation changed."""
+
+    def test_per_kg_field_name_and_dom_id_match_and_carry_line_kind(self):
+        cards_html, _ = admin_app._manual_order_catalog_picker_html(
+            FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, {}
+        )
+        self.assertIn('id="weight_1"', cards_html)
+        self.assertIn('name="weight_1"', cards_html)
+        self.assertIn('data-line-kind="weight"', cards_html)
+
+    def test_fixed_field_name_and_dom_id_match_and_carry_line_kind(self):
+        cards_html, _ = admin_app._manual_order_catalog_picker_html(
+            FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, {}
+        )
+        self.assertIn('id="qty_2"', cards_html)
+        self.assertIn('name="qty_2"', cards_html)
+        self.assertIn('data-line-kind="qty"', cards_html)
+
+    def test_option_field_name_is_associated_with_its_own_product_only(self):
+        cards_html, _ = admin_app._manual_order_catalog_picker_html(
+            FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, {}
+        )
+        self.assertIn('id="optqty_10"', cards_html)
+        self.assertIn('name="optqty_10"', cards_html)
+        self.assertIn('data-line-kind="optqty"', cards_html)
+        # OPTION_ROW belongs to product_id=3 (OPTIONS_PRODUCT_ROW) -- its
+        # combined label must reference that product's own name, proving
+        # the option wasn't misattributed to a different product.
+        self.assertIn('data-label="Рыба на вес — Средняя 200-300г"', cards_html)
+
+    def test_options_product_with_no_options_is_silently_skipped_not_broken(self):
+        products = [(50, "Без вариантов", "options", None, None, None, 1)]
+        cards_html, _ = admin_app._manual_order_catalog_picker_html(products, [], {})
+        self.assertNotIn("Без вариантов", cards_html)
+
+
+class PickerErrorRedisplayTests(unittest.TestCase):
+    """Requirement 8: previously entered weight/quantity values must
+    survive a validation-error redisplay, in the new card markup."""
+
+    def test_previously_entered_values_are_redisplayed_in_the_right_inputs(self):
+        form_values = {"weight_1": "350", "qty_2": "3", "optqty_10": "2"}
+        cards_html, _ = admin_app._manual_order_catalog_picker_html(
+            FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, form_values
+        )
+        self.assertIn('id="weight_1" name="weight_1"', cards_html)
+        self.assertIn('value="350"', cards_html)
+        self.assertIn('value="3"', cards_html)
+        self.assertIn('value="2"', cards_html)
+
+    def test_invalid_stored_quantity_falls_back_to_zero_not_a_crash(self):
+        form_values = {"qty_2": "not-a-number"}
+        cards_html, _ = admin_app._manual_order_catalog_picker_html(
+            FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, form_values
+        )
+        self.assertIn('id="qty_2" name="qty_2"', cards_html)
+
+
+class RenderNewOrderFormWorkspaceStructureTests(unittest.TestCase):
+    """Integration-level: the full page includes the new workspace shell,
+    still as exactly one POST form so submission behavior is unchanged."""
+
+    def test_page_contains_workspace_and_summary_structure(self):
+        page = admin_app._render_new_order_form(
+            FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES, [], ""
+        )
+        self.assertIn('id="manualOrderForm"', page)
+        self.assertIn('class="order-workspace"', page)
+        self.assertIn('class="category-chips"', page)
+        self.assertIn('id="productGrid"', page)
+        self.assertIn('id="orderSummaryPanel"', page)
+        self.assertIn('id="orderSummaryLines"', page)
+        self.assertIn("Добавьте товары", page)
+        self.assertEqual(
+            page.count('<form class="order-workspace-form" method="post" action="/orders/new"'),
+            1,
+        )
+        self.assertIn("<script>", page)
+
+    def test_client_selection_functionality_is_unchanged_not_autocomplete_yet(self):
+        # Checkpoint 2 explicitly does not implement client autocomplete --
+        # the existing radio-based client_id selection must still render.
+        page = admin_app._render_new_order_form(
+            FULL_CATALOG_PRODUCTS, FULL_CATALOG_OPTIONS, FULL_CATALOG_CATEGORIES,
+            [(5, "Ivan", "Petrov", "+31600000001", 555)], "",
+        )
+        self.assertIn('type="radio" name="client_id" value="5"', page)
+
+
+class SharedOrderCoreUnmodifiedTests(unittest.TestCase):
+    """Requirement: no automatic Telegram/site order flow may be touched.
+    bot.py and admin_app.py must still import and call the exact same
+    order_creation functions -- proves this checkpoint's UI-only changes
+    never forked pricing/order-writing logic for the manual-order path."""
+
+    def test_bot_and_admin_still_share_the_same_pricing_and_insert_functions(self):
+        import bot
+        import order_creation
+        self.assertIs(bot.price_single_line, order_creation.price_single_line)
+        self.assertIs(admin_app.price_single_line, order_creation.price_single_line)
+        self.assertIs(bot.insert_order, order_creation.insert_order)
+        self.assertIs(admin_app.insert_order, order_creation.insert_order)
 
 
 if __name__ == "__main__":

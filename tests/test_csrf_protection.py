@@ -447,7 +447,7 @@ class CsrfProtectionTests(unittest.TestCase):
         admin_app.DATABASE_READY = self.original_database_ready
 
     def test_registered_route_and_csrf_inventory_is_complete(self):
-        self.assertEqual(len(admin_app.app.routes), 65)
+        self.assertEqual(len(admin_app.app.routes), 66)
         actual = {}
         for route in admin_app.app.routes:
             unsafe_methods = set(getattr(route, "methods", set())) & admin_app.UNSAFE_HTTP_METHODS
@@ -2055,7 +2055,8 @@ class CsrfProtectionTests(unittest.TestCase):
 
                 new_order_cursor = Mock()
                 new_order_cursor.fetchall.side_effect = [
-                    [(1, "Product", "per_kg", 24.0, None, None)],
+                    [(1, "Product", "per_kg", 24.0, None, None, 1)],
+                    [],
                     [],
                     [],
                 ]

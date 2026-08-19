@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ os.environ.setdefault("ADMIN_PASSWORD", "unit-test-password")
 os.environ.setdefault("ADMIN_SESSION_SECRET", "unit-test-session-secret")
 
 import admin_app
+import order_creation
 import storefront
 
 
@@ -60,9 +62,9 @@ class ScriptedConnection:
 class AdminPricingValidationTests(unittest.TestCase):
     def test_fixed_normalizes_only_relevant_fields_and_trims_unit(self):
         result = admin_app.normalize_product_pricing(
-            "fixed", "not-used", "12.50", "  за штуку  ", "not-used", "7"
+            "fixed", "not-used", "12.50", "  за штуку  ", "250", "7"
         )
-        self.assertEqual(result, ("fixed", 0.0, 12.5, "за штуку", None, 7))
+        self.assertEqual(result, ("fixed", 0.0, 12.5, "за штуку", 250, 7))
 
     def test_fixed_rejects_invalid_price_unit_and_stock(self):
         for value in ("", "0", "-1", "nan", "inf", "-inf"):
@@ -79,6 +81,59 @@ class AdminPricingValidationTests(unittest.TestCase):
             admin_app.normalize_product_pricing(
                 "fixed", "", "10", "за штуку", "", "-1"
             )
+
+    def test_fixed_can_persist_a_known_package_weight(self):
+        # Checkpoint: PRODUCT SALE-UNIT CONFIGURATION V1, focused test (1).
+        result = admin_app.normalize_product_pricing(
+            "fixed", "", "12.50", "банка", "250", "40"
+        )
+        self.assertEqual(result, ("fixed", 0.0, 12.5, "банка", 250, 40))
+
+    def test_fixed_still_allows_null_unit_weight_grams(self):
+        # Checkpoint: PRODUCT SALE-UNIT CONFIGURATION V1, focused test (2).
+        result = admin_app.normalize_product_pricing(
+            "fixed", "", "12.50", "банка", "", "40"
+        )
+        self.assertEqual(result, ("fixed", 0.0, 12.5, "банка", None, 40))
+
+    def test_fixed_rejects_invalid_package_weight(self):
+        # Checkpoint: PRODUCT SALE-UNIT CONFIGURATION V1, focused test (3).
+        for value in ("0", "-1", "nan", "inf", "-inf", "abc"):
+            with self.subTest(unit_weight_grams=value):
+                with self.assertRaises(ValueError):
+                    admin_app.normalize_product_pricing(
+                        "fixed", "", "12.50", "банка", value, "40"
+                    )
+
+    def test_fixed_price_math_is_unaffected_by_unit_weight_grams(self):
+        # Checkpoint: PRODUCT SALE-UNIT CONFIGURATION V1, focused test (4).
+        product_without_weight = {
+            "pricing_mode": "fixed", "fixed_price": 12.5, "price_per_kg": None,
+        }
+        product_with_weight = {
+            "pricing_mode": "fixed", "fixed_price": 12.5, "price_per_kg": None,
+            "unit_weight_grams": 250,
+        }
+        price_a, mode_a, snapshot_a = order_creation.price_single_line(
+            product_without_weight, None, None, None
+        )
+        price_b, mode_b, snapshot_b = order_creation.price_single_line(
+            product_with_weight, None, None, None
+        )
+        self.assertEqual((price_a, mode_a, snapshot_a), (12.5, "fixed", None))
+        self.assertEqual((price_b, mode_b, snapshot_b), (12.5, "fixed", None))
+
+    def test_fixed_unit_weight_grams_does_not_affect_stock_quantity(self):
+        # Checkpoint: PRODUCT SALE-UNIT CONFIGURATION V1, focused test (5).
+        with_weight = admin_app.normalize_product_pricing(
+            "fixed", "", "12.50", "банка", "250", "7"
+        )
+        without_weight = admin_app.normalize_product_pricing(
+            "fixed", "", "12.50", "банка", "", "7"
+        )
+        self.assertEqual(with_weight[5], 7)
+        self.assertEqual(without_weight[5], 7)
+        self.assertEqual(with_weight[5], without_weight[5])
 
     def test_per_kg_normalizes_fields_and_validates_numbers(self):
         result = admin_app.normalize_product_pricing(
@@ -309,6 +364,75 @@ class AdminPricingValidationTests(unittest.TestCase):
         self.assertIn("ID 1", page)
         self.assertIn("Фото скоро", page)
         self.assertNotIn("Не удалось выполнить операцию", page)
+
+    def test_new_product_form_renders_fields_by_pricing_mode(self):
+        # Checkpoint: PRODUCT SALE-UNIT CONFIGURATION V1, focused test (8).
+        page = asyncio.run(admin_app.new_product_form())
+        self.assertIn("Как продаётся?", page)
+        self.assertIn('data-mode-panel="per_kg"', page)
+        self.assertIn('data-mode-panel="fixed"', page)
+        self.assertIn('data-mode-panel="options"', page)
+
+        per_kg_panel = re.search(
+            r'<div class="compact-field-grid" data-mode-panel="per_kg"[^>]*>', page
+        )
+        fixed_panel = re.search(
+            r'<div class="compact-field-grid" data-mode-panel="fixed"[^>]*>', page
+        )
+        options_panel = re.search(r'<div data-mode-panel="options"[^>]*>', page)
+        self.assertIsNotNone(per_kg_panel)
+        self.assertIsNotNone(fixed_panel)
+        self.assertIsNotNone(options_panel)
+        # per_kg is the default mode: its panel is visible, the others hidden.
+        self.assertNotIn("hidden", per_kg_panel.group(0))
+        self.assertIn("hidden", fixed_panel.group(0))
+        self.assertIn("hidden", options_panel.group(0))
+        # No raw technical vocabulary shown to the admin.
+        self.assertNotIn("pricing_mode</", page)
+        self.assertNotIn(">fixed_price<", page)
+
+    def test_edit_product_form_preserves_fixed_unit_weight_and_known_toggle(self):
+        # Checkpoint: PRODUCT SALE-UNIT CONFIGURATION V1, focused test (9).
+        cursor = ScriptedCursor(
+            fetchone_values=[(
+                1, "Икра красная", 0, "", None, 0, True, 0, False, 0,
+                False, "", 0, "fixed", 12.5, "банка", 250, 40,
+            )],
+            fetchall_values=[[], []],
+        )
+        connection = ScriptedConnection(cursor)
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
+            page = asyncio.run(admin_app.edit_product_form(1))
+
+        self.assertIn('value="Икра красная"', page)
+        self.assertIn('value="12.5"', page)
+        self.assertIn('value="банка"', page)
+        self.assertIn('value="250"', page)
+        self.assertIn('id="fixedWeightKnownToggle" checked', page)
+        fixed_panel = re.search(
+            r'<div class="compact-field-grid" data-mode-panel="fixed"[^>]*>', page
+        )
+        self.assertIsNotNone(fixed_panel)
+        self.assertNotIn("hidden", fixed_panel.group(0))
+
+    def test_edit_product_form_options_mode_hides_pricing_fields(self):
+        cursor = ScriptedCursor(
+            fetchone_values=[(
+                1, "Options product", 0, "", None, 0, True, 0, False, 0,
+                False, "", 0, "options", None, None, None, None,
+            )],
+            fetchall_values=[[], []],
+        )
+        connection = ScriptedConnection(cursor)
+        with patch.object(admin_app.psycopg2, "connect", return_value=connection):
+            page = asyncio.run(admin_app.edit_product_form(1))
+
+        options_panel = re.search(r'<div data-mode-panel="options"[^>]*>', page)
+        self.assertIsNotNone(options_panel)
+        self.assertNotIn("hidden", options_panel.group(0))
+        weight_wrap = re.search(r'<div id="weightFieldWrap"[^>]*>', page)
+        self.assertIsNotNone(weight_wrap)
+        self.assertIn("hidden", weight_wrap.group(0))
 
 
 class StorefrontPricingTests(unittest.TestCase):

@@ -72,7 +72,11 @@ class AdminResponsiveTests(unittest.TestCase):
             page = asyncio.run(admin_app.root())
 
         self.assertTrue(connection.closed)
-        self.assertIn("Аналитика продаж", page)
+        # Phase 1 dashboard redesign: analytics moved into a secondary,
+        # collapsed <details> disclosure instead of an always-open
+        # "Аналитика продаж" section -- same underlying data, de-emphasized
+        # presentation per the operational-first dashboard direction.
+        self.assertIn('<details class="disclosure">', page)
         self.assertIn("Слабые товары", page)
         self.assertIn(long_name, page)
         self.assertIn("analytics-desktop-table", page)
